@@ -22,4 +22,8 @@
  */
 -->
 <configuration>
+  <property>
+    <name>hbase.rootdir</name>
+    <value>file:///home/shmuma/hbase/data/</value>
+  </property>
 </configuration>
