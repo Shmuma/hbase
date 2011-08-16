@@ -89,6 +89,7 @@ public class Scan implements Writable {
    */
   private int caching = -1;
   private boolean cacheBlocks = true;
+  private int cachingBytes = -1;
   private Filter filter = null;
   private TimeRange tr = new TimeRange();
   private Map<byte [], NavigableSet<byte []>> familyMap =
@@ -137,6 +138,7 @@ public class Scan implements Writable {
     maxVersions = scan.getMaxVersions();
     batch = scan.getBatch();
     caching = scan.getCaching();
+    cachingBytes = scan.getCachingBytes();
     cacheBlocks = scan.getCacheBlocks();
     filter = scan.getFilter(); // clone?
     TimeRange ctr = scan.getTimeRange();
@@ -306,6 +308,13 @@ public class Scan implements Writable {
   }
 
   /**
+   * specify limit of caching data
+   */
+  public void setCachingBytes(int cachingBytes) {
+    this.cachingBytes = cachingBytes;
+  }
+
+  /**
    * Apply the specified server-side filter when performing the Scan.
    * @param filter filter to run on the server
    * @return this
@@ -396,6 +405,13 @@ public class Scan implements Writable {
   }
 
   /**
+   * @return max caching size
+   */
+  public int getCachingBytes() {
+    return this.cachingBytes;
+  }
+
+  /**
    * @return TimeRange
    */
   public TimeRange getTimeRange() {
@@ -455,6 +471,8 @@ public class Scan implements Writable {
     sb.append(this.batch);
     sb.append(", caching=");
     sb.append(this.caching);
+    sb.append(", cachingBytes=");
+    sb.append(this.cachingBytes);
     sb.append(", cacheBlocks=");
     sb.append(this.cacheBlocks);
     sb.append(", timeRange=");
@@ -519,6 +537,7 @@ public class Scan implements Writable {
     this.maxVersions = in.readInt();
     this.batch = in.readInt();
     this.caching = in.readInt();
+    this.cachingBytes = in.readInt();
     this.cacheBlocks = in.readBoolean();
     if(in.readBoolean()) {
       this.filter = (Filter)createForName(Bytes.toString(Bytes.readByteArray(in)));
@@ -549,6 +568,7 @@ public class Scan implements Writable {
     out.writeInt(this.maxVersions);
     out.writeInt(this.batch);
     out.writeInt(this.caching);
+    out.writeInt(this.cachingBytes);
     out.writeBoolean(this.cacheBlocks);
     if(this.filter == null) {
       out.writeBoolean(false);
