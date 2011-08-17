@@ -1128,6 +1128,7 @@ public class HRegion implements HeapSize { // , Writable{
   }
 
   protected InternalScanner instantiateInternalScanner(Scan scan, List<KeyValueScanner> additionalScanners) throws IOException {
+    LOG.warn("new RegionScanner, caching = " + Long.toString (scan.getCaching ()) + ", cachingBytes = " + Long.toString (scan.getCachingBytes ()));
     return new RegionScanner(scan, additionalScanners);
   }
 
