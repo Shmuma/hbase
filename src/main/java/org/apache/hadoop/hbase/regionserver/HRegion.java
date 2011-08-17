@@ -2294,6 +2294,7 @@ public class HRegion implements HeapSize { // , Writable{
 
     public synchronized boolean next(List<KeyValue> outResults, int limit)
         throws IOException {
+        LogFactory.getLog(HRegion.class).warn("RegionScanner::next (" + Long.toString (limit) + ")");
       if (this.filterClosed) {
         throw new UnknownScannerException("Scanner was closed (timed out?) " +
             "after we renewed it. Could be caused by a very slow scanner " +
