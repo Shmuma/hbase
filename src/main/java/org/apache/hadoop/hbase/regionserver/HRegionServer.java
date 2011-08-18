@@ -1767,6 +1767,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
       throw new IOException("Invalid arguments to openScanner", npe);
     }
     requestCount.incrementAndGet();
+    LOG.warn("HRegionServer::openScanner: region = " + regionName + ", scan.caching = " + Long.toString (scan.getCaching ()) + ", scan.batch = " + Long.toString (scan.getBatch ()));
     try {
       HRegion r = getRegion(regionName);
       return addScanner(r.getScanner(scan));
