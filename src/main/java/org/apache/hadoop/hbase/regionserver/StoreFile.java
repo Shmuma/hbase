@@ -109,7 +109,7 @@ public class StoreFile {
   /** Bloom filter Type in FileInfo */
   static final byte[] BLOOM_FILTER_TYPE_KEY = Bytes.toBytes("BLOOM_FILTER_TYPE");
   /** Key for Timerange information in metadata*/
-  static final byte[] TIMERANGE_KEY = Bytes.toBytes("TIMERANGE");
+  public static final byte[] TIMERANGE_KEY = Bytes.toBytes("TIMERANGE");
 
   /** Meta data block name for bloom filter meta-info (ie: bloom params/specs) */
   static final String BLOOM_FILTER_META_KEY = "BLOOM_FILTER_META";
@@ -951,7 +951,8 @@ public class StoreFile {
     }
 
     private boolean passesBloomFilter(Scan scan, final SortedSet<byte[]> columns) {
-      if (this.bloomFilter == null || !scan.isGetScan()) {
+      BloomFilter bm = this.bloomFilter;
+      if (bm == null || !scan.isGetScan()) {
         return true;
       }
       byte[] row = scan.getStartRow();
@@ -979,11 +980,11 @@ public class StoreFile {
             // columns, a file might be skipped if using row+col Bloom filter.
             // In order to ensure this file is included an additional check is
             // required looking only for a row bloom.
-            return this.bloomFilter.contains(key, bloom) ||
-                this.bloomFilter.contains(row, bloom);
+            return bm.contains(key, bloom) ||
+                bm.contains(row, bloom);
           }
           else {
-            return this.bloomFilter.contains(key, bloom);
+            return bm.contains(key, bloom);
           }
         }
       } catch (IOException e) {

@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.TreeSet;
@@ -737,8 +738,15 @@ public class HConnectionManager {
             throw new TableNotFoundException(
               "Table '" + Bytes.toString(tableName) + "' was not found.");
           }
+          if (regionInfo.isSplit()) {
+            throw new RegionOfflineException("the only available region for" +
+              " the required row is a split parent," +
+              " the daughters should be online soon: " +
+              regionInfo.getRegionNameAsString());
+          }
           if (regionInfo.isOffline()) {
-            throw new RegionOfflineException("region offline: " +
+            throw new RegionOfflineException("the region is offline, could" +
+              " be caused by a disable table call: " +
               regionInfo.getRegionNameAsString());
           }
 
@@ -833,8 +841,12 @@ public class HConnectionManager {
       // we need to examine the cached location to verify that it is
       // a match by end key as well.
       if (!matchingRegions.isEmpty()) {
-        HRegionLocation possibleRegion =
-          matchingRegions.get(matchingRegions.lastKey());
+        HRegionLocation possibleRegion = null;
+        try {
+          possibleRegion = matchingRegions.get(matchingRegions.lastKey());          
+        } catch (NoSuchElementException nsee) {
+          LOG.warn("checkReferences() might have removed the key", nsee);
+        }
 
         // there is a possibility that the reference was garbage collected
         // in the instant since we checked isEmpty().

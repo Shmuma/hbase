@@ -62,6 +62,9 @@ public class MemStore implements HeapSize {
     "hbase.hregion.memstore.mslab.enabled";
   private static final boolean USEMSLAB_DEFAULT = false;
 
+  static final String RESEEKMAX_KEY =
+    "hbase.hregion.memstore.reseek.maxkeys";
+  private static final int RESEEKMAX_DEFAULT = 32;
 
   private Configuration conf;
 
@@ -93,6 +96,11 @@ public class MemStore implements HeapSize {
   
   MemStoreLAB allocator;
 
+  // if a reseek has to scan over more than these number of keys, then
+  // it morphs into a seek. A seek does a tree map-search while 
+  // reseek does a linear scan.
+  int reseekNumKeys;
+
   /**
    * Default constructor. Used for tests.
    */
@@ -121,6 +129,7 @@ public class MemStore implements HeapSize {
     } else {
       this.allocator = null;
     }
+    this.reseekNumKeys = conf.getInt(RESEEKMAX_KEY, RESEEKMAX_DEFAULT);
   }
 
   void dump() {
@@ -449,25 +458,22 @@ public class MemStore implements HeapSize {
         KeyValue kv = it.next();
 
         // if this isnt the row we are interested in, then bail:
-        if (!firstKv.matchingColumn(family,qualifier) || !firstKv.matchingRow(kv) ) {
+        if (!kv.matchingColumn(family,qualifier) || !kv.matchingRow(firstKv) ) {
           break; // rows dont match, bail.
         }
 
         // if the qualifier matches and it's a put, just RM it out of the kvset.
-        if (firstKv.matchingQualifier(kv)) {
-          // to be extra safe we only remove Puts that have a memstoreTS==0
-          if (kv.getType() == KeyValue.Type.Put.getCode()) {
-            now = Math.max(now, kv.getTimestamp());
-          }
+        if (kv.getType() == KeyValue.Type.Put.getCode() &&
+            kv.getTimestamp() > now && firstKv.matchingQualifier(kv)) {
+          now = kv.getTimestamp();
         }
       }
 
       // create or update (upsert) a new KeyValue with
       // 'now' and a 0 memstoreTS == immediately visible
-      return upsert(Arrays.asList(new KeyValue [] {
-          new KeyValue(row, family, qualifier, now,
-              Bytes.toBytes(newValue))
-      }));
+      return upsert(Arrays.asList(
+          new KeyValue(row, family, qualifier, now, Bytes.toBytes(newValue)))
+      );
     } finally {
       this.lock.readLock().unlock();
     }
@@ -643,6 +649,9 @@ public class MemStore implements HeapSize {
     Iterator<KeyValue> kvsetIt;
     Iterator<KeyValue> snapshotIt;
 
+    // number of iterations in this reseek operation
+    int numIterReseek;
+    
     /*
     Some notes...
 
@@ -678,6 +687,10 @@ public class MemStore implements HeapSize {
           // keep it.
           ret = v;
         }
+        numIterReseek--;
+        if (numIterReseek == 0) {
+          break;
+        }
       }
       return ret;
     }
@@ -687,6 +700,7 @@ public class MemStore implements HeapSize {
         close();
         return false;
       }
+      numIterReseek = 0;
 
       // kvset and snapshot will never be empty.
       // if tailSet cant find anything, SS is empty (not null).
@@ -715,14 +729,27 @@ public class MemStore implements HeapSize {
 
     @Override
     public boolean reseek(KeyValue key) {
+      numIterReseek = reseekNumKeys;
       while (kvsetNextRow != null &&
           comparator.compare(kvsetNextRow, key) < 0) {
         kvsetNextRow = getNext(kvsetIt);
+        // if we scanned enough entries but still not able to find the
+        // kv we are looking for, better cut our costs and do a tree
+        // scan using seek.
+        if (kvsetNextRow == null && numIterReseek == 0) {
+          return seek(key);
+        }
       }
 
       while (snapshotNextRow != null &&
           comparator.compare(snapshotNextRow, key) < 0) {
         snapshotNextRow = getNext(snapshotIt);
+        // if we scanned enough entries but still not able to find the
+        // kv we are looking for, better cut our costs and do a tree
+        // scan using seek.
+        if (snapshotNextRow == null && numIterReseek == 0) {
+          return seek(key);
+        }
       }
       return (kvsetNextRow != null || snapshotNextRow != null);
     }
@@ -793,7 +820,7 @@ public class MemStore implements HeapSize {
   }
 
   public final static long FIXED_OVERHEAD = ClassSize.align(
-      ClassSize.OBJECT + (11 * ClassSize.REFERENCE));
+      ClassSize.OBJECT + (12 * ClassSize.REFERENCE));
 
   public final static long DEEP_OVERHEAD = ClassSize.align(FIXED_OVERHEAD +
       ClassSize.REENTRANT_LOCK + ClassSize.ATOMIC_LONG +

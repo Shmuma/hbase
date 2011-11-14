@@ -125,6 +125,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.InfoServer;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Sleeper;
+import org.apache.hadoop.hbase.util.Strings;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.zookeeper.ClusterStatusTracker;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
@@ -134,6 +135,7 @@ import org.apache.hadoop.io.MapWritable;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.net.DNS;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.zookeeper.KeeperException;
 
 import com.google.common.base.Function;
@@ -320,9 +322,9 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
     this.stopped = false;
 
     // Server to handle client requests
-    String machineName = DNS.getDefaultHost(conf.get(
-        "hbase.regionserver.dns.interface", "default"), conf.get(
-        "hbase.regionserver.dns.nameserver", "default"));
+    String machineName = Strings.domainNamePointerToHostName(
+        DNS.getDefaultHost(conf.get("hbase.regionserver.dns.interface", "default")
+            , conf.get("hbase.regionserver.dns.nameserver", "default")));
     String addressStr = machineName + ":" +
       conf.get(HConstants.REGIONSERVER_PORT,
         Integer.toString(HConstants.DEFAULT_REGIONSERVER_PORT));
@@ -736,6 +738,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
           // This will be caught and handled as a fatal error in run()
           throw ioe;
         }
+        LOG.warn("RemoteException connecting to master", ioe);
         // Couldn't connect to the master, get location from zk and reconnect
         // Method blocks until new master is found or we are stopped
         getMaster();
@@ -1031,12 +1034,23 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
    */
   private static class MajorCompactionChecker extends Chore {
     private final HRegionServer instance;
+    private int majorCompactPriority;
+    private final static int DEFAULT_PRIORITY = Integer.MAX_VALUE;
+
 
     MajorCompactionChecker(final HRegionServer h, final int sleepTime,
         final Stoppable stopper) {
       super("MajorCompactionChecker", sleepTime, h);
       this.instance = h;
       LOG.info("Runs every " + sleepTime + "ms");
+
+      /*
+       * MajorCompactPriority is configurable.
+       * If not set, the compaction will use default priority.
+       */
+      majorCompactPriority = this.instance.conf.getInt(
+        "hbase.regionserver.compactionChecker.majorCompactPriority",
+        DEFAULT_PRIORITY);
     }
 
     @Override
@@ -1045,8 +1059,15 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
         try {
           if (r != null && r.isMajorCompaction()) {
             // Queue a compaction. Will recognize if major is needed.
-            this.instance.compactSplitThread.requestCompaction(r, getName()
-              + " requests major compaction");
+        	if(majorCompactPriority == DEFAULT_PRIORITY || 
+        	    majorCompactPriority > r.getCompactPriority()){
+              this.instance.compactSplitThread.requestCompaction(r, getName()
+                + " requests major compaction use default priority");
+        	} else {
+        	  this.instance.compactSplitThread.requestCompaction(r, getName()
+                + " requests major compaction use configured priority",
+                this.majorCompactPriority);
+        	}
           }
         } catch (IOException e) {
           LOG.warn("Failed major compaction check on " + r, e);
@@ -1259,7 +1280,9 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
           false);
       while (true) {
         try {
-          this.infoServer = new InfoServer("regionserver", addr, port, false);
+          this.infoServer = new InfoServer(REGIONSERVER, addr, port, false);
+          this.infoServer.addServlet("status", "/rs-status", RSStatusServlet.class);
+          this.infoServer.addServlet("dump", "/dump", RSDumpServlet.class);
           this.infoServer.setAttribute("regionserver", this);
           this.infoServer.start();
           break;
@@ -1375,15 +1398,27 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
    *          the exception that caused the abort, or null
    */
   public void abort(String reason, Throwable cause) {
+    String msg = "ABORTING region server " + this + ": " + reason;
     if (cause != null) {
-      LOG.fatal("ABORTING region server " + this + ": " + reason, cause);
+      LOG.fatal(msg, cause);
     } else {
-      LOG.fatal("ABORTING region server " + this + ": " + reason);
+      LOG.fatal(msg);
     }
     this.abortRequested = true;
     this.reservedSpace.clear();
     if (this.metrics != null) {
       LOG.info("Dump of metrics: " + this.metrics);
+    }
+    // Do our best to report our abort to the master, but this may not work
+    try {
+      if (cause != null) {
+        msg += "\nCause:\n" + StringUtils.stringifyException(cause);
+      }
+      if (hbaseMaster != null) {
+        hbaseMaster.reportRSFatalError(serverInfo, msg);
+      }
+    } catch (Throwable t) {
+      LOG.warn("Unable to report fatal error to master", t);
     }
     stop(reason);
   }
@@ -1499,8 +1534,15 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
 
     MapWritable result = null;
     long lastMsg = 0;
+    
+    //If some exception occured while reporting to Master, we should 
+    //recheck the master address to avoid the address has been updated
+    boolean recheckMasterAddr = false;
     while (!stopped) {
       try {
+        if (recheckMasterAddr) {
+          masterAddress = getMaster();
+        }  
         this.requestCount.set(0);
         lastMsg = System.currentTimeMillis();
         ZKUtil.setAddressAndWatch(zooKeeper,
@@ -1519,11 +1561,14 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
           // Re-throw IOE will cause RS to abort
           throw ioe;
         } else {
+          recheckMasterAddr = true;
           LOG.warn("remote error telling master we are up", e);
         }
       } catch (IOException e) {
+        recheckMasterAddr = true;
         LOG.warn("error telling master we are up", e);
       } catch (KeeperException e) {
+        recheckMasterAddr = true;
         LOG.warn("error putting up ephemeral node in zookeeper", e);
       }
       sleeper.sleep(lastMsg);
@@ -1600,7 +1645,8 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   @Override
   @QosPriority(priority=HIGH_QOS)
   public HRegionInfo getRegionInfo(final byte[] regionName)
-  throws NotServingRegionException {
+  throws NotServingRegionException, IOException {
+    checkOpen();
     requestCount.incrementAndGet();
     return getRegion(regionName).getRegionInfo();
   }
@@ -1793,26 +1839,27 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   }
 
   public Result[] next(final long scannerId, int nbRows) throws IOException {
+    String scannerName = String.valueOf(scannerId);
+    InternalScanner s = this.scanners.get(scannerName);
+    if (s == null) throw new UnknownScannerException("Name: " + scannerName);
     try {
-      String scannerName = String.valueOf(scannerId);
-      InternalScanner s = this.scanners.get(scannerName);
-      if (s == null) {
-        throw new UnknownScannerException("Name: " + scannerName);
-      }
+      checkOpen();
+    } catch (IOException e) {
+      // If checkOpen failed, server not running or filesystem gone,
+      // cancel this lease; filesystem is gone or we're closing or something.
       try {
-        checkOpen();
-      } catch (IOException e) {
-        // If checkOpen failed, server not running or filesystem gone,
-        // cancel this lease; filesystem is gone or we're closing or something.
-        try {
-          this.leases.cancelLease(scannerName);
-        } catch (LeaseException le) {
-          LOG.info("Server shutting down and client tried to access missing scanner " +
-            scannerName);
-        }
-        throw e;
+        this.leases.cancelLease(scannerName);
+      } catch (LeaseException le) {
+        LOG.info("Server shutting down and client tried to access missing scanner " +
+          scannerName);
       }
-      this.leases.renewLease(scannerName);
+      throw e;
+    }
+    Leases.Lease lease = null;
+    try {
+      // Remove lease while its being processed in server; protects against case
+      // where processing of request takes > lease expiration time.
+      lease = this.leases.removeLease(scannerName);
       List<Result> results = new ArrayList<Result>(nbRows);
       long currentScanResultSize = 0;
       List<KeyValue> values = new ArrayList<KeyValue>();
@@ -1842,10 +1889,15 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
           : results.toArray(new Result[0]);
     } catch (Throwable t) {
       if (t instanceof NotServingRegionException) {
-        String scannerName = String.valueOf(scannerId);
         this.scanners.remove(scannerName);
       }
       throw convertThrowableToIOE(cleanup(t));
+    } finally {
+      // We're done. On way out readd the above removed lease.  Adding resets
+      // expiration time on lease.
+      if (this.scanners.containsKey(scannerName)) {
+        if (lease != null) this.leases.addLease(lease);
+      }
     }
   }
 
@@ -1910,9 +1962,9 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
 
   public int delete(final byte[] regionName, final List<Delete> deletes)
       throws IOException {
+    checkOpen();
     // Count of Deletes processed.
     int i = 0;
-    checkOpen();
     HRegion region = null;
     try {
       boolean writeToWAL = true;
@@ -2033,6 +2085,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   @Override
   public void bulkLoadHFile(String hfilePath, byte[] regionName,
       byte[] familyName) throws IOException {
+    checkOpen();
     HRegion region = getRegion(regionName);
     region.bulkLoadHFile(hfilePath, familyName);
   }
@@ -2148,6 +2201,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   @QosPriority(priority=HIGH_QOS)
   public void flushRegion(HRegionInfo regionInfo)
       throws NotServingRegionException, IOException {
+    checkOpen();
     LOG.info("Flushing " + regionInfo.getRegionNameAsString());
     HRegion region = getRegion(regionInfo.getRegionName());
     region.flushcache();
@@ -2163,6 +2217,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   @Override
   public void splitRegion(HRegionInfo regionInfo, byte[] splitPoint)
       throws NotServingRegionException, IOException {
+    checkOpen();
     HRegion region = getRegion(regionInfo.getRegionName());
     region.flushcache();
     region.forceSplit(splitPoint);
@@ -2177,6 +2232,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   @QosPriority(priority=HIGH_QOS)
   public void compactRegion(HRegionInfo regionInfo, boolean major)
       throws NotServingRegionException, IOException {
+    checkOpen();
     HRegion region = getRegion(regionInfo.getRegionName());
     compactSplitThread.requestCompaction(region, major, "User-triggered "
         + (major ? "major " : "") + "compaction",
@@ -2479,13 +2535,14 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   @Override
   @QosPriority(priority=HIGH_QOS)
   public HServerInfo getHServerInfo() throws IOException {
+    checkOpen();
     return serverInfo;
   }
 
   @SuppressWarnings("unchecked")
   @Override
   public MultiResponse multi(MultiAction multi) throws IOException {
-
+    checkOpen();
     MultiResponse response = new MultiResponse();
 
     for (Map.Entry<byte[], List<Action>> e : multi.actions.entrySet()) {
@@ -2580,6 +2637,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
    */
   @Override
   public MultiPutResponse multiPut(MultiPut puts) throws IOException {
+    checkOpen();
     MultiPutResponse resp = new MultiPutResponse();
 
     // do each region as it's own.
@@ -2623,6 +2681,10 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
 
   public Set<byte[]> getRegionsInTransitionInRS() {
     return this.regionsInTransitionInRS;
+  }
+  
+  public ExecutorService getExecutorService() {
+    return service;
   }
 
   //
@@ -2681,6 +2743,7 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
   @Override
   public void replicateLogEntries(final HLog.Entry[] entries)
   throws IOException {
+    checkOpen();
     if (this.replicationHandler == null) return;
     this.replicationHandler.replicateLogEntries(entries);
   }

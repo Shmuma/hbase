@@ -1,0 +1,145 @@
+From e44ed1c9998591f98e61385cfeaa154cbb930233 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Sun, 28 Aug 2011 21:52:48 -0700
+Subject: [PATCH 31/50] HBASE-4276. INFO level logging for transitions of meta regions
+
+Reason: Better debuggability of HMaster state
+Author: Todd Lipcon
+Ref: CDH-3540
+---
+ .../hadoop/hbase/master/AssignmentManager.java     |   30 ++++++++++++-------
+ .../hbase/master/handler/OpenedRegionHandler.java  |    9 ++++-
+ 2 files changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index 808e4cd..abd4959 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -279,7 +279,7 @@ public class AssignmentManager extends ZooKeeperListener {
+     boolean intransistion =
+       processRegionInTransition(hri.getEncodedName(), hri, null);
+     if (!intransistion) return intransistion;
+-    LOG.debug("Waiting on " + HRegionInfo.prettyPrint(hri.getEncodedName()));
++    debugLog(hri, "Waiting on " + HRegionInfo.prettyPrint(hri.getEncodedName()));
+     synchronized(this.regionsInTransition) {
+       while (!this.master.isStopped() &&
+           this.regionsInTransition.containsKey(hri.getEncodedName())) {
+@@ -404,7 +404,7 @@ public class AssignmentManager extends ZooKeeperListener {
+   throws KeeperException {
+     // If was on dead server, its closed now.  Force to OFFLINE and then
+     // handle it like a close; this will get it reassigned if appropriate
+-    LOG.debug("RIT " + hri.getEncodedName() + " in state=" +
++    debugLog(hri, "RIT " + hri.getEncodedName() + " in state=" +
+       oldData.getEventType() + " was on deadserver; forcing offline");
+     ZKAssign.createOrForceNodeOffline(this.watcher, hri,
+       this.master.getServerName());
+@@ -1044,7 +1044,7 @@ public class AssignmentManager extends ZooKeeperListener {
+       RegionPlan plan = getRegionPlan(state, forceNewPlan);
+       if (plan == null) return; // Should get reassigned later when RIT times out.
+       try {
+-        LOG.debug("Assigning region " + state.getRegion().getRegionNameAsString() +
++        debugLog(state.getRegion(), "Assigning region " + state.getRegion().getRegionNameAsString() +
+           " to " + plan.getDestination().getServerName());
+         // Transition RegionState to PENDING_OPEN
+         state.update(RegionState.State.PENDING_OPEN, System.currentTimeMillis(),
+@@ -1072,6 +1072,14 @@ public class AssignmentManager extends ZooKeeperListener {
+     }
+   }
+ 
++  private void debugLog(HRegionInfo region, String string) {
++    if (region.isMetaTable() || region.isRootRegion()) {
++      LOG.info(string);
++    } else {
++      LOG.debug(string);
++    }
++  }
++
+   /**
+    * Set region as OFFLINED up in zookeeper
+    * @param state
+@@ -1167,7 +1175,7 @@ public class AssignmentManager extends ZooKeeperListener {
+       }
+     }
+     if (newPlan) {
+-      LOG.debug("No previous transition plan was found (or we are ignoring " +
++      debugLog(state.getRegion(), "No previous transition plan was found (or we are ignoring " +
+         "an existing plan) for " + state.getRegion().getRegionNameAsString() +
+         " so generated a random one; " + randomPlan + "; " +
+         serverManager.countOfRegionServers() +
+@@ -1175,7 +1183,7 @@ public class AssignmentManager extends ZooKeeperListener {
+         ", exclude=" + serverToExclude + ") available servers");
+         return randomPlan;
+       }
+-      LOG.debug("Using pre-existing plan for region " +
++      debugLog(state.getRegion(), "Using pre-existing plan for region " +
+         state.getRegion().getRegionNameAsString() + "; plan=" + existingPlan);
+       return existingPlan;
+   }
+@@ -1204,12 +1212,12 @@ public class AssignmentManager extends ZooKeeperListener {
+    * @param force if region should be closed even if already closing
+    */
+   public void unassign(HRegionInfo region, boolean force) {
+-    LOG.debug("Starting unassignment of region " +
++    debugLog(region, "Starting unassignment of region " +
+       region.getRegionNameAsString() + " (offlining)");
+     synchronized (this.regions) {
+       // Check if this region is currently assigned
+       if (!regions.containsKey(region)) {
+-        LOG.debug("Attempted to unassign region " +
++        debugLog(region, "Attempted to unassign region " +
+           region.getRegionNameAsString() + " but it is not " +
+           "currently assigned anywhere");
+         return;
+@@ -1224,12 +1232,12 @@ public class AssignmentManager extends ZooKeeperListener {
+         state = new RegionState(region, RegionState.State.PENDING_CLOSE);
+         regionsInTransition.put(encodedName, state);
+       } else if (force && state.isPendingClose()) {
+-        LOG.debug("Attempting to unassign region " +
++        debugLog(region, "Attempting to unassign region " +
+             region.getRegionNameAsString() + " which is already pending close "
+             + "but forcing an additional close");
+         state.update(RegionState.State.PENDING_CLOSE);
+       } else {
+-        LOG.debug("Attempting to unassign region " +
++        debugLog(region, "Attempting to unassign region " +
+           region.getRegionNameAsString() + " but it is " +
+           "already in transition (" + state.getState() + ")");
+         return;
+@@ -1242,12 +1250,12 @@ public class AssignmentManager extends ZooKeeperListener {
+     }
+     try {
+       if (serverManager.sendRegionClose(server, state.getRegion())) {
+-        LOG.debug("Sent CLOSE to " + server + " for region " +
++        debugLog(region, "Sent CLOSE to " + server + " for region " +
+           region.getRegionNameAsString());
+         return;
+       }
+       // This never happens. Currently regionserver close always return true.
+-      LOG.debug("Server " + server + " region CLOSE RPC returned false for " +
++      LOG.warn("Server " + server + " region CLOSE RPC returned false for " +
+         region.getEncodedName());
+     } catch (NotServingRegionException nsre) {
+       LOG.info("Server " + server + " returned " + nsre + " for " +
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/handler/OpenedRegionHandler.java b/src/main/java/org/apache/hadoop/hbase/master/handler/OpenedRegionHandler.java
+index c478ab7..0996150 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/handler/OpenedRegionHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/handler/OpenedRegionHandler.java
+@@ -105,8 +105,13 @@ public class OpenedRegionHandler extends EventHandler implements TotesHRegionInf
+           + "this table is disabled, triggering close of region");
+       assignmentManager.unassign(regionInfo);
+     } else {
+-      LOG.debug("Opened region " + regionInfo.getRegionNameAsString() +
+-          " on " + serverInfo.getServerName());
++      String msg = "Opened region " + regionInfo.getRegionNameAsString() +
++          " on " + serverInfo.getServerName();
++      if (regionInfo.isMetaTable() || regionInfo.isRootRegion()) {
++        LOG.info(msg);
++      } else {
++        LOG.debug(msg);
++      }
+     }
+   }
+ }
+-- 
+1.7.0.4
+

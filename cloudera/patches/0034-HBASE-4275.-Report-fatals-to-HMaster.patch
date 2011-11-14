@@ -1,0 +1,335 @@
+From 29281b227c41b3ea218539cef09e0888904a6ec2 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Mon, 29 Aug 2011 18:13:13 -0700
+Subject: [PATCH 34/50] HBASE-4275. Report fatals to HMaster
+
+Reason: Better debuggability when region servers crash
+Author: Todd Lipcon
+Ref: CDH-3540
+---
+ .../hadoop/hbase/ipc/HMasterRegionInterface.java   |    8 ++
+ .../org/apache/hadoop/hbase/master/HMaster.java    |   21 ++++
+ .../monitoring/MemoryBoundedLogMessageBuffer.java  |  114 ++++++++++++++++++++
+ .../hadoop/hbase/regionserver/HRegionServer.java   |   17 +++-
+ .../TestMemoryBoundedLogMessageBuffer.java         |   67 ++++++++++++
+ 5 files changed, 225 insertions(+), 2 deletions(-)
+ create mode 100644 src/main/java/org/apache/hadoop/hbase/monitoring/MemoryBoundedLogMessageBuffer.java
+ create mode 100644 src/test/java/org/apache/hadoop/hbase/monitoring/TestMemoryBoundedLogMessageBuffer.java
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/ipc/HMasterRegionInterface.java b/src/main/java/org/apache/hadoop/hbase/ipc/HMasterRegionInterface.java
+index 660c475..752ee44 100644
+--- a/src/main/java/org/apache/hadoop/hbase/ipc/HMasterRegionInterface.java
++++ b/src/main/java/org/apache/hadoop/hbase/ipc/HMasterRegionInterface.java
+@@ -63,4 +63,12 @@ public interface HMasterRegionInterface extends HBaseRPCProtocolVersion {
+   public HMsg[] regionServerReport(HServerInfo info, HMsg msgs[],
+     HRegionInfo mostLoadedRegions[])
+   throws IOException;
++  
++  /**
++   * Called by a region server to report a fatal error that is causing
++   * it to abort.
++   * @param info the RS that is aborting
++   * @param errorMessage informative text to expose in the master logs and UI
++   */
++  public void reportRSFatalError(HServerInfo info, String errorMessage);
+ }
+\ No newline at end of file
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index 625cfa8..a0aca01 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -72,6 +72,7 @@ import org.apache.hadoop.hbase.master.handler.TableAddFamilyHandler;
+ import org.apache.hadoop.hbase.master.handler.TableDeleteFamilyHandler;
+ import org.apache.hadoop.hbase.master.handler.TableModifyFamilyHandler;
+ import org.apache.hadoop.hbase.master.metrics.MasterMetrics;
++import org.apache.hadoop.hbase.monitoring.MemoryBoundedLogMessageBuffer;
+ import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+ import org.apache.hadoop.hbase.monitoring.TaskMonitor;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+@@ -151,6 +152,11 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+   private CatalogTracker catalogTracker;
+   // Cluster status zk tracker and local setter
+   private ClusterStatusTracker clusterStatusTracker;
++  
++  // buffer for "fatal error" notices from region servers
++  // in the cluster. This is only used for assisting
++  // operations/debugging.
++  private MemoryBoundedLogMessageBuffer rsFatals;
+ 
+   // This flag is for stopping this Master instance.  Its set when we are
+   // stopping or aborting
+@@ -356,6 +362,8 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+     this.fileSystemManager = new MasterFileSystem(this, metrics);
+     this.connection = HConnectionManager.getConnection(conf);
+     this.executorService = new ExecutorService(getServerName());
++    this.rsFatals = new MemoryBoundedLogMessageBuffer(
++        conf.getLong("hbase.master.buffer.for.rs.fatals", 1*1024*1024));
+ 
+     this.serverManager = new ServerManager(this, this, metrics);
+ 
+@@ -660,6 +668,15 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+     return adornRegionServerAnswer(serverInfo,
+       this.serverManager.regionServerReport(serverInfo, msgs, mostLoadedRegions));
+   }
++  
++  @Override
++  public void reportRSFatalError(HServerInfo serverInfo,
++      String errorText) {
++    String msg = "Region server " + serverInfo + " reported a fatal error:\n"
++        + errorText;
++    LOG.error(msg);
++    rsFatals.add(msg);
++  }
+ 
+   /**
+    * Override if you'd add messages to return to regionserver <code>hsi</code>
+@@ -1000,6 +1017,10 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+   public AssignmentManager getAssignmentManager() {
+     return this.assignmentManager;
+   }
++  
++  public MemoryBoundedLogMessageBuffer getRegionServerFatalLogBuffer() {
++    return rsFatals;
++  }
+ 
+   @Override
+   public void shutdown() {
+diff --git a/src/main/java/org/apache/hadoop/hbase/monitoring/MemoryBoundedLogMessageBuffer.java b/src/main/java/org/apache/hadoop/hbase/monitoring/MemoryBoundedLogMessageBuffer.java
+new file mode 100644
+index 0000000..e8b7416
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/monitoring/MemoryBoundedLogMessageBuffer.java
+@@ -0,0 +1,114 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.monitoring;
++
++import java.io.PrintWriter;
++import java.text.SimpleDateFormat;
++import java.util.Date;
++import java.util.LinkedList;
++import java.util.List;
++
++import com.google.common.base.Charsets;
++import com.google.common.base.Preconditions;
++import com.google.common.collect.Lists;
++
++/**
++ * A size-bounded repository of alerts, which are kept
++ * in a linked list. Alerts can be added, and they will
++ * automatically be removed one by one when the specified heap
++ * usage is exhausted.
++ */
++public class MemoryBoundedLogMessageBuffer {
++  private final long maxSizeBytes;
++  private long usage = 0;
++  private LinkedList<LogMessage> messages;
++  
++  public MemoryBoundedLogMessageBuffer(long maxSizeBytes) {
++    Preconditions.checkArgument(
++        maxSizeBytes > 0);
++    this.maxSizeBytes = maxSizeBytes;
++    this.messages = Lists.newLinkedList();
++  }
++  
++  /**
++   * Append the given message to this buffer, automatically evicting
++   * older messages until the desired memory limit is achieved.
++   */
++  public synchronized void add(String messageText) {
++    LogMessage message = new LogMessage(messageText, System.currentTimeMillis());
++    
++    usage += message.estimateHeapUsage();
++    messages.add(message);
++    while (usage > maxSizeBytes) {
++      LogMessage removed = messages.remove();
++      usage -= removed.estimateHeapUsage();
++      assert usage >= 0;
++    }
++  }
++  
++  /**
++   * Dump the contents of the buffer to the given stream.
++   */
++  public synchronized void dumpTo(PrintWriter out) {
++    SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss");
++
++    for (LogMessage msg : messages) {
++      out.write(df.format(new Date(msg.timestamp)));
++      out.write(" ");
++      out.println(new String(msg.message, Charsets.UTF_8));
++    }
++  }
++  
++  synchronized List<LogMessage> getMessages() {
++    // defensive copy
++    return Lists.newArrayList(messages);
++  }
++ 
++  /**
++   * Estimate the number of bytes this buffer is currently
++   * using.
++   */
++  synchronized long estimateHeapUsage() {
++    return usage;
++  }
++  
++  private static class LogMessage {
++    /** the error text, encoded in bytes to save memory */
++    public final byte[] message;
++    public final long timestamp;
++    
++    /**
++     * Completely non-scientific estimate of how much one of these
++     * objects takes, along with the LinkedList overhead. This doesn't
++     * need to be exact, since we don't expect a ton of these alerts.
++     */
++    private static final long BASE_USAGE=100;
++    
++    public LogMessage(String message, long timestamp) {
++      this.message = message.getBytes(Charsets.UTF_8);
++      this.timestamp = timestamp;
++    }
++    
++    public long estimateHeapUsage() {
++      return message.length + BASE_USAGE;
++    }
++  }
++
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+index ff3c5d1..185a493 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+@@ -135,6 +135,7 @@ import org.apache.hadoop.io.MapWritable;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.ipc.RemoteException;
+ import org.apache.hadoop.net.DNS;
++import org.apache.hadoop.util.StringUtils;
+ import org.apache.zookeeper.KeeperException;
+ 
+ import com.google.common.base.Function;
+@@ -1396,16 +1397,28 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+    *          the exception that caused the abort, or null
+    */
+   public void abort(String reason, Throwable cause) {
++    String msg = "ABORTING region server " + this + ": " + reason;
+     if (cause != null) {
+-      LOG.fatal("ABORTING region server " + this + ": " + reason, cause);
++      LOG.fatal(msg, cause);
+     } else {
+-      LOG.fatal("ABORTING region server " + this + ": " + reason);
++      LOG.fatal(msg);
+     }
+     this.abortRequested = true;
+     this.reservedSpace.clear();
+     if (this.metrics != null) {
+       LOG.info("Dump of metrics: " + this.metrics);
+     }
++    // Do our best to report our abort to the master, but this may not work
++    try {
++      if (cause != null) {
++        msg += "\nCause:\n" + StringUtils.stringifyException(cause);
++      }
++      if (hbaseMaster != null) {
++        hbaseMaster.reportRSFatalError(serverInfo, msg);
++      }
++    } catch (Throwable t) {
++      LOG.warn("Unable to report fatal error to master", t);
++    }
+     stop(reason);
+   }
+ 
+diff --git a/src/test/java/org/apache/hadoop/hbase/monitoring/TestMemoryBoundedLogMessageBuffer.java b/src/test/java/org/apache/hadoop/hbase/monitoring/TestMemoryBoundedLogMessageBuffer.java
+new file mode 100644
+index 0000000..fc91991
+--- /dev/null
++++ b/src/test/java/org/apache/hadoop/hbase/monitoring/TestMemoryBoundedLogMessageBuffer.java
+@@ -0,0 +1,67 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.monitoring;
++
++import static org.junit.Assert.*;
++
++import java.io.PrintWriter;
++import java.io.StringWriter;
++
++import org.junit.Test;
++
++public class TestMemoryBoundedLogMessageBuffer {
++
++  private static final long TEN_KB = 10 * 1024;
++  private static final String JP_TEXT = "こんにちは";
++  
++  @Test
++  public void testBuffer() {
++    MemoryBoundedLogMessageBuffer buf =
++      new MemoryBoundedLogMessageBuffer(TEN_KB);
++    
++    for (int i = 0; i < 1000; i++) {
++      buf.add("hello " + i);
++    }
++    assertTrue("Usage too big: " + buf.estimateHeapUsage(),
++        buf.estimateHeapUsage() < TEN_KB);
++    assertTrue("Too many retained: " + buf.getMessages().size(),
++        buf.getMessages().size() < 100);
++    StringWriter sw = new StringWriter();
++    buf.dumpTo(new PrintWriter(sw));
++    String dump = sw.toString();
++    System.out.println(dump);
++    assertFalse("The early log messages should be evicted",
++        dump.contains("hello 1\n"));
++    assertTrue("The late log messages should be retained",
++        dump.contains("hello 999\n"));
++  }
++  
++  @Test
++  public void testNonAsciiEncoding() {
++    MemoryBoundedLogMessageBuffer buf =
++      new MemoryBoundedLogMessageBuffer(TEN_KB);
++    
++    buf.add(JP_TEXT);
++    StringWriter sw = new StringWriter();
++    buf.dumpTo(new PrintWriter(sw));
++    String dump = sw.toString();
++    assertTrue(dump.contains(JP_TEXT));
++  }
++}
+-- 
+1.7.0.4
+

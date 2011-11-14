@@ -1,5 +1,5 @@
 /**
- * Copyright 2010 The Apache Software Foundation
+ * Copyright 2011 The Apache Software Foundation
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -25,7 +25,6 @@ import java.lang.reflect.InvocationTargetException;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -55,8 +54,8 @@ import org.apache.hadoop.hbase.catalog.MetaReader;
 import org.apache.hadoop.hbase.client.HConnection;
 import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.MetaScanner;
-import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
+import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.executor.ExecutorService;
 import org.apache.hadoop.hbase.executor.ExecutorService.ExecutorType;
 import org.apache.hadoop.hbase.ipc.HBaseRPC;
@@ -73,13 +72,18 @@ import org.apache.hadoop.hbase.master.handler.TableAddFamilyHandler;
 import org.apache.hadoop.hbase.master.handler.TableDeleteFamilyHandler;
 import org.apache.hadoop.hbase.master.handler.TableModifyFamilyHandler;
 import org.apache.hadoop.hbase.master.metrics.MasterMetrics;
+import org.apache.hadoop.hbase.monitoring.MemoryBoundedLogMessageBuffer;
+import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.wal.HLog;
 import org.apache.hadoop.hbase.replication.regionserver.Replication;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.InfoServer;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Sleeper;
+import org.apache.hadoop.hbase.util.Strings;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.util.VersionInfo;
 import org.apache.hadoop.hbase.zookeeper.ClusterStatusTracker;
@@ -87,7 +91,6 @@ import org.apache.hadoop.hbase.zookeeper.RegionServerTracker;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.io.MapWritable;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.net.DNS;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Watcher;
@@ -149,6 +152,11 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
   private CatalogTracker catalogTracker;
   // Cluster status zk tracker and local setter
   private ClusterStatusTracker clusterStatusTracker;
+  
+  // buffer for "fatal error" notices from region servers
+  // in the cluster. This is only used for assisting
+  // operations/debugging.
+  private MemoryBoundedLogMessageBuffer rsFatals;
 
   // This flag is for stopping this Master instance.  Its set when we are
   // stopping or aborting
@@ -263,6 +271,9 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
    */
   @Override
   public void run() {
+    MonitoredTask startupStatus =
+      TaskMonitor.get().createStatus("Master startup");
+    startupStatus.setDescription("Master startup");
     try {
       /*
        * Block on becoming the active master.
@@ -274,18 +285,21 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
        * now wait until it dies to try and become the next active master.  If we
        * do not succeed on our first attempt, this is no longer a cluster startup.
        */
-      this.activeMasterManager = new ActiveMasterManager(zooKeeper, address, this);
+      this.activeMasterManager = new ActiveMasterManager(zooKeeper, address,
+          this);
       this.zooKeeper.registerListener(activeMasterManager);
       stallIfBackupMaster(this.conf, this.activeMasterManager);
-      this.activeMasterManager.blockUntilBecomingActiveMaster();
+      this.activeMasterManager.blockUntilBecomingActiveMaster(startupStatus);
       // We are either the active master or we were asked to shutdown
       if (!this.stopped) {
-        finishInitialization();
+        finishInitialization(startupStatus);
         loop();
       }
     } catch (Throwable t) {
       abort("Unhandled exception. Starting shutdown.", t);
     } finally {
+      startupStatus.cleanup();
+      
       stopChores();
       // Wait for all the remaining region servers to report in IFF we were
       // running a cluster shutdown AND we were NOT aborting.
@@ -332,7 +346,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
    * @throws InterruptedException
    * @throws KeeperException
    */
-  private void finishInitialization()
+  private void finishInitialization(MonitoredTask status)
   throws IOException, InterruptedException, KeeperException {
 
     isActiveMaster = true;
@@ -343,13 +357,17 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
      * below after we determine if cluster startup or failover.
      */
 
+    status.setStatus("Initializing Master file system");
     // TODO: Do this using Dependency Injection, using PicoContainer, Guice or Spring.
     this.fileSystemManager = new MasterFileSystem(this, metrics);
     this.connection = HConnectionManager.getConnection(conf);
     this.executorService = new ExecutorService(getServerName());
+    this.rsFatals = new MemoryBoundedLogMessageBuffer(
+        conf.getLong("hbase.master.buffer.for.rs.fatals", 1*1024*1024));
 
     this.serverManager = new ServerManager(this, this, metrics);
 
+    status.setStatus("Initializing ZK system trackers");
     this.catalogTracker = new CatalogTracker(this.zooKeeper, this.connection,
       this, conf.getInt("hbase.master.catalog.timeout", Integer.MAX_VALUE));
     this.catalogTracker.start();
@@ -376,17 +394,19 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
       ", cluster-up flag was=" + wasUp);
 
     // start up all service threads.
+    status.setStatus("Initializing master service threads");
     startServiceThreads();
 
     // Wait for region servers to report in.  Returns count of regions.
-    int regionCount = this.serverManager.waitForRegionServers();
+    int regionCount = this.serverManager.waitForRegionServers(status);
 
     // TODO: Should do this in background rather than block master startup
+    status.setStatus("Splitting logs after master startup");
     this.fileSystemManager.
       splitLogAfterStartup(this.serverManager.getOnlineServers());
 
     // Make sure root and meta assigned before proceeding.
-    assignRootAndMeta();
+    assignRootAndMeta(status);
 
     // Is this fresh start with no regions assigned or are we a master joining
     // an already-running cluster?  If regionsCount == 0, then for sure a
@@ -404,10 +424,12 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
 
     // Start balancer and meta catalog janitor after meta and regions have
     // been assigned.
+    status.setStatus("Starting balancer and catalog janitor");
     this.balancerChore = getAndStartBalancerChore(this);
     this.catalogJanitorChore =
       Threads.setDaemonThreadRunning(new CatalogJanitor(this, this));
 
+    status.markComplete("Initialization successful");
     LOG.info("Master has completed initialization");
     initialized = true;
   }
@@ -420,12 +442,13 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
    * @throws KeeperException
    * @return Count of regions we assigned.
    */
-  int assignRootAndMeta()
+  int assignRootAndMeta(MonitoredTask status)
   throws InterruptedException, IOException, KeeperException {
     int assigned = 0;
     long timeout = this.conf.getLong("hbase.catalog.verification.timeout", 1000);
 
     // Work on ROOT region.  Is it in zk in transition?
+    status.setStatus("Assigning ROOT region");
     boolean rit = this.assignmentManager.
       processRegionInTransitionAndBlockUntilAssigned(HRegionInfo.ROOT_REGIONINFO);
     if (!catalogTracker.verifyRootRegionLocation(timeout)) {
@@ -437,6 +460,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
       ", location=" + catalogTracker.getRootLocation());
 
     // Work on meta region
+    status.setStatus("Assigning META region");
     rit = this.assignmentManager.
       processRegionInTransitionAndBlockUntilAssigned(HRegionInfo.FIRST_META_REGIONINFO);
     if (!this.catalogTracker.verifyMetaRegionLocation(timeout)) {
@@ -449,6 +473,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     }
     LOG.info(".META. assigned=" + assigned + ", rit=" + rit +
       ", location=" + catalogTracker.getMetaLocation());
+    status.setStatus("META and ROOT assigned.");
     return assigned;
   }
 
@@ -459,8 +484,9 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
   private static String getMyAddress(final Configuration c)
   throws UnknownHostException {
     // Find out our address up in DNS.
-    String s = DNS.getDefaultHost(c.get("hbase.master.dns.interface","default"),
-      c.get("hbase.master.dns.nameserver","default"));
+    String s = Strings.domainNamePointerToHostName(DNS.getDefaultHost(c.get(
+        "hbase.master.dns.interface", "default"), c.get(
+        "hbase.master.dns.nameserver", "default")));
     s += ":" + c.get(HConstants.MASTER_PORT,
         Integer.toString(HConstants.DEFAULT_MASTER_PORT));
     return s;
@@ -545,6 +571,8 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
    if (port >= 0) {
      String a = this.conf.get("hbase.master.info.bindAddress", "0.0.0.0");
      this.infoServer = new InfoServer(MASTER, a, port, false);
+     this.infoServer.addServlet("status", "/master-status", MasterStatusServlet.class);
+     this.infoServer.addServlet("dump", "/dump", MasterDumpServlet.class);
      this.infoServer.setAttribute(MASTER, this);
      this.infoServer.start();
     }
@@ -641,6 +669,15 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     return adornRegionServerAnswer(serverInfo,
       this.serverManager.regionServerReport(serverInfo, msgs, mostLoadedRegions));
   }
+  
+  @Override
+  public void reportRSFatalError(HServerInfo serverInfo,
+      String errorText) {
+    String msg = "Region server " + serverInfo + " reported a fatal error:\n"
+        + errorText;
+    LOG.error(msg);
+    rsFatals.add(msg);
+  }
 
   /**
    * Override if you'd add messages to return to regionserver <code>hsi</code>
@@ -722,7 +759,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     Pair<HRegionInfo, HServerInfo> p =
       this.assignmentManager.getAssignment(encodedRegionName);
     if (p == null)
-      throw new UnknownRegionException(Bytes.toString(encodedRegionName));
+      throw new UnknownRegionException(Bytes.toStringBinary(encodedRegionName));
     HRegionInfo hri = p.getFirst();
     HServerInfo dest = null;
     if (destServerName == null || destServerName.length == 0) {
@@ -783,30 +820,50 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     if(MetaReader.tableExists(catalogTracker, tableName)) {
       throw new TableExistsException(tableName);
     }
-    for (HRegionInfo newRegion : newRegions) {
-      // 1. Set table enabling flag up in zk.
-      try {
-        assignmentManager.getZKTable().setEnabledTable(tableName);
-      } catch (KeeperException e) {
-        throw new IOException("Unable to ensure that the table will be" +
+    // 1. Set table enabling flag up in zk.
+    try {
+      assignmentManager.getZKTable().setEnabledTable(tableName);
+    } catch (KeeperException e) {
+      throw new IOException("Unable to ensure that the table will be" +
           " enabled because of a ZooKeeper issue", e);
-      }
+    }
+
+    List<HRegionInfo> regionInfos = new ArrayList<HRegionInfo>();
+    final int batchSize = this.conf.getInt("hbase.master.createtable.batchsize", 100);
+    HLog hlog = null;
+    for (int regionIdx = 0; regionIdx < newRegions.length; regionIdx++) {
+      HRegionInfo newRegion = newRegions[regionIdx];
 
       // 2. Create HRegion
       HRegion region = HRegion.createHRegion(newRegion,
-        fileSystemManager.getRootDir(), conf);
+        fileSystemManager.getRootDir(), conf, hlog);
 
-      // 3. Insert into META
-      MetaEditor.addRegionToMeta(catalogTracker, region.getRegionInfo());
+      if (hlog == null) {
+        hlog = region.getLog();
+      }
+
+      regionInfos.add(region.getRegionInfo());
+      if (regionIdx % batchSize == 0) {
+        // 3. Insert into META
+        MetaEditor.addRegionsToMeta(catalogTracker, regionInfos);
+        regionInfos.clear();
+      }
 
       // 4. Close the new region to flush to disk.  Close log file too.
       region.close();
-      region.getLog().closeAndDelete();
+    }
+    hlog.closeAndDelete();
+    if (regionInfos.size() > 0) {
+      MetaEditor.addRegionsToMeta(catalogTracker, regionInfos);
     }
 
     // 5. Trigger immediate assignment of the regions in round-robin fashion
-    List<HServerInfo> servers = serverManager.getOnlineServersList();
-    this.assignmentManager.bulkAssignUserRegions(newRegions, servers, sync);
+    if (newRegions.length == 1) {
+      this.assignmentManager.assign(newRegions[0], true);
+    } else {
+      List<HServerInfo> servers = serverManager.getOnlineServersList();
+      this.assignmentManager.bulkAssignUserRegions(newRegions, servers, sync);
+    }
 
     // 6. If sync, wait for assignment of regions
     if (sync) {
@@ -961,6 +1018,10 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
   public AssignmentManager getAssignmentManager() {
     return this.assignmentManager;
   }
+  
+  public MemoryBoundedLogMessageBuffer getRegionServerFatalLogBuffer() {
+    return rsFatals;
+  }
 
   @Override
   public void shutdown() {
@@ -1035,7 +1096,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
   throws IOException {
     Pair<HRegionInfo, HServerAddress> pair =
       MetaReader.getRegion(this.catalogTracker, regionName);
-    if (pair == null) throw new UnknownRegionException(Bytes.toString(regionName));
+    if (pair == null) throw new UnknownRegionException(Bytes.toStringBinary(regionName));
     HRegionInfo hri = pair.getFirst();
     if (force) this.assignmentManager.clearRegionFromTransition(hri);
     this.assignmentManager.unassign(hri, force);

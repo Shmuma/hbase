@@ -1,0 +1,32 @@
+From 29feae239ba000fb2fdeb57a99e75ef0a00f726b Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Mon, 29 Aug 2011 19:29:25 -0700
+Subject: [PATCH 39/50] HBASE-4323. Add debug logging when couldn't come up with a plan
+
+Reason: Better debuggability of stuck regions
+Author: Todd Lipcon
+Ref: CDH-3540
+---
+ .../hadoop/hbase/master/AssignmentManager.java     |    6 +++++-
+ 1 files changed, 5 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index 026235e..8d36d0d 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -1043,7 +1043,11 @@ public class AssignmentManager extends ZooKeeperListener {
+         return;
+       }
+       RegionPlan plan = getRegionPlan(state, forceNewPlan);
+-      if (plan == null) return; // Should get reassigned later when RIT times out.
++      if (plan == null) {
++        debugLog(state.getRegion(),
++            "Unable to determine a plan to assign " + state);
++        return; // Should get reassigned later when RIT times out.
++      }
+       try {
+         debugLog(state.getRegion(), "Assigning region " + state.getRegion().getRegionNameAsString() +
+           " to " + plan.getDestination().getServerName());
+-- 
+1.7.0.4
+

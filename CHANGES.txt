@@ -1,5 +1,113 @@
 HBase Change Log
-Release 0.90.3 - Unreleased
+Release 0.90.4 - Unreleased
+  BUG FIXES
+   HBASE-3617  NoRouteToHostException during balancing will cause Master abort
+               (Ted Yu)
+   HBASE-3878  Hbase client throws NoSuchElementException (Ted Yu)
+   HBASE-3881  Add disable balancer in graceful_stop.sh script
+   HBASE-3895  Fix order of parameters after HBASE-1511
+   HBASE-3874  ServerShutdownHandler fails on NPE if a plan has a random
+               region assignment
+   HBASE-3902  Add Bytes.toBigDecimal and Bytes.toBytes(BigDecimal)
+               (Vaibhav Puranik)
+   HBASE-3820  Splitlog() executed while the namenode was in safemode may
+               cause data-loss (Jieshan Bean)
+   HBASE-3905  HBaseAdmin.createTableAsync() should check for invalid split
+               keys. (Ted Yu)
+   HBASE-3912  [Stargate] Columns not handle by Scan
+   HBASE-3908  TableSplit not implementing "hashCode" problem (Daniel Iancu)
+   HBASE-3195  Binary row keys in hbck and other miscellaneous binary key
+               display issues
+   HBASE-3914  ROOT region appeared in two regionserver's onlineRegions at
+               the same time (Jieshan Bean)
+   HBASE-3934  MemStoreFlusher.getMemStoreLimit() doesn't honor defaultLimit
+               (Ted Yu)
+   HBASE-3946  The splitted region can be online again while the standby
+               hmaster becomes the active one (Jieshan Bean)
+   HBASE-3723  Major compact should be done when there is only one storefile
+               and some keyvalue is outdated (Zhou Shuaifeng)
+   HBASE-3892  Table can't disable (Gao Jinchao)
+   HBASE-3894  Thread contention over row locks set monitor (Dave Latham)
+   HBASE-3794  Ability to Discard Bad HTable Puts
+   HBASE-3916  Fix the default bind address of ThriftServer to be wildcard
+               instead of localhost. (Li Pi)
+   HBASE-3985  Same Region could be picked out twice in LoadBalancer
+               (Jieshan Bean)
+   HBASE-3987  Fix a NullPointerException on a failure to load Bloom filter data
+               (Mikhail Bautin)
+   HBASE-3948  Improve split/compact result page for RegionServer status page
+               (Li Pi)
+   HBASE-3988  Infinite loop for secondary master (Liyin Tang)
+   HBASE-3989  Error occured while RegionServer report to Master "we are up"
+               should get master address again (Jieshan Bean)
+   HBASE-3995  HBASE-3946 broke TestMasterFailover
+   HBASE-2077  NullPointerException with an open scanner that expired causing
+               an immediate region server shutdown -- part 2.
+   HBASE-4005  close_region bugs
+   HBASE-3969  Outdated data can not be cleaned in time (zhoushuaifeng)
+   HBASE-4028  Hmaster crashes caused by splitting log. (Gao jinchao)
+   HBASE-4035  Fix local-master-backup.sh - parameter order wrong (Lars George)
+   HBASE-4020  "testWritesWhileGetting" unit test needs to be fixed.
+               (Vandana Ayyalasomayajula)
+   HBASE-3984  CT.verifyRegionLocation isn't doing a very good check,
+               can delay cluster recovery
+   HBASE-4045  [replication] NPE in ReplicationSource when ZK is gone
+   HBASE-4059  If a region is split during RS shutdown process, the daughter
+               regions are NOT made online by master
+   HBASE-3904  HBA.createTable(final HTableDescriptor desc, byte [][] splitKeys)
+               should be synchronous
+   HBASE-4053  Most of the regions were added into AssignmentManager#servers twice
+   HBASE-3867  when cluster is stopped and server which hosted meta region is
+               removed from cluster, master breaks down after restarting cluster.
+   HBASE-4033  The shutdown RegionServer could be added to
+               AssignmentManager.servers again (Jieshan Bean)
+   HBASE-4074  When a RS has hostname with uppercase letter, there are two RS
+               entries in master (Weihua Jiang via Ted Yu)
+   HBASE-4077  Deadlock if WrongRegionException is thrown from getLock in HRegion.delete
+               (Adam Warrington via Ted Yu)
+   HBASE-3893  HRegion.internalObtainRowLock shouldn't wait forever
+   HBASE-4088  npes in server shutdown
+   HBASE-4075  A bug in TestZKBasedOpenCloseRegion (Jieshan Bean)
+   HBASE-4052  Enabling a table after master switch does not allow table scan,
+               throwing NotServingRegionException (ramkrishna via Ted Yu)
+   HBASE-4112  Creating table may throw NullPointerException (Jinchao via Ted Yu)
+   HBASE-4093  When verifyAndAssignRoot throws exception, the deadServers state cannot
+               be changed (fulin wang via Ted Yu)
+   HBASE-4101  Regionserver Deadlock (ramkrishna.s.vasudevan)
+   HBASE-3872  Hole in split transaction rollback; edits to .META. need to be rolled
+               back even if it seems like they didn't make it
+   HBASE-4115  HBase shell assign and unassign unusable if region name includes
+               binary-encoded data (Ryan Brush)
+   HBASE-4118  method regionserver.MemStore#updateColumnValue: the check for 
+               qualifier and family is missing (N Keywal via Ted Yu)
+   HBASE-4109  Hostname returned via reverse dns lookup contains trailing period if
+               configured interface is not "default" (Shrijeet Paliwal)
+   HBASE-4126  Make timeoutmonitor timeout after 30 minutes instead of 3
+   HBASE-4105  Stargate does not support Content-Type: application/json and
+               Content-Encoding: gzip in parallel
+   HBASE-4116  [stargate] StringIndexOutOfBoundsException in row spec parse
+               (Allan Yan)
+   HBASE-4129  HBASE-3872 added a warn message 'CatalogJanitor: Daughter regiondir
+               does not exist' that is triggered though its often legit that daughter
+               is not present
+
+  IMPROVEMENT
+   HBASE-3882  hbase-config.sh needs to be updated so it can auto-detects the
+               sun jre provided by RHEL6 (Roman Shaposhnik)
+   HBASE-3920  HLog hbase.regionserver.flushlogentries no longer supported
+               (Dave Latham)
+   HBASE-3919  More places output binary data to text (Dave Latham)
+   HBASE-3906  When HMaster is running,there are a lot of RegionLoad instances
+               far greater than the regions）,it has risk of OOME (Jian Zhang)
+   HBASE-3855  Performance degradation of memstore because reseek is linear
+               (dhruba borthakur)
+   HBASE-3994  SplitTransaction has a window where clients can
+               get RegionOfflineException
+   HBASE-3969  Outdated data can not be cleaned in time (Zhou Shuaifeng)
+   HBASE-3488  Add CellCounter to count multiple versions of rows (Subbu Iyer)
+   HBASE-3968  HLog Pretty Printer (Riley Patterson)
+
+Release 0.90.3 - May 19th, 2011
   BUG FIXES
    HBASE-3712  HTable.close() doesn't shutdown thread pool
                (Ted Yu via Stack)

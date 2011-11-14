@@ -1,0 +1,131 @@
+From 2b27d82b24c4c344f93c833462580eebb3837a36 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Thu, 1 Sep 2011 15:53:00 -0700
+Subject: [PATCH 42/50] HBASE-4257. Limit the number of regions in transitions displayed on master webpage.
+
+Reason: Avoid giant HTML content for large clusters
+Author: Todd Lipcon
+Ref: CDH-3540
+---
+ .../tmpl/master/AssignmentManagerStatusTmpl.jamon  |   28 +++++++++++++++++
+ .../hbase/master/TestMasterStatusServlet.java      |   32 ++++++++++++++++++++
+ 2 files changed, 60 insertions(+), 0 deletions(-)
+
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
+index 62a63b1..0dc0691 100644
+--- a/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
++++ b/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
+@@ -18,15 +18,40 @@ See the License for the specific language governing permissions and
+ limitations under the License.
+ </%doc>
+ <%import>
++org.apache.hadoop.hbase.HRegionInfo;
+ org.apache.hadoop.hbase.master.AssignmentManager;
+ org.apache.hadoop.hbase.master.AssignmentManager.RegionState;
++java.util.Iterator;
+ java.util.Map;
+ </%import>
+ <%args>
+ AssignmentManager assignmentManager;
++int limit = 100;
+ </%args>
+ <%java>
+ Map<String, RegionState> rit = assignmentManager.getRegionsInTransition();
++
++int toRemove = rit.size() - limit;
++int removed = 0;
++if (toRemove > 0) {
++  // getRegionsInTransition returned a copy, so we can mutate it
++  for (Iterator<Map.Entry<String, RegionState>> it = rit.entrySet().iterator();
++       it.hasNext() && toRemove > 0;
++       ) {
++    Map.Entry<String, RegionState> e = it.next();
++    if (HRegionInfo.FIRST_META_REGIONINFO.getEncodedName().equals(
++          e.getKey()) ||
++        HRegionInfo.ROOT_REGIONINFO.getEncodedName().equals(
++          e.getKey())) {
++      // don't remove the meta regions, they're too interesting!
++      continue;
++    } 
++    it.remove();
++    toRemove--;
++    removed++;
++  }
++}
++
+ </%java>
+ 
+ <h2>Regions in Transition</h2>
+@@ -39,4 +64,7 @@ No regions in transition.
+ 		<tr><td><% entry.getKey() %></td><td><% entry.getValue().toDescriptiveString() %></td>
+ 		</%for>
+ 	</table>
++	<%if removed > 0 %>
++	(<% removed %> more regions in transition not shown) 
++	</%if>
+ </%if>
+\ No newline at end of file
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+index 7c2421d..dc1d2fa 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+@@ -19,11 +19,15 @@
+  */
+ package org.apache.hadoop.hbase.master;
+ 
++import static org.junit.Assert.*;
++
+ import java.io.IOException;
+ import java.io.StringWriter;
+ import java.util.HashMap;
+ import java.util.Map;
+ import java.util.NavigableMap;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+@@ -36,6 +40,7 @@ import org.apache.hadoop.hbase.client.HBaseAdmin;
+ import org.apache.hadoop.hbase.master.AssignmentManager.RegionState;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
++import org.apache.hbase.tmpl.master.AssignmentManagerStatusTmpl;
+ import org.apache.hbase.tmpl.master.MasterStatusTmpl;
+ import org.junit.Before;
+ import org.junit.Test;
+@@ -138,5 +143,32 @@ public class TestMasterStatusServlet {
+       .render(new StringWriter(),
+         master, admin);
+   }
++  
++  @Test
++  public void testAssignmentManagerTruncatedList() throws IOException {
++    AssignmentManager am = Mockito.mock(AssignmentManager.class);
++    NavigableMap<String, RegionState> regionsInTransition =
++      Maps.newTreeMap();
++    for (byte i = 0; i < 100; i++) {
++      String regionName = "r" + i;
++      HRegionInfo hri = new HRegionInfo(FAKE_TABLE,
++          new byte[]{i}, new byte[]{(byte) (i+1)});
++      regionsInTransition.put(regionName,
++          new RegionState(hri, RegionState.State.CLOSING, 12345L, "localhost"));
++    }
++    Mockito.doReturn(regionsInTransition).when(am).getRegionsInTransition();
++
++    StringWriter sw = new StringWriter();
++    new AssignmentManagerStatusTmpl()
++      .setLimit(50)
++      .render(sw, am);
++    String result = sw.toString();
++    int count = 0;
++    Matcher matcher = Pattern.compile("CLOSING").matcher(result);
++    while (matcher.find()) {
++      count++;
++    }
++    assertEquals(50, count);
++  }
+ 
+ }
+-- 
+1.7.0.4
+

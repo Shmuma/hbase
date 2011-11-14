@@ -20,6 +20,7 @@
 package org.apache.hadoop.hbase.master;
 
 import java.io.IOException;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,6 +42,8 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.StoreFile;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Writables;
 
 /**
@@ -97,8 +100,28 @@ class CatalogJanitor extends Chore {
     // TODO: Only works with single .META. region currently.  Fix.
     final AtomicInteger count = new AtomicInteger(0);
     // Keep Map of found split parents.  There are candidates for cleanup.
+    // Use a comparator that has split parents come before its daughters.
     final Map<HRegionInfo, Result> splitParents =
-      new TreeMap<HRegionInfo, Result>();
+      new TreeMap<HRegionInfo, Result>(new Comparator<HRegionInfo> () {
+        @Override
+        public int compare(HRegionInfo left, HRegionInfo right) {
+          // This comparator differs from the one HRegionInfo in that it sorts
+          // parent before daughters.
+          if (left == null) return -1;
+          if (right == null) return 1;
+          // Same table name.
+          int result = Bytes.compareTo(left.getTableDesc().getName(),
+            right.getTableDesc().getName());
+          if (result != 0) return result;
+          // Compare start keys.
+          result = Bytes.compareTo(left.getStartKey(), right.getStartKey());
+          if (result != 0) return result;
+          // Compare end keys.
+          result = Bytes.compareTo(left.getEndKey(), right.getEndKey());
+          if (result != 0) return -result; // Flip the result so parent comes first.
+          return result;
+        }
+      });
     // This visitor collects split parents and counts rows in the .META. table
     MetaReader.Visitor visitor = new MetaReader.Visitor() {
       @Override
@@ -156,16 +179,15 @@ class CatalogJanitor extends Chore {
    * the filesystem.
    * @throws IOException
    */
-  boolean cleanParent(final HRegionInfo parent,
-    Result rowContent)
+  boolean cleanParent(final HRegionInfo parent, Result rowContent)
   throws IOException {
     boolean result = false;
     // Run checks on each daughter split.
-    boolean hasReferencesA =
+    Pair<Boolean, Boolean> a =
       checkDaughter(parent, rowContent, HConstants.SPLITA_QUALIFIER);
-    boolean hasReferencesB =
+    Pair<Boolean, Boolean> b =
       checkDaughter(parent, rowContent, HConstants.SPLITB_QUALIFIER);
-    if (!hasReferencesA && !hasReferencesB) {
+    if ((a.getFirst() && !a.getSecond()) && (b.getFirst() && !b.getSecond())) {
       LOG.debug("Deleting region " + parent.getRegionNameAsString() +
         " because daughter splits no longer hold references");
       // This latter regionOffline should not be necessary but is done for now
@@ -192,14 +214,26 @@ class CatalogJanitor extends Chore {
    * @param parent
    * @param rowContent
    * @param qualifier
-   * @return True if this daughter still has references to the parent.
+   * @return A pair where the first boolean says whether or not the daughter
+   * region directory exists in the filesystem and then the second boolean says
+   * whether the daughter has references to the parent.
    * @throws IOException
    */
-  boolean checkDaughter(final HRegionInfo parent,
+  Pair<Boolean, Boolean> checkDaughter(final HRegionInfo parent,
     final Result rowContent, final byte [] qualifier)
   throws IOException {
     HRegionInfo hri = getDaughterRegionInfo(rowContent, qualifier);
-    return hasReferences(parent, rowContent, hri, qualifier);
+    Pair<Boolean, Boolean> result =
+      checkDaughterInFs(parent, rowContent, hri, qualifier);
+    if (result.getFirst() && !result.getSecond()) {
+      // Remove daughter from the parent IFF the daughter region exists in FS.
+      // If there is no daughter region in the filesystem, must be because of
+      // a failed split.  The ServerShutdownHandler will do the fixup.  Don't
+      // do any deletes in here that could intefere with ServerShutdownHandler
+      // fixup
+      removeDaughterFromParent(parent, hri, qualifier);
+    }
+    return result;
   }
 
   /**
@@ -236,24 +270,34 @@ class CatalogJanitor extends Chore {
 
   /**
    * Checks if a daughter region -- either splitA or splitB -- still holds
-   * references to parent.  If not, removes reference to the split from
-   * the parent meta region row so we don't check it any more.
+   * references to parent.
    * @param parent Parent region name. 
    * @param rowContent Keyed content of the parent row in meta region.
    * @param split Which column family.
    * @param qualifier Which of the daughters to look at, splitA or splitB.
-   * @return True if still has references to parent.
+   * @return A pair where the first boolean says whether or not the daughter
+   * region directory exists in the filesystem and then the second boolean says
+   * whether the daughter has references to the parent.
    * @throws IOException
    */
-  boolean hasReferences(final HRegionInfo parent,
+  Pair<Boolean, Boolean> checkDaughterInFs(final HRegionInfo parent,
     final Result rowContent, final HRegionInfo split,
     final byte [] qualifier)
   throws IOException {
-    boolean result = false;
-    if (split == null)  return result;
+    boolean references = false;
+    boolean exists = false;
+    if (split == null)  {
+      return new Pair<Boolean, Boolean>(Boolean.FALSE, Boolean.FALSE);
+    }
     FileSystem fs = this.services.getMasterFileSystem().getFileSystem();
     Path rootdir = this.services.getMasterFileSystem().getRootDir();
     Path tabledir = new Path(rootdir, split.getTableDesc().getNameAsString());
+    Path regiondir = new Path(tabledir, split.getEncodedName());
+    exists = fs.exists(regiondir);
+    if (!exists) {
+      LOG.warn("Daughter regiondir does not exist: " + regiondir.toString());
+      return new Pair<Boolean, Boolean>(exists, Boolean.FALSE);
+    }
     for (HColumnDescriptor family: split.getTableDesc().getFamilies()) {
       Path p = Store.getStoreHomedir(tabledir, split.getEncodedName(),
         family.getName());
@@ -267,13 +311,11 @@ class CatalogJanitor extends Chore {
       );
 
       if (ps != null && ps.length > 0) {
-        result = true;
+        references = true;
         break;
       }
     }
-    if (!result) {
-      removeDaughterFromParent(parent, split, qualifier);
-    }
-    return result;
+    return new Pair<Boolean, Boolean>(Boolean.valueOf(exists),
+      Boolean.valueOf(references));
   }
 }

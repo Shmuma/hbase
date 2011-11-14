@@ -1,4 +1,5 @@
 org.apache.hadoop.hbase
+org.apache.hadoop.hbase.monitoring
 org.apache.hadoop.hbase.mapred
 org.apache.hadoop.hbase.util
 org.apache.hadoop.hbase.client
@@ -8,7 +9,6 @@ org.apache.hadoop.hbase.thrift.generated
 org.apache.hadoop.hbase.replication
 org.apache.hadoop.hbase.replication.regionserver
 org.apache.hadoop.hbase.replication.master
-org.apache.hadoop.hbase.avro.generated
 org.apache.hadoop.hbase.avro
 org.apache.hadoop.hbase.filter
 org.apache.hadoop.hbase.zookeeper
@@ -42,3 +42,7 @@ org.apache.hadoop.hbase.metrics
 org.apache.hadoop.hbase.metrics.file
 org.apache.hadoop.hbase.generated.regionserver
 org.apache.hadoop.hbase.generated.master
+org.apache.hadoop.hbase.avro.generated
+org.apache.hbase.tmpl.common
+org.apache.hbase.tmpl.regionserver
+org.apache.hbase.tmpl.master

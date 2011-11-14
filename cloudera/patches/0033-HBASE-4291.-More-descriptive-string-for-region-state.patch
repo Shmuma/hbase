@@ -1,0 +1,61 @@
+From ac7a2d1418d665854baf1bd617075da9a8f15c7d Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Mon, 29 Aug 2011 18:10:29 -0700
+Subject: [PATCH 33/50] HBASE-4291. More descriptive string for region state in AssignmentManager web ui
+
+Reason: Better debuggability of HMaster state
+Author: Todd Lipcon
+Ref: CDH-3540
+---
+ .../tmpl/master/AssignmentManagerStatusTmpl.jamon  |    2 +-
+ .../hadoop/hbase/master/AssignmentManager.java     |   13 +++++++++++++
+ 2 files changed, 14 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
+index f527904..62a63b1 100644
+--- a/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
++++ b/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
+@@ -36,7 +36,7 @@ No regions in transition.
+ 	<table>
+ 		<tr><th>Region</th><th>State</th></tr>
+ 		<%for Map.Entry<String, RegionState> entry : rit.entrySet() %>
+-		<tr><td><% entry.getKey() %></td><td><% entry.getValue() %></td>
++		<tr><td><% entry.getKey() %></td><td><% entry.getValue().toDescriptiveString() %></td>
+ 		</%for>
+ 	</table>
+ </%if>
+\ No newline at end of file
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index abd4959..026235e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -24,6 +24,7 @@ import java.io.DataOutput;
+ import java.io.IOException;
+ import java.lang.Thread.UncaughtExceptionHandler;
+ import java.util.ArrayList;
++import java.util.Date;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.Iterator;
+@@ -2227,6 +2228,18 @@ public class AssignmentManager extends ZooKeeperListener {
+         + ", server=" + serverName;
+     }
+ 
++    /**
++     * A slower (but more easy-to-read) stringification 
++     */
++    public String toDescriptiveString() {
++      long relTime = System.currentTimeMillis() - stamp;
++      
++      return region.getRegionNameAsString()
++        + " state=" + state
++        + ", ts=" + new Date(stamp) + " (" + (relTime/1000) + "s ago)"
++        + ", server=" + serverName;
++    }
++
+     @Override
+     public void readFields(DataInput in) throws IOException {
+       region = new HRegionInfo();
+-- 
+1.7.0.4
+

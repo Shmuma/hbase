@@ -107,6 +107,8 @@ public abstract class EventHandler implements Runnable, Comparable<Runnable> {
     RS_ZK_REGION_CLOSED       (2),   // RS has finished closing a region
     RS_ZK_REGION_OPENING      (3),   // RS is in process of opening a region
     RS_ZK_REGION_OPENED       (4),   // RS has finished opening a region
+    // Skip 5 and 6, for compatibility with trunk
+    RS_ZK_REGION_FAILED_OPEN  (7),   // RS failed to open a region
 
     // Messages originating from Master to RS
     M_RS_OPEN_REGION          (20),  // Master asking RS to open a region
@@ -225,5 +227,22 @@ public abstract class EventHandler implements Runnable, Comparable<Runnable> {
    */
   public synchronized void setListener(EventHandlerListener listener) {
     this.listener = listener;
+  }
+  
+  @Override
+  public String toString() {
+    return "Event #" + getSeqid() +
+      " of type " + eventType +
+      " (" + getInformativeName() + ")";
+  }
+
+  /**
+   * Event implementations should override thie class to provide an
+   * informative name about what event they are handling. For example,
+   * event-specific information such as which region or server is
+   * being processed should be included if possible.
+   */
+  public String getInformativeName() {
+    return this.getClass().toString();
   }
 }

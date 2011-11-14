@@ -1,0 +1,33 @@
+From 1f2c6e82f5ed7ca895c67f8106e69bd3fee56ca6 Mon Sep 17 00:00:00 2001
+From: Andrew Bayer <andrew@cloudera.com>
+Date: Mon, 3 Oct 2011 09:20:54 -0700
+Subject: [PATCH 50/50] Prep for CDH3u2 release
+
+---
+ pom.xml |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pom.xml b/pom.xml
+index 4f90611..d905829 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -22,14 +22,14 @@
+   <parent>
+     <groupId>com.cloudera.cdh</groupId>
+     <artifactId>cdh-root</artifactId>
+-    <version>3.0-u2-SNAPSHOT</version>
++    <version>3.0-u2</version>
+     <relativePath>../../../pom.xml</relativePath>
+   </parent>
+ 
+   <groupId>org.apache.hbase</groupId>
+   <artifactId>hbase</artifactId>
+   <packaging>jar</packaging>
+-  <version>0.90.4-cdh3u2-SNAPSHOT</version>
++  <version>0.90.4-cdh3u2</version>
+   <name>HBase</name>
+   <description>
+     HBase is the &amp;lt;a href="http://hadoop.apache.org"&amp;rt;Hadoop&lt;/a&amp;rt; database. Use it when you need
+-- 
+1.7.0.4
+

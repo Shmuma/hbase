@@ -1,0 +1,32 @@
+From 1195077965abe4fe1286a68747180a9c5858e763 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Sun, 28 Aug 2011 22:48:08 -0700
+Subject: [PATCH 32/50] HBASE-4290. fix task monitor for log splitting
+
+Reason: fix incorrect monitoring display
+Author: Todd Lipcon
+Ref: CDH-3605
+---
+ .../hbase/regionserver/wal/HLogSplitter.java       |    6 ++++--
+ 1 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+index e93700d..39e8b3c 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+@@ -198,8 +198,10 @@ public class HLogSplitter {
+     splits = splitLog(logfiles);
+ 
+     splitTime = EnvironmentEdgeManager.currentTimeMillis() - startTime;
+-    logAndReport("hlog file splitting completed in " + splitTime +
+-        " ms for " + srcDir.toString());
++    String msg = "hlog file splitting completed in " + splitTime +
++        " ms for " + srcDir.toString();
++    status.markComplete(msg);
++    LOG.info(msg);
+     return splits;
+   }
+   
+-- 
+1.7.0.4
+

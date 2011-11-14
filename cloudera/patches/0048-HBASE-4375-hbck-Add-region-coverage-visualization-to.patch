@@ -1,0 +1,51 @@
+From 4f781b408fe5ca504b2a01e9049211840668b9cd Mon Sep 17 00:00:00 2001
+From: Michael Stack <stack@apache.org>
+Date: Sun, 18 Sep 2011 18:05:15 +0000
+Subject: [PATCH 48/50] HBASE-4375 [hbck] Add region coverage visualization to hbck
+
+Reason: Supportability
+Author: Jonathan Hsieh
+Ref: CDH-3582
+---
+ .../org/apache/hadoop/hbase/util/HBaseFsck.java    |   22 ++++++++++++++++++++
+ 1 files changed, 22 insertions(+), 0 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+index cd34205..153e2b9 100644
+--- a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
++++ b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+@@ -635,9 +635,31 @@ public class HBaseFsck {
+         }
+         prevKey = key;
+       }
++      if (details) {
++        // do full region split map dump
++        dump(sc.getSplits(), regions);
++      }
+       return errors.getErrorList().size() == originalErrorsCount;
+     }
+ 
++    /**
++     * This dumps data in a visually reasonable way for visual debugging
++     * 
++     * @param splits
++     * @param regions
++     */
++    void dump(TreeSet<byte[]> splits, Multimap<byte[], HbckInfo> regions) {
++      // we display this way because the last end key should be displayed as well.
++      for (byte[] k : splits) {
++        System.out.print(Bytes.toString(k) + ":\t");
++        for (HbckInfo r : regions.get(k)) {
++          System.out.print("[ "+ r.toString() + ", " 
++              + Bytes.toString(r.getEndKey())+ "]\t");
++        }
++        System.out.println();
++      }
++    }
++    
+   }
+ 
+   /**
+-- 
+1.7.0.4
+

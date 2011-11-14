@@ -143,7 +143,7 @@ case $startStop in
     echo "ulimit -n `ulimit -n`" >> $loglog 2>&1
     nohup nice -n $HBASE_NICENESS "$HBASE_HOME"/bin/hbase \
         --config "${HBASE_CONF_DIR}" \
-        $command $startStop "$@" > "$logout" 2>&1 < /dev/null &
+        $command "$@" $startStop > "$logout" 2>&1 < /dev/null &
     echo $! > $pid
     sleep 1; head "$logout"
     ;;
@@ -153,13 +153,8 @@ case $startStop in
       # kill -0 == see if the PID exists 
       if kill -0 `cat $pid` > /dev/null 2>&1; then
         echo -n stopping $command
-        if [ "$command" = "master" ]; then
-          echo "`date` Killing $command" >> $loglog
-          kill -9 `cat $pid` > /dev/null 2>&1
-        else
-          echo "`date` Killing $command" >> $loglog
-          kill `cat $pid` > /dev/null 2>&1
-        fi
+        echo "`date` Killing $command" >> $loglog
+        kill `cat $pid` > /dev/null 2>&1
         while kill -0 `cat $pid` > /dev/null 2>&1; do
           echo -n "."
           sleep 1;

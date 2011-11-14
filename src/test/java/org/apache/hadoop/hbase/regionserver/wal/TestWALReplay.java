@@ -43,6 +43,7 @@ import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.io.hfile.HFile;
+import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.regionserver.FlushRequester;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.Store;
@@ -55,6 +56,7 @@ import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 /**
  * Test replay of edits out of a WAL split.
@@ -75,7 +77,6 @@ public class TestWALReplay {
     conf.setBoolean("dfs.support.append", true);
     // The below config supported by 0.20-append and CDH3b2
     conf.setInt("dfs.client.block.recovery.retries", 2);
-    conf.setInt("hbase.regionserver.flushlogentries", 1);
     TEST_UTIL.startMiniDFSCluster(3);
     TEST_UTIL.setNameNodeNameSystemLeasePeriod(100, 10000);
     Path hbaseRootDir =
@@ -392,9 +393,12 @@ public class TestWALReplay {
         try {
           final HRegion region = new HRegion(basedir, newWal, newFS, newConf, hri,
               null) {
-            protected boolean internalFlushcache(HLog wal, long myseqid)
+            @Override
+            protected boolean internalFlushcache(HLog wal, long myseqid,
+                MonitoredTask status)
             throws IOException {
-              boolean b = super.internalFlushcache(wal, myseqid);
+              boolean b = super.internalFlushcache(wal, myseqid,
+                  Mockito.mock(MonitoredTask.class));
               flushcount.incrementAndGet();
               return b;
             };

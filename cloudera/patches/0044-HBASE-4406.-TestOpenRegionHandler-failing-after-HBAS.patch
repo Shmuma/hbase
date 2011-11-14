@@ -1,0 +1,67 @@
+From f955c457537385046b70a01ec56417e04969a7c3 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Fri, 16 Sep 2011 13:02:55 -0700
+Subject: [PATCH 44/50] HBASE-4406. TestOpenRegionHandler failing after HBASE-4287
+
+Author: Todd Lipcon
+Reason: fix test case failure
+Ref: CDH-3541
+---
+ .../handler/TestOpenRegionHandler.java             |   21 +++++++++++++++++--
+ 1 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java b/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
+index e9d839d..75217f1 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
+@@ -46,12 +46,14 @@ import org.apache.hadoop.hbase.regionserver.FlushRequester;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.regionserver.RegionServerServices;
+ import org.apache.hadoop.hbase.regionserver.wal.HLog;
++import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.zookeeper.ZKAssign;
+ import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+ import org.apache.zookeeper.KeeperException;
+ import org.apache.zookeeper.KeeperException.NodeExistsException;
+ import org.junit.AfterClass;
++import org.junit.Before;
+ import org.junit.BeforeClass;
+ import org.junit.Test;
+ import org.mockito.Mockito;
+@@ -64,9 +66,9 @@ public class TestOpenRegionHandler {
+   private final static HBaseTestingUtility HTU = new HBaseTestingUtility();
+   private static final HTableDescriptor TEST_HTD =
+     new HTableDescriptor("TestOpenRegionHandler.java");
+-  private static final HRegionInfo TEST_HRI = 
+-    new HRegionInfo(TEST_HTD, HConstants.EMPTY_END_ROW,
+-          HConstants.EMPTY_END_ROW);
++  private HRegionInfo TEST_HRI;
++ 
++  private int testIndex = 0;
+ 
+   @BeforeClass public static void before() throws Exception {
+     HTU.startMiniZKCluster();
+@@ -193,6 +195,19 @@ public class TestOpenRegionHandler {
+   };
+ 
+   /**
++   * Before each test, use a different HRI, so the different tests
++   * don't interfere with each other. This allows us to use just
++   * a single ZK cluster for the whole suite.
++   */
++  @Before
++  public void setupHRI() {
++    TEST_HRI = new HRegionInfo(TEST_HTD,
++      Bytes.toBytes(testIndex),
++      Bytes.toBytes(testIndex + 1));
++    testIndex++;
++  }
++
++  /**
+    * Test the openregionhandler can deal with its znode being yanked out from
+    * under it.
+    * @see <a href="https://issues.apache.org/jira/browse/HBASE-3627">HBASE-3627</a>
+-- 
+1.7.0.4
+

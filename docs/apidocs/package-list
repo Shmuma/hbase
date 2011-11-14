@@ -20,6 +20,7 @@ org.apache.hadoop.hbase.master.handler
 org.apache.hadoop.hbase.master.metrics
 org.apache.hadoop.hbase.metrics
 org.apache.hadoop.hbase.metrics.file
+org.apache.hadoop.hbase.monitoring
 org.apache.hadoop.hbase.regionserver
 org.apache.hadoop.hbase.regionserver.handler
 org.apache.hadoop.hbase.regionserver.metrics
@@ -42,3 +43,6 @@ org.apache.hadoop.hbase.thrift
 org.apache.hadoop.hbase.thrift.generated
 org.apache.hadoop.hbase.util
 org.apache.hadoop.hbase.zookeeper
+org.apache.hbase.tmpl.common
+org.apache.hbase.tmpl.master
+org.apache.hbase.tmpl.regionserver

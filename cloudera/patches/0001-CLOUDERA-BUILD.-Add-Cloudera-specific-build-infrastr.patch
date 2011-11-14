@@ -1,7 +1,7 @@
-From db367cda62d77479085b8154df2728ab536cd5b0 Mon Sep 17 00:00:00 2001
+From 1170358c166394ae31eff8ba06aec91b80154b17 Mon Sep 17 00:00:00 2001
 From: Todd Lipcon <todd@cloudera.com>
 Date: Tue, 14 Jun 2011 11:02:00 -0700
-Subject: [PATCH 01/18] CLOUDERA-BUILD. Add Cloudera-specific build infrastructure.
+Subject: [PATCH 01/50] CLOUDERA-BUILD. Add Cloudera-specific build infrastructure.
 
 Major changes:
 * Add scripts in cloudera/ directory used for installation from within
@@ -12,19 +12,50 @@ Major changes:
 ** Inherit from CDH parent pom and add cdh repo
 ** Change to CDH version numbering for HBase and dependent projects
 ** Add cloudera/ directory to assembly
+* add tar.gz build to pom
 ---
+ bin/hbase                 |    4 ++
+ bin/hbase-config.sh       |    2 +
  cloudera/README.cloudera  |    9 +++
  cloudera/do-release-build |   22 ++++++++
  cloudera/hbase.1          |   73 ++++++++++++++++++++++++++
  cloudera/install_hbase.sh |  124 +++++++++++++++++++++++++++++++++++++++++++++
- pom.xml                   |   53 ++++++++++++++++----
+ pom.xml                   |   63 +++++++++++++++++++----
  src/assembly/all.xml      |    3 +
- 6 files changed, 274 insertions(+), 10 deletions(-)
+ 8 files changed, 290 insertions(+), 10 deletions(-)
  create mode 100644 cloudera/README.cloudera
  create mode 100755 cloudera/do-release-build
  create mode 100644 cloudera/hbase.1
  create mode 100755 cloudera/install_hbase.sh
 
+diff --git a/bin/hbase b/bin/hbase
+index 347fba6..f35062e 100755
+--- a/bin/hbase
++++ b/bin/hbase
+@@ -199,6 +199,10 @@ if [ -d "${HBASE_HOME}/build/native" -o -d "${HBASE_HOME}/lib/native" ]; then
+   fi
+ fi
+ 
++if [ -d "/usr/lib/hadoop-0.20/lib/native/${JAVA_PLATFORM}" ] ; then
++  JAVA_LIBRARY_PATH=$(append_path "${JAVA_LIBRARY_PATH}" /usr/lib/hadoop-0.20/lib/native/${JAVA_PLATFORM})
++fi
++
+ # cygwin path translation
+ if $cygwin; then
+   JAVA_LIBRARY_PATH=`cygpath -p "$JAVA_LIBRARY_PATH"`
+diff --git a/bin/hbase-config.sh b/bin/hbase-config.sh
+index 63b4f05..1656aaf 100644
+--- a/bin/hbase-config.sh
++++ b/bin/hbase-config.sh
+@@ -71,6 +71,8 @@ done
+  
+ # Allow alternate hbase conf dir location.
+ HBASE_CONF_DIR="${HBASE_CONF_DIR:-$HBASE_HOME/conf}"
++
++HBASE_PID_DIR="${HBASE_PID_DIR:-/tmp}"
+ # List of hbase regions servers.
+ HBASE_REGIONSERVERS="${HBASE_REGIONSERVERS:-$HBASE_CONF_DIR/regionservers}"
+ # List of hbase secondary masters.
 diff --git a/cloudera/README.cloudera b/cloudera/README.cloudera
 new file mode 100644
 index 0000000..8626e8f
@@ -42,7 +73,7 @@ index 0000000..8626e8f
 +3) The project was built by running the do-release-build script in this directory.
 diff --git a/cloudera/do-release-build b/cloudera/do-release-build
 new file mode 100755
-index 0000000..952b536
+index 0000000..67a63fb
 --- /dev/null
 +++ b/cloudera/do-release-build
 @@ -0,0 +1,22 @@
@@ -58,7 +89,7 @@ index 0000000..952b536
 +RELEASE_DIR=$BIN_DIR/..
 +
 +cd $RELEASE_DIR
-+mvn -DskipTests clean site source:jar install assembly:assembly javadoc:javadoc $DO_MAVEN_DEPLOY
++mvn -DskipTests clean site source:jar package install javadoc:javadoc $DO_MAVEN_DEPLOY
 +
 +mkdir -p build
 +for x in target/*.tar.gz ; do
@@ -278,10 +309,10 @@ index 0000000..bab39d4
 +
 +install -d -m 0755 $PREFIX/usr/bin
 diff --git a/pom.xml b/pom.xml
-index 3b36890..3e11a67 100644
+index 2dd48c9..f440976 100644
 --- a/pom.xml
 +++ b/pom.xml
-@@ -1,17 +1,34 @@
+@@ -1,17 +1,35 @@
  <?xml version="1.0" encoding="UTF-8"?>
 -<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
 +<!--
@@ -310,18 +341,19 @@ index 3b36890..3e11a67 100644
 -    <version>8</version>
 +    <groupId>com.cloudera.cdh</groupId>
 +    <artifactId>cdh-root</artifactId>
-+    <version>3.0-u1-SNAPSHOT</version>
++    <version>3.0-u2-SNAPSHOT</version>
++    <relativePath>../../../pom.xml</relativePath>
    </parent>
  
    <groupId>org.apache.hbase</groupId>
    <artifactId>hbase</artifactId>
    <packaging>jar</packaging>
--  <version>0.90.3</version>
-+  <version>0.90.3-cdh3u1-SNAPSHOT</version>
+-  <version>0.90.4</version>
++  <version>0.90.4-cdh3u2-SNAPSHOT</version>
    <name>HBase</name>
    <description>
      HBase is the &amp;lt;a href="http://hadoop.apache.org"&amp;rt;Hadoop&lt;/a&amp;rt; database. Use it when you need
-@@ -22,9 +39,8 @@
+@@ -22,9 +40,8 @@
    <url>http://hbase.apache.org</url>
  
    <scm>
@@ -333,7 +365,7 @@ index 3b36890..3e11a67 100644
    </scm>
  
    <issueManagement>
-@@ -135,6 +151,22 @@
+@@ -135,6 +152,22 @@
  
    <repositories>
      <repository>
@@ -356,7 +388,23 @@ index 3b36890..3e11a67 100644
        <id>temp-thrift</id>
        <name>Thrift 0.2.0</name>
        <url>http://people.apache.org/~rawson/repo/</url>
-@@ -326,6 +358,7 @@
+@@ -293,6 +326,15 @@
+             <descriptor>src/assembly/all.xml</descriptor>
+           </descriptors>
+         </configuration>
++        <executions>
++          <execution>
++            <id>tarball</id>
++            <phase>package</phase>
++            <goals>
++              <goal>single</goal>
++            </goals>
++          </execution>
++        </executions>
+       </plugin>
+ 
+       <!-- Run with -Dmaven.test.skip.exec=true to build -tests.jar without running tests (this is needed for upstream projects whose tests need this jar simply for compilation)-->
+@@ -326,6 +368,7 @@
        <plugin>
          <groupId>org.apache.maven.plugins</groupId>
          <artifactId>maven-source-plugin</artifactId>
@@ -364,7 +412,7 @@ index 3b36890..3e11a67 100644
          <executions>
            <execution>
              <id>attach-sources</id>
-@@ -452,7 +485,7 @@
+@@ -452,7 +495,7 @@
      at revision 1034499 with this hdfs-895 patch:
      https://issues.apache.org/jira/secure/attachment/12459473/hdfs-895-branch-20-append.txt
      -->
@@ -373,7 +421,7 @@ index 3b36890..3e11a67 100644
      <jasper.version>5.5.23</jasper.version>
      <jaxb-api.version>2.1</jaxb-api.version>
      <jetty.version>6.1.26</jetty.version>
-@@ -467,7 +500,7 @@
+@@ -467,7 +510,7 @@
      <slf4j.version>1.5.8</slf4j.version><!-- newer version available -->
      <stax-api.version>1.0.1</stax-api.version>
      <thrift.version>0.2.0</thrift.version><!-- newer version available -->

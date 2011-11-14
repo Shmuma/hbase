@@ -1,0 +1,50 @@
+From ea67d78243bda3d1f401f0806daca1689f4ac99b Mon Sep 17 00:00:00 2001
+From: Roman Shaposhnik <rvs@cloudera.com>
+Date: Tue, 6 Sep 2011 10:19:18 -0700
+Subject: [PATCH 28/50] HBASE-4156 ZKConfig defaults clientPort improperly
+
+Reason: Bug
+Author: Michajlo Matijkiw
+Ref: DISTRO-195
+---
+ .../apache/hadoop/hbase/zookeeper/ZKConfig.java    |    3 +--
+ .../hadoop/hbase/zookeeper/TestHQuorumPeer.java    |    5 +----
+ 2 files changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKConfig.java b/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKConfig.java
+index 24bcafe..d1a03a5 100644
+--- a/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKConfig.java
++++ b/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKConfig.java
+@@ -47,8 +47,7 @@ public class ZKConfig {
+ 
+   private static final String ZK_CFG_PROPERTY = "hbase.zookeeper.property.";
+   private static final int ZK_CFG_PROPERTY_SIZE = ZK_CFG_PROPERTY.length();
+-  private static final String ZK_CLIENT_PORT_KEY = ZK_CFG_PROPERTY
+-      + "clientPort";
++  private static final String ZK_CLIENT_PORT_KEY = "clientPort";
+ 
+   /**
+    * Make a Properties object holding ZooKeeper config equivalent to zoo.cfg.
+diff --git a/src/test/java/org/apache/hadoop/hbase/zookeeper/TestHQuorumPeer.java b/src/test/java/org/apache/hadoop/hbase/zookeeper/TestHQuorumPeer.java
+index bc71e5f..44be601 100644
+--- a/src/test/java/org/apache/hadoop/hbase/zookeeper/TestHQuorumPeer.java
++++ b/src/test/java/org/apache/hadoop/hbase/zookeeper/TestHQuorumPeer.java
+@@ -132,14 +132,11 @@ public class TestHQuorumPeer {
+     assertEquals("foo.bar", server.addr.getHostName());
+   }
+ 
+-  /**
+-   * Test Case for HBASE-2305
+-   */
+   @Test public void testShouldAssignDefaultZookeeperClientPort() {
+     Configuration config = HBaseConfiguration.create();
+     config.clear();
+     Properties p = ZKConfig.makeZKProps(config);
+     assertNotNull(p);
+-    assertEquals(2181, p.get("hbase.zookeeper.property.clientPort"));
++    assertEquals(2181, p.get("clientPort"));
+   }
+ }
+-- 
+1.7.0.4
+

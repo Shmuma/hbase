@@ -1,0 +1,36 @@
+From 97ca2223c4cf158cd4ef0133bea388968ad24b74 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Mon, 29 Aug 2011 18:15:02 -0700
+Subject: [PATCH 36/50] HBASE-4293. Some more verbose logging in ServerShutdownHandler
+
+Reason: Better debuggability when master is in a stuck state
+Author: Todd Lipcon
+Ref: CDH-3540
+---
+ .../master/handler/ServerShutdownHandler.java      |    6 +++++-
+ 1 files changed, 5 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java b/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
+index 526b83b..facdd44 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
+@@ -169,11 +169,15 @@ public class ServerShutdownHandler extends EventHandler {
+ 
+     // Assign root and meta if we were carrying them.
+     if (isCarryingRoot()) { // -ROOT-
++      LOG.info("Server " + serverName + " was carrying ROOT. Trying to assign.");
+       verifyAndAssignRootWithRetries();
+     }
+ 
+     // Carrying meta?
+-    if (isCarryingMeta()) this.services.getAssignmentManager().assignMeta();
++    if (isCarryingMeta()) {
++      LOG.info("Server " + serverName + " was carrying META. Trying to assign.");
++      this.services.getAssignmentManager().assignMeta();
++    }
+ 
+     // Wait on meta to come online; we need it to progress.
+     // TODO: Best way to hold strictly here?  We should build this retry logic
+-- 
+1.7.0.4
+

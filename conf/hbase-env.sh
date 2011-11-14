@@ -36,15 +36,15 @@
 # see http://wiki.apache.org/hadoop/PerformanceTuning
 export HBASE_OPTS="-ea -XX:+UseConcMarkSweepGC -XX:+CMSIncrementalMode"
 
-# Uncomment below to enable java garbage collection logging.
-# export HBASE_OPTS="$HBASE_OPTS -verbose:gc -XX:+PrintGCDetails -XX:+PrintGCDateStamps -Xloggc:$HBASE_HOME/logs/gc-hbase.log" 
+# Uncomment below to enable java garbage collection logging in the .out file.
+# export HBASE_OPTS="$HBASE_OPTS -verbose:gc -XX:+PrintGCDetails -XX:+PrintGCDateStamps" 
 
 # Uncomment and adjust to enable JMX exporting
 # See jmxremote.password and jmxremote.access in $JRE_HOME/lib/management to configure remote password access.
 # More details at: http://java.sun.com/javase/6/docs/technotes/guides/management/agent.html
 #
 # export HBASE_JMX_BASE="-Dcom.sun.management.jmxremote.ssl=false -Dcom.sun.management.jmxremote.authenticate=false"
-# export HBASE_MASTER_OPTS="$HBASE_JMX_BASE -Dcom.sun.management.jmxremote.port=10101 -javaagent:lib/HelloWorldAgent.jar"
+# export HBASE_MASTER_OPTS="$HBASE_JMX_BASE -Dcom.sun.management.jmxremote.port=10101"
 # export HBASE_REGIONSERVER_OPTS="$HBASE_JMX_BASE -Dcom.sun.management.jmxremote.port=10102"
 # export HBASE_THRIFT_OPTS="$HBASE_JMX_BASE -Dcom.sun.management.jmxremote.port=10103"
 # export HBASE_ZOOKEEPER_OPTS="$HBASE_JMX_BASE -Dcom.sun.management.jmxremote.port=10104"

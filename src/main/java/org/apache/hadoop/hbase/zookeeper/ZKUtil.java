@@ -1015,10 +1015,9 @@ public class ZKUtil {
   public static void deleteChildrenRecursively(ZooKeeperWatcher zkw, String node)
   throws KeeperException {
     List<String> children = ZKUtil.listChildrenNoWatch(zkw, node);
-    if(children != null || !children.isEmpty()) {
-      for(String child : children) {
-        deleteNodeRecursively(zkw, joinZNode(node, child));
-      }
+    if (children == null || children.isEmpty()) return;
+    for(String child : children) {
+      deleteNodeRecursively(zkw, joinZNode(node, child));
     }
   }
 
@@ -1113,6 +1112,6 @@ public class ZKUtil {
       (data == null? "null": (
           znode.startsWith(zkw.assignmentZNode) ?
               RegionTransitionData.fromBytes(data).toString()
-              : StringUtils.abbreviate(Bytes.toString(data), 32)))));
+              : StringUtils.abbreviate(Bytes.toStringBinary(data), 32)))));
   }
 }

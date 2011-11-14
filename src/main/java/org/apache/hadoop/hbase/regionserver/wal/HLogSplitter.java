@@ -43,16 +43,19 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.RemoteExceptionHandler;
+import org.apache.hadoop.hbase.io.HeapSize;
+import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.wal.HLog.Entry;
 import org.apache.hadoop.hbase.regionserver.wal.HLog.Reader;
 import org.apache.hadoop.hbase.regionserver.wal.HLog.Writer;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.io.MultipleIOException;
 
 import com.google.common.base.Preconditions;
@@ -64,7 +67,6 @@ import com.google.common.collect.Lists;
  * region to replay on startup. Delete the old log files when finished.
  */
 public class HLogSplitter {
-
   private static final String LOG_SPLITTER_IMPL = "hbase.hlog.splitter.impl";
 
   /**
@@ -100,6 +102,8 @@ public class HLogSplitter {
   // Wait/notify for when data has been produced by the reader thread,
   // consumed by the reader thread, or an exception occurred
   Object dataAvailable = new Object();
+  
+  private MonitoredTask status;
 
   
   /**
@@ -172,10 +176,16 @@ public class HLogSplitter {
         "An HLogSplitter instance may only be used once");
     hasSplit = true;
 
-    long startTime = System.currentTimeMillis();
+    status = TaskMonitor.get().createStatus(
+        "Splitting logs in " + srcDir);
+    
+    long startTime = EnvironmentEdgeManager.currentTimeMillis();
+    
+    status.setStatus("Determining files to split...");
     List<Path> splits = null;
     if (!fs.exists(srcDir)) {
       // Nothing to do
+      status.markComplete("No log directory existed to split.");
       return splits;
     }
     FileStatus[] logfiles = fs.listStatus(srcDir);
@@ -183,16 +193,23 @@ public class HLogSplitter {
       // Nothing to do
       return splits;
     }
-    LOG.info("Splitting " + logfiles.length + " hlog(s) in "
-        + srcDir.toString());
+    logAndReport("Splitting " + logfiles.length + " hlog(s) in "
+    + srcDir.toString());
     splits = splitLog(logfiles);
-    
-    splitTime = System.currentTimeMillis() - startTime;
-    LOG.info("hlog file splitting completed in " + splitTime +
-        " ms for " + srcDir.toString());
+
+    splitTime = EnvironmentEdgeManager.currentTimeMillis() - startTime;
+    String msg = "hlog file splitting completed in " + splitTime +
+        " ms for " + srcDir.toString();
+    status.markComplete(msg);
+    LOG.info(msg);
     return splits;
   }
   
+  private void logAndReport(String msg) {
+    status.setStatus(msg);
+    LOG.info(msg);
+  }
+
   /**
    * @return time that this split took
    */
@@ -245,6 +262,7 @@ public class HLogSplitter {
 
     boolean skipErrors = conf.getBoolean("hbase.hlog.split.skip.errors", true);
 
+    long totalBytesToSplit = countTotalBytes(logfiles);
     splitSize = 0;
 
     outputSink.startWriterThreads(entryBuffers);
@@ -255,7 +273,7 @@ public class HLogSplitter {
        Path logPath = log.getPath();
         long logLength = log.getLen();
         splitSize += logLength;
-        LOG.debug("Splitting hlog " + (i++ + 1) + " of " + logfiles.length
+        logAndReport("Splitting hlog " + (i++ + 1) + " of " + logfiles.length
             + ": " + logPath + ", length=" + logLength);
         try {
           recoverFileLease(fs, logPath, conf);
@@ -289,18 +307,35 @@ public class HLogSplitter {
           }
         }
       }
+      status.setStatus("Log splits complete. Checking for orphaned logs.");
+      
       if (fs.listStatus(srcDir).length > processedLogs.size()
           + corruptedLogs.size()) {
         throw new OrphanHLogAfterSplitException(
             "Discovered orphan hlog after split. Maybe the "
             + "HRegionServer was not dead when we started");
       }
-      archiveLogs(srcDir, corruptedLogs, processedLogs, oldLogDir, fs, conf);      
+
+      status.setStatus("Archiving logs after completed split");
+      archiveLogs(srcDir, corruptedLogs, processedLogs, oldLogDir, fs, conf);
     } finally {
+      status.setStatus("Finishing writing output logs and closing down.");
       splits = outputSink.finishWritingAndClose();
     }
     return splits;
   }
+
+  /**
+   * @return the total size of the passed list of files.
+   */
+  private static long countTotalBytes(FileStatus[] logfiles) {
+    long ret = 0;
+    for (FileStatus stat : logfiles) {
+      ret += stat.getLen();
+    }
+    return ret;
+  }
+
 
   /**
    * Moves processed logs to a oldLogDir after successful processing Moves
@@ -512,19 +547,20 @@ public class HLogSplitter {
       HLogKey key = entry.getKey();
       
       RegionEntryBuffer buffer;
+      long incrHeap;
       synchronized (this) {
         buffer = buffers.get(key.getEncodedRegionName());
         if (buffer == null) {
           buffer = new RegionEntryBuffer(key.getTablename(), key.getEncodedRegionName());
           buffers.put(key.getEncodedRegionName(), buffer);
         }
-        long incrHeap = buffer.appendEntry(entry);
-        totalBuffered += incrHeap;
+        incrHeap= buffer.appendEntry(entry);        
       }
 
       // If we crossed the chunk threshold, wait for more space to be available
       synchronized (dataAvailable) {
-        while (totalBuffered > maxHeapUsage && thrown == null) {
+        totalBuffered += incrHeap;
+        while (totalBuffered > maxHeapUsage && thrown.get() == null) {
           LOG.debug("Used " + totalBuffered + " bytes of buffered edits, waiting for IO threads...");
           dataAvailable.wait(3000);
         }
@@ -692,7 +728,10 @@ public class HLogSplitter {
     }
     
     void finish() {
-      shouldStop = true;
+      synchronized (dataAvailable) {
+        shouldStop = true;
+        dataAvailable.notifyAll();
+      }
     }
   }
 

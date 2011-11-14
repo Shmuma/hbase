@@ -20,6 +20,8 @@
 
 package org.apache.hadoop.hbase.util;
 
+import java.io.PrintWriter;
+
 import org.apache.hadoop.hbase.VersionAnnotation;
 
 /**
@@ -82,10 +84,14 @@ public class VersionInfo {
   public static String getUrl() {
     return version != null ? version.url() : "Unknown";
   }
+  
+  public static void writeTo(PrintWriter out) {
+    out.println("HBase " + getVersion());
+    out.println("Subversion " + getUrl() + " -r " + getRevision());
+    out.println("Compiled by " + getUser() + " on " + getDate());
+  }
 
   public static void main(String[] args) {
-    System.out.println("HBase " + getVersion());
-    System.out.println("Subversion " + getUrl() + " -r " + getRevision());
-    System.out.println("Compiled by " + getUser() + " on " + getDate());
+    writeTo(new PrintWriter(System.out));
   }
 }

@@ -50,6 +50,9 @@ import org.apache.hadoop.hbase.master.handler.ServerShutdownHandler;
 import org.apache.hadoop.hbase.master.metrics.MasterMetrics;
 import org.apache.hadoop.hbase.regionserver.Leases.LeaseStillHeldException;
 
+import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+
+
 /**
  * The ServerManager class manages info about region servers - HServerInfo,
  * load numbers, dying servers, etc.
@@ -277,8 +280,10 @@ public class ServerManager {
       // handleSplitReport will work. TODO: FIx!!
       if (msgs.length > 0)
         throw new PleaseHoldException("FIX! Putting off " +
-          "message processing because not yet rwady but possible we won't be " +
+          "message processing because not yet ready but possible we won't be " +
           "ready next on next report");
+
+      storedInfo = this.onlineServers.get(info.getServerName());
     }
 
     // Check startcodes
@@ -626,7 +631,8 @@ public class ServerManager {
    * @return Count of regions out on cluster
    * @throws InterruptedException
    */
-  public int waitForRegionServers()
+  public int waitForRegionServers(MonitoredTask status)
+
   throws InterruptedException {
     long interval = this.master.getConfiguration().
       getLong("hbase.master.wait.on.regionservers.interval", 1500);
@@ -644,21 +650,16 @@ public class ServerManager {
       Thread.sleep(interval);
       slept += interval;
       count = countOfRegionServers();
-      if (count == oldcount && count >= minToStart && slept >= timeout) {
-        LOG.info("Finished waiting for regionserver count to settle; " +
-            "count=" + count + ", sleptFor=" + slept);
-        break;
-      }
-      if (count >= maxToStart) {
-        LOG.info("At least the max configured number of regionserver(s) have " +
-            "checked in: " + count);
-        break;
-      }
+      if (count == oldcount && count > 0) break;
+
+      String msg;
       if (count == 0) {
-        LOG.info("Waiting on regionserver(s) to checkin");
+        msg = "Waiting on regionserver(s) to checkin";
       } else {
-        LOG.info("Waiting on regionserver(s) count to settle; currently=" + count);
+        msg = "Waiting on regionserver(s) count to settle; currently=" + count;
       }
+      LOG.info(msg);
+      status.setStatus(msg);
       oldcount = count;
     }
     // Count how many regions deployed out on cluster.  If fresh start, it'll

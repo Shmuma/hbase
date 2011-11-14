@@ -72,7 +72,73 @@ public class ServerShutdownHandler extends EventHandler {
       LOG.warn(hsi.getServerName() + " is NOT in deadservers; it should be!");
     }
   }
+  
+  @Override
+  public String getInformativeName() {
+    if (hsi != null) {
+      return this.getClass().getSimpleName() + " for " + hsi.getServerName();
+    } else {
+      return super.getInformativeName();
+    }
+  }
 
+  /**
+   * Before assign the ROOT region, ensure it haven't 
+   *  been assigned by other place
+   * <p>
+   * Under some scenarios, the ROOT region can be opened twice, so it seemed online
+   * in two regionserver at the same time.
+   * If the ROOT region has been assigned, so the operation can be canceled. 
+   * @throws InterruptedException
+   * @throws IOException
+   * @throws KeeperException
+   */
+  private void verifyAndAssignRoot() 
+  throws InterruptedException, IOException, KeeperException {
+    long timeout = this.server.getConfiguration().
+      getLong("hbase.catalog.verification.timeout", 1000);
+    if (!this.server.getCatalogTracker().verifyRootRegionLocation(timeout)) {
+      this.services.getAssignmentManager().assignRoot();     
+    }
+  }
+  
+  /**
+   * Failed many times, shutdown processing
+   * @throws IOException
+   */
+  private void verifyAndAssignRootWithRetries() throws IOException {
+    int iTimes = this.server.getConfiguration().getInt(
+        "hbase.catalog.verification.retries", 10);
+
+    long waitTime = this.server.getConfiguration().getLong(
+        "hbase.catalog.verification.timeout", 1000);
+
+    int iFlag = 0;
+    while (true) {
+      try {
+        verifyAndAssignRoot();
+        break;
+      } catch (KeeperException e) {
+        this.server.abort("In server shutdown processing, assigning root", e);
+        throw new IOException("Aborting", e);
+      } catch (Exception e) {
+        if (iFlag >= iTimes) {
+          this.server.abort("verifyAndAssignRoot failed after" + iTimes
+              + " times retries, aborting", e);
+          throw new IOException("Aborting", e);
+        }
+        try {
+          Thread.sleep(waitTime);
+        } catch (InterruptedException e1) {
+          LOG.warn("Interrupted when is the thread sleep", e1);
+          Thread.currentThread().interrupt();
+          throw new IOException("Interrupted", e1);
+        }
+        iFlag++;
+      }
+    }
+  }
+  
   /**
    * @return True if the server we are processing was carrying <code>-ROOT-</code>
    */
@@ -103,16 +169,15 @@ public class ServerShutdownHandler extends EventHandler {
 
     // Assign root and meta if we were carrying them.
     if (isCarryingRoot()) { // -ROOT-
-      try {
-        this.services.getAssignmentManager().assignRoot();
-      } catch (KeeperException e) {
-        this.server.abort("In server shutdown processing, assigning root", e);
-        throw new IOException("Aborting", e);
-      }
+      LOG.info("Server " + serverName + " was carrying ROOT. Trying to assign.");
+      verifyAndAssignRootWithRetries();
     }
 
     // Carrying meta?
-    if (isCarryingMeta()) this.services.getAssignmentManager().assignMeta();
+    if (isCarryingMeta()) {
+      LOG.info("Server " + serverName + " was carrying META. Trying to assign.");
+      this.services.getAssignmentManager().assignMeta();
+    }
 
     // Wait on meta to come online; we need it to progress.
     // TODO: Best way to hold strictly here?  We should build this retry logic
@@ -129,7 +194,7 @@ public class ServerShutdownHandler extends EventHandler {
         throw new IOException("Interrupted", e);
       } catch (IOException ioe) {
         LOG.info("Received exception accessing META during server shutdown of " +
-            serverName + ", retrying META read");
+            serverName + ", retrying META read", ioe);
       }
     }
 
@@ -142,7 +207,8 @@ public class ServerShutdownHandler extends EventHandler {
       }
     }
 
-    LOG.info("Reassigning " + hris.size() + " region(s) that " + serverName +
+    LOG.info("Reassigning " + (hris == null? 0: hris.size()) +
+      " region(s) that " + serverName +
       " was carrying (skipping " + regionsInTransition.size() +
       " regions(s) that are already in transition)");
 
@@ -192,11 +258,12 @@ public class ServerShutdownHandler extends EventHandler {
    */
   static void fixupDaughters(final Result result,
       final AssignmentManager assignmentManager,
-      final CatalogTracker catalogTracker) throws IOException {
+      final CatalogTracker catalogTracker)
+  throws IOException {
     fixupDaughter(result, HConstants.SPLITA_QUALIFIER, assignmentManager,
-        catalogTracker);
+      catalogTracker);
     fixupDaughter(result, HConstants.SPLITB_QUALIFIER, assignmentManager,
-        catalogTracker);
+      catalogTracker);
   }
 
   /**
@@ -237,8 +304,8 @@ public class ServerShutdownHandler extends EventHandler {
   }
 
   /**
-   * Look for presence of the daughter OR of a split of the daughter. Daughter
-   * could have been split over on regionserver before a run of the
+   * Look for presence of the daughter OR of a split of the daughter in .META.
+   * Daughter could have been split over on regionserver before a run of the
    * catalogJanitor had chance to clear reference from parent.
    * @param daughter Daughter region to search for.
    * @throws IOException 
@@ -283,6 +350,11 @@ public class ServerShutdownHandler extends EventHandler {
         LOG.warn("No serialized HRegionInfo in " + r);
         return true;
       }
+      byte [] value = r.getValue(HConstants.CATALOG_FAMILY,
+          HConstants.SERVER_QUALIFIER);
+      // See if daughter is assigned to some server
+      if (value == null) return false;
+
       // Now see if we have gone beyond the daughter's startrow.
       if (!Bytes.equals(daughter.getTableDesc().getName(),
           hri.getTableDesc().getName())) {

@@ -63,4 +63,12 @@ public interface HMasterRegionInterface extends HBaseRPCProtocolVersion {
   public HMsg[] regionServerReport(HServerInfo info, HMsg msgs[],
     HRegionInfo mostLoadedRegions[])
   throws IOException;
+  
+  /**
+   * Called by a region server to report a fatal error that is causing
+   * it to abort.
+   * @param info the RS that is aborting
+   * @param errorMessage informative text to expose in the master logs and UI
+   */
+  public void reportRSFatalError(HServerInfo info, String errorMessage);
 }

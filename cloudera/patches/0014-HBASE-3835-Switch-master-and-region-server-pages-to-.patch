@@ -1,0 +1,1108 @@
+From b4f8ff0c97d1b7f802de563eca916a3be148b0c4 Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Tue, 3 May 2011 19:07:00 +0000
+Subject: [PATCH 14/50] HBASE-3835 Switch master and region server pages to Jamon-based templates
+
+This backport is modified from the original patch because of a refactor due to HBASE-1502 on the 0.92 branch.
+- ServerName is not in 0.90.x branch so this is converted to HServerAddress and HServerInfo
+-- Updated jamon rendering tests
+- HMaster.getClusterId is not supported in 0.90.x so this is removed
+- Added interval argument to master-status template
+- Added region server servlet to HRegionServer
+- Removed HBASE-3843 related code
+
+Reason: Supportabilty.  Prerequisite for HBASE-3839, HBASE-3853, HBASE-3837.
+Author: Todd Lipcon
+Ref: CDH-3353
+---
+ pom.xml                                            |   47 +++++
+ .../hbase/tmpl/master/MasterStatusTmpl.jamon       |  196 ++++++++++++++++++++
+ .../hbase/tmpl/regionserver/RSStatusTmpl.jamon     |  104 +++++++++++
+ .../org/apache/hadoop/hbase/master/HMaster.java    |    1 +
+ .../hadoop/hbase/master/MasterStatusServlet.java   |  108 +++++++++++
+ .../hadoop/hbase/regionserver/HRegionServer.java   |    3 +-
+ .../hadoop/hbase/regionserver/RSStatusServlet.java |   46 +++++
+ src/main/resources/hbase-webapps/master/index.html |    2 +-
+ src/main/resources/hbase-webapps/master/master.jsp |  165 +----------------
+ .../hbase-webapps/regionserver/index.html          |    2 +-
+ .../hbase-webapps/regionserver/regionserver.jsp    |   80 +--------
+ .../hbase/master/TestMasterStatusServlet.java      |  122 ++++++++++++
+ .../hbase/regionserver/TestRSStatusServlet.java    |   93 +++++++++
+ 13 files changed, 723 insertions(+), 246 deletions(-)
+ create mode 100644 src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+ create mode 100644 src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon
+ create mode 100644 src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java
+ create mode 100644 src/main/java/org/apache/hadoop/hbase/regionserver/RSStatusServlet.java
+ create mode 100644 src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+ create mode 100644 src/test/java/org/apache/hadoop/hbase/regionserver/TestRSStatusServlet.java
+
+diff --git a/pom.xml b/pom.xml
+index 0d1af9b..8245792 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -520,6 +520,47 @@
+           </execution>
+         </executions>
+       </plugin>
++      <plugin>
++        <groupId>org.jamon</groupId>
++        <artifactId>jamon-maven-plugin</artifactId>
++        <version>2.3.4</version>
++        <executions>
++          <execution>
++            <phase>generate-sources</phase>
++            <goals>
++              <goal>translate</goal>
++            </goals>
++            <configuration>
++              <templateSourceDir>src/main/jamon</templateSourceDir>
++              <templateOutputDir>target/generated-jamon</templateOutputDir>
++            </configuration>
++          </execution>
++        </executions>
++      </plugin>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-eclipse-plugin</artifactId>
++        <configuration>
++          <additionalProjectnatures>
++            <projectnature>org.jamon.project.jamonnature</projectnature>
++          </additionalProjectnatures>
++          <buildcommands>
++            <buildcommand>org.jamon.project.templateBuilder</buildcommand>
++            <buildcommand>org.eclipse.jdt.core.javabuilder</buildcommand>
++            <buildcommand>org.jamon.project.markerUpdater</buildcommand>
++          </buildcommands>
++          <additionalConfig>
++             <file>
++                 <name>.settings/org.jamon.prefs</name>
++                 <content># now
++    eclipse.preferences.version=1
++    templateSourceDir=src/main/jamon
++    templateOutputDir=target/generated-jamon
++    </content>
++            </file>
++          </additionalConfig>
++        </configuration>
++      </plugin>
+     </plugins>
+   </build>
+ 
+@@ -768,6 +809,12 @@
+       </exclusions>
+     </dependency>
+ 
++    <dependency>
++      <groupId>org.jamon</groupId>
++      <artifactId>jamon-runtime</artifactId>
++      <version>2.3.1</version>
++    </dependency>
++
+     <!-- REST dependencies -->
+     <dependency>
+       <groupId>com.google.protobuf</groupId>
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+new file mode 100644
+index 0000000..e2b6650
+--- /dev/null
++++ b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+@@ -0,0 +1,196 @@
++<%doc>
++Copyright 2011 The Apache Software Foundation
++
++Licensed to the Apache Software Foundation (ASF) under one
++or more contributor license agreements.  See the NOTICE file
++distributed with this work for additional information
++regarding copyright ownership.  The ASF licenses this file
++to you under the Apache License, Version 2.0 (the
++"License"); you may not use this file except in compliance
++with the License.  You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++</%doc>
++<%args>
++HMaster master;
++HBaseAdmin admin;
++Map<String, Integer> frags = null;
++HServerAddress rootLocation = null;
++HServerAddress  metaLocation = null;
++Map<String, HServerInfo> servers = null;
++boolean showAppendWarning = false;
++int interval = 1;
++</%args>
++<%import>
++java.util.*;
++org.apache.hadoop.util.StringUtils;
++org.apache.hadoop.hbase.util.Bytes;
++org.apache.hadoop.hbase.util.JvmVersion;
++org.apache.hadoop.hbase.util.FSUtils;
++org.apache.hadoop.hbase.master.HMaster;
++org.apache.hadoop.hbase.HConstants;
++org.apache.hadoop.hbase.HServerLoad;
++org.apache.hadoop.hbase.client.HBaseAdmin;
++org.apache.hadoop.hbase.client.HConnectionManager;
++org.apache.hadoop.hbase.HServerInfo;
++org.apache.hadoop.hbase.HServerAddress;
++org.apache.hadoop.hbase.HTableDescriptor;
++</%import>
++<?xml version="1.0" encoding="UTF-8" ?>
++<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
++  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
++<html xmlns="http://www.w3.org/1999/xhtml">
++<head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/>
++<title>HBase Master: <% master.getMasterAddress().getHostname() %>:<% master.getMasterAddress().getPort() %></title>
++<link rel="stylesheet" type="text/css" href="/static/hbase.css" />
++</head>
++<body>
++<a id="logo" href="http://wiki.apache.org/lucene-hadoop/Hbase"><img src="/static/hbase_logo_med.gif" alt="HBase Logo" title="HBase Logo" /></a>
++<h1 id="page_title">Master: <% master.getMasterAddress().getHostname() %>:<% master.getMasterAddress().getPort() %></h1>
++<p id="links_menu"><a href="/logs/">Local logs</a>, <a href="/stacks">Thread Dump</a>, <a href="/logLevel">Log Level</a></p>
++
++<!-- Various warnings that cluster admins should be aware of -->
++<%if JvmVersion.isBadJvmVersion() %>
++  <div class="warning">
++  Your current JVM version <% System.getProperty("java.version") %> is known to be
++  unstable with HBase. Please see the
++  <a href="http://wiki.apache.org/hadoop/Hbase/Troubleshooting#A18">HBase wiki</a>
++  for details.
++  </div>
++</%if>
++<%if showAppendWarning %>
++  <div class="warning">
++  You are currently running the HMaster without HDFS append support enabled.
++  This may result in data loss.
++  Please see the <a href="http://wiki.apache.org/hadoop/Hbase/HdfsSyncSupport">HBase wiki</a>
++  for details.
++  </div>
++</%if>
++
++<hr id="head_rule" />
++
++<h2>Master Attributes</h2>
++<table>
++<tr><th>Attribute Name</th><th>Value</th><th>Description</th></tr>
++<tr><td>HBase Version</td><td><% org.apache.hadoop.hbase.util.VersionInfo.getVersion() %>, r<% org.apache.hadoop.hbase.util.VersionInfo.getRevision() %></td><td>HBase version and svn revision</td></tr>
++<tr><td>HBase Compiled</td><td><% org.apache.hadoop.hbase.util.VersionInfo.getDate() %>, <% org.apache.hadoop.hbase.util.VersionInfo.getUser() %></td><td>When HBase version was compiled and by whom</td></tr>
++<tr><td>Hadoop Version</td><td><% org.apache.hadoop.util.VersionInfo.getVersion() %>, r<% org.apache.hadoop.util.VersionInfo.getRevision() %></td><td>Hadoop version and svn revision</td></tr>
++<tr><td>Hadoop Compiled</td><td><% org.apache.hadoop.util.VersionInfo.getDate() %>, <% org.apache.hadoop.util.VersionInfo.getUser() %></td><td>When Hadoop version was compiled and by whom</td></tr>
++<tr><td>HBase Root Directory</td><td><% FSUtils.getRootDir(master.getConfiguration()).toString() %></td><td>Location of HBase home directory</td></tr>
++<tr><td>Load average</td><td><% StringUtils.limitDecimalTo2(master.getServerManager().getAverageLoad()) %></td><td>Average number of regions per regionserver. Naive computation.</td></tr>
++<%if frags != null %>
++        <tr><td>Fragmentation</td><td><% frags.get("-TOTAL-") != null ? frags.get("-TOTAL-").intValue() + "%" : "n/a" %></td><td>Overall fragmentation of all tables, including .META. and -ROOT-.</td></tr>
++</%if>
++<tr><td>Zookeeper Quorum</td><td><% master.getZooKeeperWatcher().getQuorum() %></td><td>Addresses of all registered ZK servers. For more, see <a href="/zk.jsp">zk dump</a>.</td></tr>
++</table>
++<%if (rootLocation != null) %>
++<& catalogTables &>
++</%if>
++<%if (metaLocation != null) %>
++<& userTables &>
++</%if>
++<%if (servers != null) %>
++<& regionServers &>
++</%if>
++</body>
++</html>
++
++
++<%def catalogTables>
++<h2>Catalog Tables</h2>
++<table>
++<tr>
++    <th>Table</th>
++    <%if (frags != null) %>
++        <th title="Fragmentation - Will be 0% after a major compaction and fluctuate during normal usage.">Frag.</th>
++    </%if>
++    <th>Description</th>
++</tr>
++<tr>
++    <td><a href="table.jsp?name=<% Bytes.toString(HConstants.ROOT_TABLE_NAME) %>"><% Bytes.toString(HConstants.ROOT_TABLE_NAME) %></a></td>
++  <%if (frags != null)%>
++        <td align="center"><% frags.get("-ROOT-") != null ? frags.get("-ROOT-").intValue() + "%" : "n/a" %></td>
++  </%if>
++    <td>The -ROOT- table holds references to all .META. regions.</td>
++</tr>
++  <%if (metaLocation != null) %>
++<tr>
++    <td><a href="table.jsp?name=<% Bytes.toString(HConstants.META_TABLE_NAME) %>"><% Bytes.toString(HConstants.META_TABLE_NAME) %></a></td>
++    <%if (frags != null)%>
++        <td align="center"><% frags.get(".META.") != null ? frags.get(".META.").intValue() + "%" : "n/a" %></td>
++    </%if>
++    <td>The .META. table holds references to all User Table regions</td>
++</tr>
++  
++  </%if>
++</table>
++</%def>
++
++<%def userTables>
++<h2>User Tables</h2>
++<%java>
++   HTableDescriptor[] tables = admin.listTables();
++   HConnectionManager.deleteConnection(admin.getConfiguration(), false);
++</%java>
++<%if (tables != null && tables.length > 0)%>
++<table>
++<tr>
++    <th>Table</th>
++<%if (frags != null) %>
++        <th title="Fragmentation - Will be 0% after a major compaction and fluctuate during normal usage.">Frag.</th>
++</%if>
++    <th>Description</th>
++</tr>
++<%for HTableDescriptor htDesc : tables%>
++<tr>
++    <td><a href=table.jsp?name=<% htDesc.getNameAsString() %>><% htDesc.getNameAsString() %></a> </td>
++    <%if (frags != null) %>
++        <td align="center"><% frags.get(htDesc.getNameAsString()) != null ? frags.get(htDesc.getNameAsString()).intValue() + "%" : "n/a" %></td>
++    </%if>
++    <td><% htDesc.toString() %></td>
++</tr>
++</%for>
++
++<p> <% tables.length %> table(s) in set.</p>
++</table>
++</%if>
++</%def>
++
++<%def regionServers>
++<h2>Region Servers</h2>
++<%if (servers != null && servers.size() > 0)%>
++<%java>
++     int totalRegions = 0;
++     int totalRequests = 0;
++</%java>
++
++<table>
++<tr><th rowspan="<% servers.size() + 1%>"></th><th>Address</th><th>Start Code</th><th>Load</th></tr>
++<%java>
++     String[] serverNames = servers.keySet().toArray(new String[servers.size()]);
++     Arrays.sort(serverNames);
++     for (String serverName: serverNames) {
++       HServerInfo hsi = servers.get(serverName);
++       String hostname = hsi.getServerAddress().getHostname() + ":" + hsi.getInfoPort();
++       String url = "http://" + hostname + "/";
++
++       totalRegions += hsi.getLoad().getNumberOfRegions();
++       totalRequests += hsi.getLoad().getNumberOfRequests() / interval;
++       long startCode = hsi.getStartCode();
++</%java>
++<tr><td><a href="<% url %>"><% hostname %></a></td><td><% startCode %><% serverName %></td><td><% hsi.getLoad().toString(interval) %></td></tr>
++<%java>
++    }
++</%java>
++<tr><th>Total: </th><td>servers: <% servers.size() %></td><td>&nbsp;</td><td>requests=<% totalRequests %>, regions=<% totalRegions %></td></tr>
++</table>
++
++<p>Load is requests per second and count of regions loaded</p>
++</%if>
++</%def>
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon
+new file mode 100644
+index 0000000..6e8a862
+--- /dev/null
++++ b/src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon
+@@ -0,0 +1,104 @@
++<%doc>
++Copyright 2011 The Apache Software Foundation
++
++Licensed to the Apache Software Foundation (ASF) under one
++or more contributor license agreements.  See the NOTICE file
++distributed with this work for additional information
++regarding copyright ownership.  The ASF licenses this file
++to you under the Apache License, Version 2.0 (the
++"License"); you may not use this file except in compliance
++with the License.  You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++</%doc>
++<%args>
++HRegionServer regionServer;
++</%args>
++<%import>
++java.util.*;
++java.io.IOException;
++org.apache.hadoop.io.Text;
++org.apache.hadoop.hbase.regionserver.HRegionServer;
++org.apache.hadoop.hbase.regionserver.HRegion;
++org.apache.hadoop.hbase.regionserver.metrics.RegionServerMetrics;
++org.apache.hadoop.hbase.util.Bytes;
++org.apache.hadoop.hbase.HConstants;
++org.apache.hadoop.hbase.HServerInfo;
++org.apache.hadoop.hbase.HServerLoad;
++org.apache.hadoop.hbase.HRegionInfo;
++</%import>
++<%java>
++  HServerInfo serverInfo = null;
++  try {
++    serverInfo = regionServer.getHServerInfo();
++  } catch (IOException e) {
++    e.printStackTrace();
++  }
++  RegionServerMetrics metrics = regionServer.getMetrics();
++  List<HRegionInfo> onlineRegions = regionServer.getOnlineRegions();
++  int interval = regionServer.getConfiguration().getInt("hbase.regionserver.msginterval", 3000)/1000;
++</%java>
++<?xml version="1.0" encoding="UTF-8" ?>
++<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
++  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
++<html xmlns="http://www.w3.org/1999/xhtml">
++<head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/>
++<title>HBase Region Server: <% serverInfo.getServerAddress().getHostname() %>:<% serverInfo.getServerAddress().getPort() %></title>
++<link rel="stylesheet" type="text/css" href="/static/hbase.css" />
++</head>
++
++<body>
++<a id="logo" href="http://wiki.apache.org/lucene-hadoop/Hbase"><img src="/static/hbase_logo_med.gif" alt="HBase Logo" title="HBase Logo" /></a>
++<h1 id="page_title">Region Server: <% serverInfo.getServerAddress().getHostname() %>:<% serverInfo.getServerAddress().getPort() %></h1>
++<p id="links_menu"><a href="/logs/">Local logs</a>, <a href="/stacks">Thread Dump</a>, <a href="/logLevel">Log Level</a></p>
++<hr id="head_rule" />
++
++<h2>Region Server Attributes</h2>
++<table>
++<tr><th>Attribute Name</th><th>Value</th><th>Description</th></tr>
++<tr><td>HBase Version</td><td><% org.apache.hadoop.hbase.util.VersionInfo.getVersion() %>, r<% org.apache.hadoop.hbase.util.VersionInfo.getRevision() %></td><td>HBase version and svn revision</td></tr>
++<tr><td>HBase Compiled</td><td><% org.apache.hadoop.hbase.util.VersionInfo.getDate() %>, <% org.apache.hadoop.hbase.util.VersionInfo.getUser() %></td><td>When HBase version was compiled and by whom</td></tr>
++<tr><td>Metrics</td><td><% metrics.toString() %></td><td>RegionServer Metrics; file and heap sizes are in megabytes</td></tr>
++<tr><td>Zookeeper Quorum</td><td><% regionServer.getZooKeeper().getQuorum() %></td><td>Addresses of all registered ZK servers</td></tr>
++</table>
++
++<h2>Online Regions</h2>
++<%if (onlineRegions != null && onlineRegions.size() > 0) %>
++<table>
++<tr><th>Region Name</th><th>Start Key</th><th>End Key</th><th>Metrics</th></tr>
++<%java>
++  Collections.sort(onlineRegions);
++</%java>
++<%for HRegionInfo r: onlineRegions %>
++<%java>
++        HServerLoad.RegionLoad load = regionServer.createRegionLoad(r.getEncodedName());
++</%java>
++<tr><td><% r.getRegionNameAsString() %></td>
++    <td><% Bytes.toStringBinary(r.getStartKey()) %></td><td><% Bytes.toStringBinary(r.getEndKey()) %></td>
++    <td><% load == null? "null": load.toString() %></td>
++    </tr>
++</%for>
++</table>
++<p>Region names are made of the containing table's name, a comma,
++the start key, a comma, and a randomly generated region id.  To illustrate,
++the region named
++<em>domains,apache.org,5464829424211263407</em> is party to the table
++<em>domains</em>, has an id of <em>5464829424211263407</em> and the first key
++in the region is <em>apache.org</em>.  The <em>-ROOT-</em>
++and <em>.META.</em> 'tables' are internal sytem tables (or 'catalog' tables in db-speak).
++The -ROOT- keeps a list of all regions in the .META. table.  The .META. table
++keeps a list of all regions in the system. The empty key is used to denote
++table start and table end.  A region with an empty start key is the first region in a table.
++If region has both an empty start and an empty end key, its the only region in the table.  See
++<a href="http://hbase.org">HBase Home</a> for further explication.<p>
++<%else>
++<p>Not serving regions</p>
++</%if>
++</body>
++</html>
+\ No newline at end of file
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index 618f251..1887538 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -562,6 +562,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+    if (port >= 0) {
+      String a = this.conf.get("hbase.master.info.bindAddress", "0.0.0.0");
+      this.infoServer = new InfoServer(MASTER, a, port, false);
++     this.infoServer.addServlet("status", "/master-status", MasterStatusServlet.class);
+      this.infoServer.setAttribute(MASTER, this);
+      this.infoServer.start();
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java b/src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java
+new file mode 100644
+index 0000000..b7c56df
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java
+@@ -0,0 +1,108 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.master;
++
++import java.io.IOException;
++import java.util.List;
++import java.util.Map;
++
++import javax.servlet.http.HttpServlet;
++import javax.servlet.http.HttpServletRequest;
++import javax.servlet.http.HttpServletResponse;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hbase.HServerAddress;
++import org.apache.hadoop.hbase.HServerInfo;
++import org.apache.hadoop.hbase.client.HBaseAdmin;
++import org.apache.hadoop.hbase.util.FSUtils;
++import org.apache.hbase.tmpl.master.MasterStatusTmpl;
++
++/**
++ * The servlet responsible for rendering the index page of the
++ * master.
++ */
++public class MasterStatusServlet extends HttpServlet {
++  private static final Log LOG = LogFactory.getLog(MasterStatusServlet.class);
++  private static final long serialVersionUID = 1L;
++
++  @Override
++  public void doGet(HttpServletRequest request, HttpServletResponse response)
++    throws IOException
++  {
++    HMaster master = (HMaster) getServletContext().getAttribute(HMaster.MASTER);
++    assert master != null : "No Master in context!";
++    
++    Configuration conf = master.getConfiguration();
++    HBaseAdmin admin = new HBaseAdmin(conf);
++        
++    Map<String, Integer> frags = getFragmentationInfo(master, conf);
++    
++    HServerAddress rootLocation = getRootLocationOrNull(master);
++    HServerAddress metaLocation = master.getCatalogTracker().getMetaLocation();
++    Map<String,HServerInfo> servers= master.getServerManager().getOnlineServers();
++
++    int interval = conf.getInt("hbase.regionserver.msginterval", 1000)/1000;
++    if (interval == 0) {
++        interval = 1;
++    }
++    
++    response.setContentType("text/html");
++    new MasterStatusTmpl()
++      .setFrags(frags)
++      .setShowAppendWarning(shouldShowAppendWarning(conf))
++      .setRootLocation(rootLocation)
++      .setMetaLocation(metaLocation)
++      .setServers(servers)
++      .setInterval(interval)
++      .render(response.getWriter(),
++          master, admin);
++  }
++
++  private HServerAddress getRootLocationOrNull(HMaster master) {
++    try {
++      return master.getCatalogTracker().getRootLocation();
++    } catch (InterruptedException e) {
++      LOG.warn("Unable to get root location", e);
++      return null;
++    }
++  }
++
++  private Map<String, Integer> getFragmentationInfo(
++      HMaster master, Configuration conf) throws IOException {
++    boolean showFragmentation = conf.getBoolean(
++        "hbase.master.ui.fragmentation.enabled", false);
++    if (showFragmentation) {
++      return FSUtils.getTableFragmentation(master);
++    } else {
++      return null;
++    }
++  }
++
++  static boolean shouldShowAppendWarning(Configuration conf) {
++    try {
++      return !FSUtils.isAppendSupported(conf) && FSUtils.isHDFS(conf);
++    } catch (IOException e) {
++      LOG.warn("Unable to determine if append is supported", e);
++      return false;
++    }
++  }
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+index ec8390b..ff3c5d1 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+@@ -1279,7 +1279,8 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+           false);
+       while (true) {
+         try {
+-          this.infoServer = new InfoServer("regionserver", addr, port, false);
++          this.infoServer = new InfoServer(REGIONSERVER, addr, port, false);
++          this.infoServer.addServlet("status", "/rs-status", RSStatusServlet.class);
+           this.infoServer.setAttribute("regionserver", this);
+           this.infoServer.start();
+           break;
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/RSStatusServlet.java b/src/main/java/org/apache/hadoop/hbase/regionserver/RSStatusServlet.java
+new file mode 100644
+index 0000000..e8c2b95
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/RSStatusServlet.java
+@@ -0,0 +1,46 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.regionserver;
++
++import java.io.IOException;
++
++import javax.servlet.ServletException;
++import javax.servlet.http.HttpServlet;
++import javax.servlet.http.HttpServletRequest;
++import javax.servlet.http.HttpServletResponse;
++
++import org.apache.hbase.tmpl.regionserver.RSStatusTmpl;
++
++public class RSStatusServlet extends HttpServlet {
++  private static final long serialVersionUID = 1L;
++
++  @Override
++  protected void doGet(HttpServletRequest req, HttpServletResponse resp)
++      throws ServletException, IOException
++    {
++    HRegionServer hrs = (HRegionServer)getServletContext().getAttribute(
++        HRegionServer.REGIONSERVER);
++    assert hrs != null : "No RS in context!";
++    
++    resp.setContentType("text/html");
++    new RSStatusTmpl().render(resp.getWriter(), hrs);
++  }
++
++}
+diff --git a/src/main/resources/hbase-webapps/master/index.html b/src/main/resources/hbase-webapps/master/index.html
+index 6d301ab..2c8115b 100644
+--- a/src/main/resources/hbase-webapps/master/index.html
++++ b/src/main/resources/hbase-webapps/master/index.html
+@@ -1 +1 @@
+-<meta HTTP-EQUIV="REFRESH" content="0;url=master.jsp"/>
++<meta HTTP-EQUIV="REFRESH" content="0;url=/master-status"/>
+diff --git a/src/main/resources/hbase-webapps/master/master.jsp b/src/main/resources/hbase-webapps/master/master.jsp
+index 9a133ec..2c8115b 100644
+--- a/src/main/resources/hbase-webapps/master/master.jsp
++++ b/src/main/resources/hbase-webapps/master/master.jsp
+@@ -1,164 +1 @@
+-<%@ page contentType="text/html;charset=UTF-8"
+-  import="java.util.*"
+-  import="org.apache.hadoop.conf.Configuration"
+-  import="org.apache.hadoop.util.StringUtils"
+-  import="org.apache.hadoop.hbase.util.Bytes"
+-  import="org.apache.hadoop.hbase.util.JvmVersion"
+-  import="org.apache.hadoop.hbase.util.FSUtils"
+-  import="org.apache.hadoop.hbase.master.HMaster"
+-  import="org.apache.hadoop.hbase.HConstants"
+-  import="org.apache.hadoop.hbase.client.HBaseAdmin"
+-  import="org.apache.hadoop.hbase.client.HConnectionManager"
+-  import="org.apache.hadoop.hbase.HServerInfo"
+-  import="org.apache.hadoop.hbase.HServerAddress"
+-  import="org.apache.hadoop.hbase.HTableDescriptor" %><%
+-  HMaster master = (HMaster)getServletContext().getAttribute(HMaster.MASTER);
+-  Configuration conf = master.getConfiguration();
+-  HServerAddress rootLocation = master.getCatalogTracker().getRootLocation();
+-  boolean metaOnline = master.getCatalogTracker().getMetaLocation() != null;
+-  Map<String, HServerInfo> serverToServerInfos =
+-    master.getServerManager().getOnlineServers();
+-  int interval = conf.getInt("hbase.regionserver.msginterval", 1000)/1000;
+-  if (interval == 0) {
+-      interval = 1;
+-  }
+-  boolean showFragmentation = conf.getBoolean("hbase.master.ui.fragmentation.enabled", false);
+-  Map<String, Integer> frags = null;
+-  if (showFragmentation) {
+-      frags = FSUtils.getTableFragmentation(master);
+-  }
+-%><?xml version="1.0" encoding="UTF-8" ?>
+-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" 
+-  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"> 
+-<html xmlns="http://www.w3.org/1999/xhtml">
+-<head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/>
+-<title>HBase Master: <%= master.getMasterAddress().getHostname()%>:<%= master.getMasterAddress().getPort() %></title>
+-<link rel="stylesheet" type="text/css" href="/static/hbase.css" />
+-</head>
+-<body>
+-<a id="logo" href="http://wiki.apache.org/lucene-hadoop/Hbase"><img src="/static/hbase_logo_med.gif" alt="HBase Logo" title="HBase Logo" /></a>
+-<h1 id="page_title">Master: <%=master.getMasterAddress().getHostname()%>:<%=master.getMasterAddress().getPort()%></h1>
+-<p id="links_menu"><a href="/logs/">Local logs</a>, <a href="/stacks">Thread Dump</a>, <a href="/logLevel">Log Level</a></p>
+-
+-<!-- Various warnings that cluster admins should be aware of -->
+-<% if (JvmVersion.isBadJvmVersion()) { %>
+-  <div class="warning">
+-  Your current JVM version <%= System.getProperty("java.version") %> is known to be
+-  unstable with HBase. Please see the
+-  <a href="http://wiki.apache.org/hadoop/Hbase/Troubleshooting#A18">HBase wiki</a>
+-  for details.
+-  </div>
+-<% } %>
+-<% if (!FSUtils.isAppendSupported(conf) && FSUtils.isHDFS(conf)) { %>
+-  <div class="warning">
+-  You are currently running the HMaster without HDFS append support enabled.
+-  This may result in data loss.
+-  Please see the <a href="http://wiki.apache.org/hadoop/Hbase/HdfsSyncSupport">HBase wiki</a>
+-  for details.
+-  </div>
+-<% } %>
+-
+-<hr id="head_rule" />
+-
+-<h2>Master Attributes</h2>
+-<table>
+-<tr><th>Attribute Name</th><th>Value</th><th>Description</th></tr>
+-<tr><td>HBase Version</td><td><%= org.apache.hadoop.hbase.util.VersionInfo.getVersion() %>, r<%= org.apache.hadoop.hbase.util.VersionInfo.getRevision() %></td><td>HBase version and svn revision</td></tr>
+-<tr><td>HBase Compiled</td><td><%= org.apache.hadoop.hbase.util.VersionInfo.getDate() %>, <%= org.apache.hadoop.hbase.util.VersionInfo.getUser() %></td><td>When HBase version was compiled and by whom</td></tr>
+-<tr><td>Hadoop Version</td><td><%= org.apache.hadoop.util.VersionInfo.getVersion() %>, r<%= org.apache.hadoop.util.VersionInfo.getRevision() %></td><td>Hadoop version and svn revision</td></tr>
+-<tr><td>Hadoop Compiled</td><td><%= org.apache.hadoop.util.VersionInfo.getDate() %>, <%= org.apache.hadoop.util.VersionInfo.getUser() %></td><td>When Hadoop version was compiled and by whom</td></tr>
+-<tr><td>HBase Root Directory</td><td><%= FSUtils.getRootDir(master.getConfiguration()).toString() %></td><td>Location of HBase home directory</td></tr>
+-<tr><td>Load average</td><td><%= StringUtils.limitDecimalTo2(master.getServerManager().getAverageLoad()) %></td><td>Average number of regions per regionserver. Naive computation.</td></tr>
+-<%  if (showFragmentation) { %>
+-        <tr><td>Fragmentation</td><td><%= frags.get("-TOTAL-") != null ? frags.get("-TOTAL-").intValue() + "%" : "n/a" %></td><td>Overall fragmentation of all tables, including .META. and -ROOT-.</td></tr>
+-<%  } %>
+-<tr><td>Zookeeper Quorum</td><td><%= master.getZooKeeperWatcher().getQuorum() %></td><td>Addresses of all registered ZK servers. For more, see <a href="/zk.jsp">zk dump</a>.</td></tr>
+-</table>
+-
+-<h2>Catalog Tables</h2>
+-<% 
+-  if (rootLocation != null) { %>
+-<table>
+-<tr>
+-    <th>Table</th>
+-<%  if (showFragmentation) { %>
+-        <th title="Fragmentation - Will be 0% after a major compaction and fluctuate during normal usage.">Frag.</th>
+-<%  } %>
+-    <th>Description</th>
+-</tr>
+-<tr>
+-    <td><a href="table.jsp?name=<%= Bytes.toString(HConstants.ROOT_TABLE_NAME) %>"><%= Bytes.toString(HConstants.ROOT_TABLE_NAME) %></a></td>
+-<%  if (showFragmentation) { %>
+-        <td align="center"><%= frags.get("-ROOT-") != null ? frags.get("-ROOT-").intValue() + "%" : "n/a" %></td>
+-<%  } %>
+-    <td>The -ROOT- table holds references to all .META. regions.</td>
+-</tr>
+-<%
+-    if (metaOnline) { %>
+-<tr>
+-    <td><a href="table.jsp?name=<%= Bytes.toString(HConstants.META_TABLE_NAME) %>"><%= Bytes.toString(HConstants.META_TABLE_NAME) %></a></td>
+-<%  if (showFragmentation) { %>
+-        <td align="center"><%= frags.get(".META.") != null ? frags.get(".META.").intValue() + "%" : "n/a" %></td>
+-<%  } %>
+-    <td>The .META. table holds references to all User Table regions</td>
+-</tr>
+-  
+-<%  } %>
+-</table>
+-<%} %>
+-
+-<h2>User Tables</h2>
+-<%
+-   HBaseAdmin hba = new HBaseAdmin(conf);
+-   HTableDescriptor[] tables = hba.listTables();
+-   HConnectionManager.deleteConnection(hba.getConfiguration(), false);
+-   if(tables != null && tables.length > 0) { %>
+-<table>
+-<tr>
+-    <th>Table</th>
+-<%  if (showFragmentation) { %>
+-        <th title="Fragmentation - Will be 0% after a major compaction and fluctuate during normal usage.">Frag.</th>
+-<%  } %>
+-    <th>Description</th>
+-</tr>
+-<%   for(HTableDescriptor htDesc : tables ) { %>
+-<tr>
+-    <td><a href=table.jsp?name=<%= htDesc.getNameAsString() %>><%= htDesc.getNameAsString() %></a> </td>
+-<%  if (showFragmentation) { %>
+-        <td align="center"><%= frags.get(htDesc.getNameAsString()) != null ? frags.get(htDesc.getNameAsString()).intValue() + "%" : "n/a" %></td>
+-<%  } %>
+-    <td><%= htDesc.toString() %></td>
+-</tr>
+-<%   }  %>
+-
+-<p> <%= tables.length %> table(s) in set.</p>
+-</table>
+-<% } %>
+-
+-<h2>Region Servers</h2>
+-<% if (serverToServerInfos != null && serverToServerInfos.size() > 0) { %>
+-<%   int totalRegions = 0;
+-     int totalRequests = 0; 
+-%>
+-
+-<table>
+-<tr><th rowspan="<%= serverToServerInfos.size() + 1%>"></th><th>Address</th><th>Start Code</th><th>Load</th></tr>
+-<%   String[] serverNames = serverToServerInfos.keySet().toArray(new String[serverToServerInfos.size()]);
+-     Arrays.sort(serverNames);
+-     for (String serverName: serverNames) {
+-       HServerInfo hsi = serverToServerInfos.get(serverName);
+-       String hostname = hsi.getServerAddress().getHostname() + ":" + hsi.getInfoPort();
+-       String url = "http://" + hostname + "/";
+-       totalRegions += hsi.getLoad().getNumberOfRegions();
+-       totalRequests += hsi.getLoad().getNumberOfRequests() / interval;
+-       long startCode = hsi.getStartCode();
+-%>
+-<tr><td><a href="<%= url %>"><%= hostname %></a></td><td><%= startCode %></td><td><%= hsi.getLoad().toString(interval) %></td></tr>
+-<%   } %>
+-<tr><th>Total: </th><td>servers: <%= serverToServerInfos.size() %></td><td>&nbsp;</td><td>requests=<%= totalRequests %>, regions=<%= totalRegions %></td></tr>
+-</table>
+-
+-<p>Load is requests per second and count of regions loaded</p>
+-<% } %>
+-</body>
+-</html>
++<meta HTTP-EQUIV="REFRESH" content="0;url=/master-status"/>
+diff --git a/src/main/resources/hbase-webapps/regionserver/index.html b/src/main/resources/hbase-webapps/regionserver/index.html
+index bdd3c6a..78d6d2e 100644
+--- a/src/main/resources/hbase-webapps/regionserver/index.html
++++ b/src/main/resources/hbase-webapps/regionserver/index.html
+@@ -1 +1 @@
+-<meta HTTP-EQUIV="REFRESH" content="0;url=regionserver.jsp"/>
++<meta HTTP-EQUIV="REFRESH" content="0;url=/rs-status"/>
+diff --git a/src/main/resources/hbase-webapps/regionserver/regionserver.jsp b/src/main/resources/hbase-webapps/regionserver/regionserver.jsp
+index 7995e91..bf6f6e2 100644
+--- a/src/main/resources/hbase-webapps/regionserver/regionserver.jsp
++++ b/src/main/resources/hbase-webapps/regionserver/regionserver.jsp
+@@ -1,79 +1 @@
+-<%@ page contentType="text/html;charset=UTF-8"
+-  import="java.util.*"
+-  import="java.io.IOException"
+-  import="org.apache.hadoop.io.Text"
+-  import="org.apache.hadoop.hbase.regionserver.HRegionServer"
+-  import="org.apache.hadoop.hbase.regionserver.HRegion"
+-  import="org.apache.hadoop.hbase.regionserver.metrics.RegionServerMetrics"
+-  import="org.apache.hadoop.hbase.util.Bytes"
+-  import="org.apache.hadoop.hbase.HConstants"
+-  import="org.apache.hadoop.hbase.HServerInfo"
+-  import="org.apache.hadoop.hbase.HServerLoad"
+-  import="org.apache.hadoop.hbase.HRegionInfo" %><%
+-  HRegionServer regionServer = (HRegionServer)getServletContext().getAttribute(HRegionServer.REGIONSERVER);
+-  HServerInfo serverInfo = null;
+-  try {
+-    serverInfo = regionServer.getHServerInfo();
+-  } catch (IOException e) {
+-    e.printStackTrace();
+-  }
+-  RegionServerMetrics metrics = regionServer.getMetrics();
+-  List<HRegionInfo> onlineRegions = regionServer.getOnlineRegions();
+-  int interval = regionServer.getConfiguration().getInt("hbase.regionserver.msginterval", 3000)/1000;
+-
+-%><?xml version="1.0" encoding="UTF-8" ?>
+-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" 
+-  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"> 
+-<html xmlns="http://www.w3.org/1999/xhtml">
+-<head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/>
+-<title>HBase Region Server: <%= serverInfo.getServerAddress().getHostname() %>:<%= serverInfo.getServerAddress().getPort() %></title>
+-<link rel="stylesheet" type="text/css" href="/static/hbase.css" />
+-</head>
+-
+-<body>
+-<a id="logo" href="http://wiki.apache.org/lucene-hadoop/Hbase"><img src="/static/hbase_logo_med.gif" alt="HBase Logo" title="HBase Logo" /></a>
+-<h1 id="page_title">Region Server: <%= serverInfo.getServerAddress().getHostname() %>:<%= serverInfo.getServerAddress().getPort() %></h1>
+-<p id="links_menu"><a href="/logs/">Local logs</a>, <a href="/stacks">Thread Dump</a>, <a href="/logLevel">Log Level</a></p>
+-<hr id="head_rule" />
+-
+-<h2>Region Server Attributes</h2>
+-<table>
+-<tr><th>Attribute Name</th><th>Value</th><th>Description</th></tr>
+-<tr><td>HBase Version</td><td><%= org.apache.hadoop.hbase.util.VersionInfo.getVersion() %>, r<%= org.apache.hadoop.hbase.util.VersionInfo.getRevision() %></td><td>HBase version and svn revision</td></tr>
+-<tr><td>HBase Compiled</td><td><%= org.apache.hadoop.hbase.util.VersionInfo.getDate() %>, <%= org.apache.hadoop.hbase.util.VersionInfo.getUser() %></td><td>When HBase version was compiled and by whom</td></tr>
+-<tr><td>Metrics</td><td><%= metrics.toString() %></td><td>RegionServer Metrics; file and heap sizes are in megabytes</td></tr>
+-<tr><td>Zookeeper Quorum</td><td><%= regionServer.getZooKeeper().getQuorum() %></td><td>Addresses of all registered ZK servers</td></tr>
+-</table>
+-
+-<h2>Online Regions</h2>
+-<% if (onlineRegions != null && onlineRegions.size() > 0) { %>
+-<table>
+-<tr><th>Region Name</th><th>Start Key</th><th>End Key</th><th>Metrics</th></tr>
+-<%   
+-  Collections.sort(onlineRegions);
+-  for (HRegionInfo r: onlineRegions) { 
+-        HServerLoad.RegionLoad load = regionServer.createRegionLoad(r.getEncodedName());
+- %>
+-<tr><td><%= r.getRegionNameAsString() %></td>
+-    <td><%= Bytes.toStringBinary(r.getStartKey()) %></td><td><%= Bytes.toStringBinary(r.getEndKey()) %></td>
+-    <td><%= load == null? "null": load.toString() %></td>
+-    </tr>
+-<%   } %>
+-</table>
+-<p>Region names are made of the containing table's name, a comma,
+-the start key, a comma, and a randomly generated region id.  To illustrate,
+-the region named
+-<em>domains,apache.org,5464829424211263407</em> is party to the table 
+-<em>domains</em>, has an id of <em>5464829424211263407</em> and the first key
+-in the region is <em>apache.org</em>.  The <em>-ROOT-</em>
+-and <em>.META.</em> 'tables' are internal sytem tables (or 'catalog' tables in db-speak).
+-The -ROOT- keeps a list of all regions in the .META. table.  The .META. table
+-keeps a list of all regions in the system. The empty key is used to denote
+-table start and table end.  A region with an empty start key is the first region in a table.
+-If region has both an empty start and an empty end key, its the only region in the table.  See
+-<a href="http://hbase.org">HBase Home</a> for further explication.<p>
+-<% } else { %>
+-<p>Not serving regions</p>
+-<% } %>
+-</body>
+-</html>
++<meta HTTP-EQUIV="REFRESH" content="0;url=/rs-status"/>
+\ No newline at end of file
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+new file mode 100644
+index 0000000..7b4b07d
+--- /dev/null
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+@@ -0,0 +1,122 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.master;
++
++import java.io.IOException;
++import java.io.StringWriter;
++import java.util.HashMap;
++import java.util.Map;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hbase.HBaseConfiguration;
++import org.apache.hadoop.hbase.HConstants;
++import org.apache.hadoop.hbase.HServerAddress;
++import org.apache.hadoop.hbase.HServerInfo;
++import org.apache.hadoop.hbase.HTableDescriptor;
++import org.apache.hadoop.hbase.client.HBaseAdmin;
++import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
++import org.apache.hbase.tmpl.master.MasterStatusTmpl;
++import org.junit.Before;
++import org.junit.Test;
++import org.mockito.Mockito;
++
++/**
++ * Tests for the master status page and its template.
++ */
++public class TestMasterStatusServlet {
++  
++  private HMaster master;
++  private Configuration conf;
++  private HBaseAdmin admin;
++
++  @Before
++  public void setupBasicMocks() {
++    conf = HBaseConfiguration.create();
++    
++    master = Mockito.mock(HMaster.class);
++    Mockito.doReturn(new HServerAddress("localhost:12345"))
++      .when(master).getMasterAddress();
++    Mockito.doReturn(conf).when(master).getConfiguration();
++    
++    // Fake serverManager
++    ServerManager serverManager = Mockito.mock(ServerManager.class);
++    Mockito.doReturn(1.0).when(serverManager).getAverageLoad();
++    Mockito.doReturn(serverManager).when(master).getServerManager();
++
++    // Fake ZKW
++    ZooKeeperWatcher zkw = Mockito.mock(ZooKeeperWatcher.class);
++    Mockito.doReturn("fakequorum").when(zkw).getQuorum();
++    Mockito.doReturn(zkw).when(master).getZooKeeperWatcher();
++
++    // Mock admin
++    admin = Mockito.mock(HBaseAdmin.class);
++  }
++  
++
++  private void setupMockTables() throws IOException {
++    HTableDescriptor tables[] = new HTableDescriptor[] {
++        new HTableDescriptor("foo"),
++        new HTableDescriptor("bar")
++    };
++    Mockito.doReturn(tables).when(admin).listTables();
++  }
++  
++  @Test
++  public void testStatusTemplateNoTables() throws IOException {
++    new MasterStatusTmpl().render(new StringWriter(),
++        master, admin);
++  }
++  
++  @Test
++  public void testStatusTemplateRootAvailable() throws IOException {
++    new MasterStatusTmpl()
++    .setRootLocation(new HServerAddress("localhost:12345"))
++      .render(new StringWriter(),
++        master, admin);
++  }
++  
++  @Test
++  public void testStatusTemplateRootAndMetaAvailable() throws IOException {
++    setupMockTables();
++    
++    new MasterStatusTmpl()
++    .setRootLocation(new HServerAddress("localhost:12345"))
++    .setMetaLocation(new HServerAddress("localhost:12345"))
++      .render(new StringWriter(),
++        master, admin);
++  }
++
++  @Test
++  public void testStatusTemplateWithServers() throws IOException {
++    setupMockTables();
++    
++    Map<String,HServerInfo> servers = new HashMap<String,HServerInfo>();
++    servers.put("rootserver", new HServerInfo(new HServerAddress("localhost:12345"), HConstants.DEFAULT_REGIONSERVER_INFOPORT, null));
++    servers.put("metaserver", new HServerInfo(new HServerAddress("localhost:12345"), HConstants.DEFAULT_REGIONSERVER_INFOPORT, null));
++
++    new MasterStatusTmpl()
++    .setRootLocation(new HServerAddress("localhost:12345"))
++    .setMetaLocation(new HServerAddress("localhost:12345"))
++      .setServers(servers)
++      .render(new StringWriter(),
++        master, admin);
++  }
++
++}
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestRSStatusServlet.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestRSStatusServlet.java
+new file mode 100644
+index 0000000..45b21f6
+--- /dev/null
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestRSStatusServlet.java
+@@ -0,0 +1,93 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.regionserver;
++
++import static org.junit.Assert.*;
++
++import java.io.IOException;
++import java.io.StringWriter;
++import java.util.List;
++
++import org.apache.hadoop.hbase.HBaseConfiguration;
++import org.apache.hadoop.hbase.HRegionInfo;
++import org.apache.hadoop.hbase.HServerAddress;
++import org.apache.hadoop.hbase.HServerInfo;
++import org.apache.hadoop.hbase.HTableDescriptor;
++import org.apache.hadoop.hbase.regionserver.metrics.RegionServerMetrics;
++import org.apache.hadoop.hbase.util.Bytes;
++import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
++import org.apache.hbase.tmpl.regionserver.RSStatusTmpl;
++import org.junit.Before;
++import org.junit.Test;
++import org.mockito.Mockito;
++
++import com.google.common.collect.Lists;
++
++/**
++ * Tests for the region server status page and its template.
++ */
++public class TestRSStatusServlet {
++  private HRegionServer rs;
++
++  static final int FAKE_IPC_PORT = 1585;
++  static final int FAKE_WEB_PORT = 1586;
++
++  @SuppressWarnings("deprecation")
++  private HServerAddress fakeAddress =
++    new HServerAddress("localhost", FAKE_IPC_PORT);
++  @SuppressWarnings("deprecation")
++  private HServerInfo fakeInfo =
++    new HServerInfo(fakeAddress, FAKE_WEB_PORT, null);
++  private RegionServerMetrics metrics =
++    new RegionServerMetrics();
++
++  @SuppressWarnings("deprecation")
++  @Before
++  public void setupBasicMocks() throws IOException {
++    rs = Mockito.mock(HRegionServer.class);
++    Mockito.doReturn(HBaseConfiguration.create())
++      .when(rs).getConfiguration();
++    Mockito.doReturn(fakeInfo).when(rs).getHServerInfo();
++    Mockito.doReturn(metrics).when(rs).getMetrics();
++
++    // Fake ZKW
++    ZooKeeperWatcher zkw = Mockito.mock(ZooKeeperWatcher.class);
++    Mockito.doReturn("fakequorum").when(zkw).getQuorum();
++    Mockito.doReturn(zkw).when(rs).getZooKeeper();
++  }
++
++  @Test
++  public void testBasic() throws IOException {
++    new RSStatusTmpl().render(new StringWriter(), rs);
++  }
++  
++  @Test
++  public void testWithRegions() throws IOException {
++    HTableDescriptor htd = new HTableDescriptor("mytable");
++    List<HRegionInfo> regions = Lists.newArrayList(
++        new HRegionInfo(htd, Bytes.toBytes("a"), Bytes.toBytes("d")),
++        new HRegionInfo(htd, Bytes.toBytes("d"), Bytes.toBytes("z"))
++        );
++    Mockito.doReturn(regions).when(rs).getOnlineRegions();
++    
++    new RSStatusTmpl().render(new StringWriter(), rs);
++  }
++
++}
+-- 
+1.7.0.4
+

@@ -22,13 +22,14 @@
   <parent>
     <groupId>com.cloudera.cdh</groupId>
     <artifactId>cdh-root</artifactId>
-    <version>3.0-u1</version>
+    <version>3.0-u2</version>
+    <relativePath>../../../pom.xml</relativePath>
   </parent>
 
   <groupId>org.apache.hbase</groupId>
   <artifactId>hbase</artifactId>
   <packaging>jar</packaging>
-  <version>0.90.3-cdh3u1</version>
+  <version>0.90.4-cdh3u2</version>
   <name>HBase</name>
   <description>
     HBase is the &amp;lt;a href="http://hadoop.apache.org"&amp;rt;Hadoop&lt;/a&amp;rt; database. Use it when you need
@@ -241,6 +242,16 @@
           <artifactId>apache-rat-plugin</artifactId>
           <version>0.6</version>
         </plugin>
+        <plugin>
+          <groupId>org.apache.avro</groupId>
+          <artifactId>avro-maven-plugin</artifactId>
+          <version>${avro.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>build-helper-maven-plugin</artifactId>
+          <version>1.5</version>
+        </plugin>
       </plugins>
     </pluginManagement>
 
@@ -260,6 +271,23 @@
     </resources>
 
     <plugins>
+      <plugin>
+        <groupId>org.apache.avro</groupId>
+        <artifactId>avro-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>generate-avro-sources</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>schema</goal>
+              <goal>protocol</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <outputDirectory>${project.build.directory}/generated-sources/java</outputDirectory>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>xml-maven-plugin</artifactId>
@@ -422,13 +450,13 @@
                 <taskdef classname="org.apache.jasper.JspC" name="jspcompiler" classpathref="maven.compile.classpath" />
 
                 <mkdir dir="${build.webapps}/master/WEB-INF" />
-                <jspcompiler uriroot="${src.webapps}/master" outputdir="${generated.sources}" package="org.apache.hadoop.hbase.generated.master" webxml="${build.webapps}/master/WEB-INF/web.xml" />
+                <jspcompiler uriroot="${src.webapps}/master" outputdir="${generated.sources}/java" package="org.apache.hadoop.hbase.generated.master" webxml="${build.webapps}/master/WEB-INF/web.xml" />
 
                 <mkdir dir="${build.webapps}/regionserver/WEB-INF" />
-                <jspcompiler uriroot="${src.webapps}/regionserver" outputdir="${generated.sources}" package="org.apache.hadoop.hbase.generated.regionserver" webxml="${build.webapps}/regionserver/WEB-INF/web.xml" />
+                <jspcompiler uriroot="${src.webapps}/regionserver" outputdir="${generated.sources}/java" package="org.apache.hadoop.hbase.generated.regionserver" webxml="${build.webapps}/regionserver/WEB-INF/web.xml" />
 
                 <exec executable="sh">
-                  <arg line="${basedir}/src/saveVersion.sh ${project.version} ${generated.sources}" />
+                  <arg line="${basedir}/src/saveVersion.sh ${project.version} ${generated.sources}/java" />
                 </exec>
               </tasks>
             </configuration>
@@ -494,7 +522,7 @@
         <version>1.5</version>
         <executions>
           <execution>
-            <id>add-jspc-source</id>
+            <id>jspcSource-packageInfo-Avro-source</id>
             <phase>generate-sources</phase>
             <goals>
               <goal>add-source</goal>
@@ -502,22 +530,52 @@
             <configuration>
               <sources>
                 <source>${basedir}/target/jspc</source>
-              </sources>
-            </configuration>
-          </execution>
-          <execution>
-            <id>add-package-info</id>
-            <phase>generate-sources</phase>
-            <goals>
-              <goal>add-source</goal>
-            </goals>
-            <configuration>
-              <sources>
-                <source>${project.build.directory}/generated-sources</source>
+                <source>${project.build.directory}/generated-sources/java</source>
               </sources>
             </configuration>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.jamon</groupId>
+        <artifactId>jamon-maven-plugin</artifactId>
+        <version>2.3.4</version>
+        <executions>
+          <execution>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>translate</goal>
+            </goals>
+            <configuration>
+              <templateSourceDir>src/main/jamon</templateSourceDir>
+              <templateOutputDir>target/generated-jamon</templateOutputDir>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-eclipse-plugin</artifactId>
+        <configuration>
+          <additionalProjectnatures>
+            <projectnature>org.jamon.project.jamonnature</projectnature>
+          </additionalProjectnatures>
+          <buildcommands>
+            <buildcommand>org.jamon.project.templateBuilder</buildcommand>
+            <buildcommand>org.eclipse.jdt.core.javabuilder</buildcommand>
+            <buildcommand>org.jamon.project.markerUpdater</buildcommand>
+          </buildcommands>
+          <additionalConfig>
+             <file>
+                 <name>.settings/org.jamon.prefs</name>
+                 <content># now
+    eclipse.preferences.version=1
+    templateSourceDir=src/main/jamon
+    templateOutputDir=target/generated-jamon
+    </content>
+            </file>
+          </additionalConfig>
+        </configuration>
       </plugin>
     </plugins>
   </build>
@@ -526,7 +584,7 @@
     <compileSource>1.6</compileSource>
 
     <!-- Dependencies -->
-    <avro.version>1.3.3</avro.version>
+    <avro.version>${cdh.avro.version}</avro.version>
     <commons-cli.version>1.2</commons-cli.version>
     <commons-codec.version>1.4</commons-codec.version>
     <commons-httpclient.version>3.1</commons-httpclient.version><!-- pretty outdated -->
@@ -612,7 +670,7 @@
       <version>${log4j.version}</version>
     </dependency>
     <dependency>
-      <groupId>org.apache.hadoop</groupId>
+      <groupId>org.apache.avro</groupId>
       <artifactId>avro</artifactId>
       <version>${avro.version}</version>
       <exclusions>
@@ -652,6 +710,11 @@
           <artifactId>oro</artifactId>
         </exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro-ipc</artifactId>
+      <version>${avro.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.zookeeper</groupId>
@@ -765,6 +828,12 @@
           <artifactId>servlet-api</artifactId>
         </exclusion>
       </exclusions>
+    </dependency>
+
+    <dependency>
+      <groupId>org.jamon</groupId>
+      <artifactId>jamon-runtime</artifactId>
+      <version>2.3.1</version>
     </dependency>
 
     <!-- REST dependencies -->

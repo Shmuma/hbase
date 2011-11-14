@@ -1,0 +1,28 @@
+From d86dad99f994f01c3e9658867760646144b4e8d5 Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@cloudera.com>
+Date: Thu, 8 Sep 2011 14:18:35 -0700
+Subject: [PATCH 29/50] CLOUDERA BUILD. Parameterize avro version to consume it from CDH root POM
+
+  Reason: Improvement
+  Author: Alejandro Abdelnur
+  Ref: CDH-3562
+---
+ pom.xml |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/pom.xml b/pom.xml
+index 959a99c..4f90611 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -584,7 +584,7 @@
+     <compileSource>1.6</compileSource>
+ 
+     <!-- Dependencies -->
+-    <avro.version>1.5.3</avro.version>
++    <avro.version>${cdh.avro.version}</avro.version>
+     <commons-cli.version>1.2</commons-cli.version>
+     <commons-codec.version>1.4</commons-codec.version>
+     <commons-httpclient.version>3.1</commons-httpclient.version><!-- pretty outdated -->
+-- 
+1.7.0.4
+

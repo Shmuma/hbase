@@ -93,9 +93,7 @@ This documentation is generated using the default hbase configuration file,
     Default is 10.
     </p><p>Default: <code class="varname">10</code></p></dd><dt><a name="hbase.regionserver.msginterval"></a><code class="varname">hbase.regionserver.msginterval</code></dt><dd><p>Interval between messages from the RegionServer to Master
     in milliseconds.
-    </p><p>Default: <code class="varname">3000</code></p></dd><dt><a name="hbase.regionserver.flushlogentries"></a><code class="varname">hbase.regionserver.flushlogentries</code></dt><dd><p>Sync the HLog to HDFS when it has accumulated this many
-    entries. Default 1. Value is checked on every HLog.hflush
-    </p><p>Default: <code class="varname">1</code></p></dd><dt><a name="hbase.regionserver.optionallogflushinterval"></a><code class="varname">hbase.regionserver.optionallogflushinterval</code></dt><dd><p>Sync the HLog to the HDFS after this interval if it has not
+    </p><p>Default: <code class="varname">3000</code></p></dd><dt><a name="hbase.regionserver.optionallogflushinterval"></a><code class="varname">hbase.regionserver.optionallogflushinterval</code></dt><dd><p>Sync the HLog to the HDFS after this interval if it has not
     accumulated enough entries to trigger a sync. Default 1 second. Units:
     milliseconds.
     </p><p>Default: <code class="varname">1000</code></p></dd><dt><a name="hbase.regionserver.regionSplitLimit"></a><code class="varname">hbase.regionserver.regionSplitLimit</code></dt><dd><p>Limit for the number of regions after which no more region
@@ -265,6 +263,14 @@ This documentation is generated using the default hbase configuration file,
     Defines the mode the REST server will be started in. Possible values are:
     false: All HTTP methods are permitted - GET/PUT/POST/DELETE.
     true: Only the GET method is permitted.
+    </p><p>Default: <code class="varname">false</code></p></dd><dt><a name="hbase.defaults.for.version.skip"></a><code class="varname">hbase.defaults.for.version.skip</code></dt><dd><p>
+    Set to true to skip the 'hbase.defaults.for.version' check.
+    Setting this to true can be useful in contexts other than
+    the other side of a maven generation; i.e. running in an
+    ide.  You'll want to set this boolean to true to avoid
+    seeing the RuntimException complaint: "hbase-default.xml file
+    seems to be for and old version of HBase (@@@VERSION@@@), this
+    version is X.X.X-SNAPSHOT"
     </p><p>Default: <code class="varname">false</code></p></dd></dl></div></div></div><div class="footnotes"><br><hr width="100" align="left"><div class="footnote"><p><sup>[<a name="ftn.d0e1063" href="#d0e1063" class="para">10</a>] </sup>
 Be careful editing XML.  Make sure you close all elements.
 Run your file through <span class="command"><strong>xmllint</strong></span> or similar

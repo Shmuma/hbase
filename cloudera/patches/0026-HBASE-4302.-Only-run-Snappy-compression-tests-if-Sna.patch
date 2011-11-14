@@ -1,0 +1,92 @@
+From 6b930ec066334eaa0b9915b09f78e7bf916aa6bd Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@cloudera.com>
+Date: Wed, 7 Sep 2011 18:39:54 -0700
+Subject: [PATCH 26/50] HBASE-4302. Only run Snappy compression tests if Snappy is available.
+
+  Reason: Bug
+  Author: Alejandro Abdelnur
+  Ref: CDH-3549
+---
+ .../hadoop/hbase/util/TestCompressionTest.java     |   54 +++++++++++++++++++-
+ 1 files changed, 53 insertions(+), 1 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/util/TestCompressionTest.java b/src/test/java/org/apache/hadoop/hbase/util/TestCompressionTest.java
+index 24e9b99..c0d53ed 100644
+--- a/src/test/java/org/apache/hadoop/hbase/util/TestCompressionTest.java
++++ b/src/test/java/org/apache/hadoop/hbase/util/TestCompressionTest.java
+@@ -20,9 +20,17 @@
+ 
+ package org.apache.hadoop.hbase.util;
+ 
++import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hbase.io.hfile.Compression;
++import org.apache.hadoop.io.DataOutputBuffer;
++import org.apache.hadoop.io.compress.CompressionCodec;
++import org.apache.hadoop.io.compress.CompressionOutputStream;
++import org.apache.hadoop.util.NativeCodeLoader;
++import org.apache.hadoop.util.ReflectionUtils;
+ import org.junit.Test;
+ 
++import java.io.BufferedOutputStream;
++import java.io.DataOutputStream;
+ import java.io.IOException;
+ 
+ import static org.junit.Assert.*;
+@@ -56,9 +64,53 @@ public class TestCompressionTest {
+     assertTrue(CompressionTest.testCompression("GZ"));
+ 
+     if (isCompressionAvailable("org.apache.hadoop.io.compress.SnappyCodec")) {
+-      assertTrue(CompressionTest.testCompression("SNAPPY"));
++      if (NativeCodeLoader.isNativeCodeLoaded()) {
++        try {
++          System.loadLibrary("snappy");
++
++          try {
++            Configuration conf = new Configuration();
++            CompressionCodec codec = (CompressionCodec)
++              ReflectionUtils.newInstance(
++                conf.getClassByName("org.apache.hadoop.io.compress.SnappyCodec"), conf);
++
++            DataOutputBuffer compressedDataBuffer = new DataOutputBuffer();
++            CompressionOutputStream deflateFilter =
++              codec.createOutputStream(compressedDataBuffer);
++
++            byte[] data = new byte[1024];
++            DataOutputStream deflateOut = new DataOutputStream(
++              new BufferedOutputStream(deflateFilter));
++            deflateOut.write(data, 0, data.length);
++            deflateOut.flush();
++            deflateFilter.finish();
++
++            // Snappy Codec class, Snappy nativelib and Hadoop nativelib with 
++            // Snappy JNIs are present
++            assertTrue(CompressionTest.testCompression("SNAPPY"));
++          }
++          catch (UnsatisfiedLinkError ex) {
++            // Hadoop nativelib does not have Snappy JNIs
++            
++            // cannot assert the codec here because the current logic of 
++            // CompressionTest checks only classloading, not the codec
++            // usage.
++          }
++          catch (Exception ex) {
++          }
++        }
++        catch (UnsatisfiedLinkError ex) {
++          // Snappy nativelib is not available
++          assertFalse(CompressionTest.testCompression("SNAPPY"));
++        }
++      }
++      else {
++        // Hadoop nativelib is not available
++        assertFalse(CompressionTest.testCompression("SNAPPY"));
++      }
+     }
+     else {
++      // Snappy Codec class is not available
+       assertFalse(CompressionTest.testCompression("SNAPPY"));
+     }
+   }
+-- 
+1.7.0.4
+

@@ -60,9 +60,7 @@ This documentation is generated using the default hbase configuration file,
     Default is 10.
     </para><para>Default: <varname>10</varname></para></glossdef></glossentry><glossentry id="hbase.regionserver.msginterval"><glossterm><varname>hbase.regionserver.msginterval</varname></glossterm><glossdef><para>Interval between messages from the RegionServer to Master
     in milliseconds.
-    </para><para>Default: <varname>3000</varname></para></glossdef></glossentry><glossentry id="hbase.regionserver.flushlogentries"><glossterm><varname>hbase.regionserver.flushlogentries</varname></glossterm><glossdef><para>Sync the HLog to HDFS when it has accumulated this many
-    entries. Default 1. Value is checked on every HLog.hflush
-    </para><para>Default: <varname>1</varname></para></glossdef></glossentry><glossentry id="hbase.regionserver.optionallogflushinterval"><glossterm><varname>hbase.regionserver.optionallogflushinterval</varname></glossterm><glossdef><para>Sync the HLog to the HDFS after this interval if it has not
+    </para><para>Default: <varname>3000</varname></para></glossdef></glossentry><glossentry id="hbase.regionserver.optionallogflushinterval"><glossterm><varname>hbase.regionserver.optionallogflushinterval</varname></glossterm><glossdef><para>Sync the HLog to the HDFS after this interval if it has not
     accumulated enough entries to trigger a sync. Default 1 second. Units:
     milliseconds.
     </para><para>Default: <varname>1000</varname></para></glossdef></glossentry><glossentry id="hbase.regionserver.regionSplitLimit"><glossterm><varname>hbase.regionserver.regionSplitLimit</varname></glossterm><glossdef><para>Limit for the number of regions after which no more region
@@ -232,4 +230,12 @@ This documentation is generated using the default hbase configuration file,
     Defines the mode the REST server will be started in. Possible values are:
     false: All HTTP methods are permitted - GET/PUT/POST/DELETE.
     true: Only the GET method is permitted.
+    </para><para>Default: <varname>false</varname></para></glossdef></glossentry><glossentry id="hbase.defaults.for.version.skip"><glossterm><varname>hbase.defaults.for.version.skip</varname></glossterm><glossdef><para>
+    Set to true to skip the 'hbase.defaults.for.version' check.
+    Setting this to true can be useful in contexts other than
+    the other side of a maven generation; i.e. running in an
+    ide.  You'll want to set this boolean to true to avoid
+    seeing the RuntimException complaint: "hbase-default.xml file
+    seems to be for and old version of HBase (@@@VERSION@@@), this
+    version is X.X.X-SNAPSHOT"
     </para><para>Default: <varname>false</varname></para></glossdef></glossentry></glossary></section>

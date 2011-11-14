@@ -1,0 +1,102 @@
+From 7b957c9af1f9724a293c883697aefda713c798cf Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Wed, 24 Aug 2011 23:42:37 -0700
+Subject: [PATCH 22/50] HBASE-4196: TableRecordReader may skip first row of region
+
+Reason: Bug
+Author: Ming Ma
+Ref: CDH-3482
+---
+ .../hadoop/hbase/mapred/TableRecordReaderImpl.java |   20 +++++++++++++++-----
+ .../hbase/mapreduce/TableRecordReaderImpl.java     |   15 +++++++++------
+ 2 files changed, 24 insertions(+), 11 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/mapred/TableRecordReaderImpl.java b/src/main/java/org/apache/hadoop/hbase/mapred/TableRecordReaderImpl.java
+index 30174e2..54df2cf 100644
+--- a/src/main/java/org/apache/hadoop/hbase/mapred/TableRecordReaderImpl.java
++++ b/src/main/java/org/apache/hadoop/hbase/mapred/TableRecordReaderImpl.java
+@@ -44,7 +44,7 @@ public class TableRecordReaderImpl {
+ 
+   private byte [] startRow;
+   private byte [] endRow;
+-  private byte [] lastRow;
++  private byte [] lastSuccessfulRow;
+   private Filter trrRowFilter;
+   private ResultScanner scanner;
+   private HTable htable;
+@@ -175,16 +175,26 @@ public class TableRecordReaderImpl {
+     Result result;
+     try {
+       result = this.scanner.next();
+-    } catch (UnknownScannerException e) {
++    } catch (IOException e) {
+       LOG.debug("recovered from " + StringUtils.stringifyException(e));
+-      restart(lastRow);
+-      this.scanner.next();    // skip presumed already mapped row
++      if (lastSuccessfulRow == null) {
++        LOG.warn("We are restarting the first next() invocation," +
++            " if your mapper's restarted a few other times like this" +
++            " then you should consider killing this job and investigate" +
++            " why it's taking so long.");
++      }
++      if (lastSuccessfulRow == null) {
++        restart(startRow);
++      } else {
++        restart(lastSuccessfulRow);
++        this.scanner.next();    // skip presumed already mapped row
++      }
+       result = this.scanner.next();
+     }
+ 
+     if (result != null && result.size() > 0) {
+       key.set(result.getRow());
+-      lastRow = key.get();
++      lastSuccessfulRow = key.get();
+       Writables.copyWritable(result, value);
+       return true;
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/mapreduce/TableRecordReaderImpl.java b/src/main/java/org/apache/hadoop/hbase/mapreduce/TableRecordReaderImpl.java
+index dbb11e8..c5fc496 100644
+--- a/src/main/java/org/apache/hadoop/hbase/mapreduce/TableRecordReaderImpl.java
++++ b/src/main/java/org/apache/hadoop/hbase/mapreduce/TableRecordReaderImpl.java
+@@ -42,7 +42,7 @@ public class TableRecordReaderImpl {
+   private ResultScanner scanner = null;
+   private Scan scan = null;
+   private HTable htable = null;
+-  private byte[] lastRow = null;
++  private byte[] lastSuccessfulRow = null;
+   private ImmutableBytesWritable key = null;
+   private Result value = null;
+ 
+@@ -132,20 +132,23 @@ public class TableRecordReaderImpl {
+       value = this.scanner.next();
+     } catch (IOException e) {
+       LOG.debug("recovered from " + StringUtils.stringifyException(e));
+-      if (lastRow == null) {
++      if (lastSuccessfulRow == null) {
+         LOG.warn("We are restarting the first next() invocation," +
+             " if your mapper's restarted a few other times like this" +
+             " then you should consider killing this job and investigate" +
+             " why it's taking so long.");
+-        lastRow = scan.getStartRow();
+       }
+-      restart(lastRow);
+-      scanner.next();    // skip presumed already mapped row
++      if (lastSuccessfulRow == null) {
++        restart(scan.getStartRow());
++      } else {
++        restart(lastSuccessfulRow);
++        scanner.next();    // skip presumed already mapped row
++      }
+       value = scanner.next();
+     }
+     if (value != null && value.size() > 0) {
+       key.set(value.getRow());
+-      lastRow = key.get();
++      lastSuccessfulRow = key.get();
+       return true;
+     }
+     return false;
+-- 
+1.7.0.4
+

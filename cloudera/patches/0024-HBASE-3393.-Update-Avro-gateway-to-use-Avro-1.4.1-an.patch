@@ -1,0 +1,1509 @@
+From 592f6cc623f284d4bf520ccbdd9deee5204972d5 Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@cloudera.com>
+Date: Mon, 5 Sep 2011 12:09:07 -0700
+Subject: [PATCH 24/50] HBASE-3393. Update Avro gateway to use Avro 1.4.1 and the new server.join() method
+
+  Reason: Improvement
+  Author: Jeff Hammerbacher
+  Ref: CDH-3534
+---
+ pom.xml                                            |    4 +-
+ .../org/apache/hadoop/hbase/avro/AvroServer.java   |    6 +-
+ .../org/apache/hadoop/hbase/avro/AvroUtil.java     |    6 +-
+ .../hbase/avro/generated/AClusterStatus.java       |   19 +-
+ .../hadoop/hbase/avro/generated/AColumn.java       |    7 +
+ .../hadoop/hbase/avro/generated/AColumnValue.java  |    7 +
+ .../avro/generated/ACompressionAlgorithm.java      |    5 +
+ .../hadoop/hbase/avro/generated/ADelete.java       |   11 +-
+ .../hbase/avro/generated/AFamilyDescriptor.java    |    7 +
+ .../apache/hadoop/hbase/avro/generated/AGet.java   |   11 +-
+ .../hadoop/hbase/avro/generated/AIOError.java      |   14 +-
+ .../hbase/avro/generated/AIllegalArgument.java     |   11 +-
+ .../hbase/avro/generated/AMasterNotRunning.java    |   11 +-
+ .../apache/hadoop/hbase/avro/generated/APut.java   |   11 +-
+ .../hadoop/hbase/avro/generated/ARegionLoad.java   |    7 +
+ .../hadoop/hbase/avro/generated/AResult.java       |   11 +-
+ .../hadoop/hbase/avro/generated/AResultEntry.java  |    7 +
+ .../apache/hadoop/hbase/avro/generated/AScan.java  |   11 +-
+ .../hbase/avro/generated/AServerAddress.java       |   15 +-
+ .../hadoop/hbase/avro/generated/AServerInfo.java   |   11 +-
+ .../hadoop/hbase/avro/generated/AServerLoad.java   |   11 +-
+ .../hbase/avro/generated/ATableDescriptor.java     |   11 +-
+ .../hadoop/hbase/avro/generated/ATableExists.java  |   11 +-
+ .../hadoop/hbase/avro/generated/ATimeRange.java    |    7 +
+ .../apache/hadoop/hbase/avro/generated/HBase.java  |   80 +++----
+ .../java/org/apache/hadoop/hbase/avro/hbase.avdl   |  271 ++++++++++++++++++++
+ .../org/apache/hadoop/hbase/avro/hbase.genavro     |  271 --------------------
+ .../java/org/apache/hadoop/hbase/avro/package.html |    4 +-
+ 28 files changed, 491 insertions(+), 367 deletions(-)
+ create mode 100644 src/main/java/org/apache/hadoop/hbase/avro/hbase.avdl
+
+diff --git a/pom.xml b/pom.xml
+index 8245792..dc85985 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -568,7 +568,7 @@
+     <compileSource>1.6</compileSource>
+ 
+     <!-- Dependencies -->
+-    <avro.version>1.3.3</avro.version>
++    <avro.version>1.4.1</avro.version>
+     <commons-cli.version>1.2</commons-cli.version>
+     <commons-codec.version>1.4</commons-codec.version>
+     <commons-httpclient.version>3.1</commons-httpclient.version><!-- pretty outdated -->
+@@ -654,7 +654,7 @@
+       <version>${log4j.version}</version>
+     </dependency>
+     <dependency>
+-      <groupId>org.apache.hadoop</groupId>
++      <groupId>org.apache.avro</groupId>
+       <artifactId>avro</artifactId>
+       <version>${avro.version}</version>
+       <exclusions>
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/AvroServer.java b/src/main/java/org/apache/hadoop/hbase/avro/AvroServer.java
+index 0ea2376..569027a 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/AvroServer.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/AvroServer.java
+@@ -535,7 +535,6 @@ public class AvroServer {
+     System.exit(0);
+   }
+ 
+-  // TODO(hammer): Figure out a better way to keep the server alive!
+   protected static void doMain(final String[] args) throws Exception {
+     if (args.length < 1) {
+       printUsageAndExit();
+@@ -562,8 +561,9 @@ public class AvroServer {
+     Log LOG = LogFactory.getLog("AvroServer");
+     LOG.info("starting HBase Avro server on port " + Integer.toString(port));
+     SpecificResponder r = new SpecificResponder(HBase.class, new HBaseImpl());
+-    new HttpServer(r, 9090);
+-    Thread.sleep(1000000);
++    HttpServer server = new HttpServer(r, port);
++    server.start();
++    server.join();
+   }
+ 
+   // TODO(hammer): Look at Cassandra's daemonization and integration with JSVC
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java b/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java
+index df7a752..14e8fa1 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java
+@@ -128,14 +128,14 @@ public class AvroUtil {
+     acs.averageLoad = cs.getAverageLoad();
+     Collection<String> deadServerNames = cs.getDeadServerNames();
+     Schema stringArraySchema = Schema.createArray(Schema.create(Schema.Type.STRING));
+-    GenericData.Array<Utf8> adeadServerNames = null;
++    GenericData.Array<CharSequence> adeadServerNames = null;
+     if (deadServerNames != null) {
+-      adeadServerNames = new GenericData.Array<Utf8>(deadServerNames.size(), stringArraySchema);
++      adeadServerNames = new GenericData.Array<CharSequence>(deadServerNames.size(), stringArraySchema);
+       for (String deadServerName : deadServerNames) {
+ 	adeadServerNames.add(new Utf8(deadServerName));
+       }
+     } else {
+-      adeadServerNames = new GenericData.Array<Utf8>(0, stringArraySchema);
++      adeadServerNames = new GenericData.Array<CharSequence>(0, stringArraySchema);
+     }
+     acs.deadServerNames = adeadServerNames;
+     acs.deadServers = cs.getDeadServers();
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AClusterStatus.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AClusterStatus.java
+index 21e38c6..5abd81e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AClusterStatus.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AClusterStatus.java
+@@ -1,17 +1,23 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class AClusterStatus extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"AClusterStatus\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"averageLoad\",\"type\":\"double\"},{\"name\":\"deadServerNames\",\"type\":{\"type\":\"array\",\"items\":\"string\"}},{\"name\":\"deadServers\",\"type\":\"int\"},{\"name\":\"hbaseVersion\",\"type\":\"string\"},{\"name\":\"regionsCount\",\"type\":\"int\"},{\"name\":\"requestsCount\",\"type\":\"int\"},{\"name\":\"serverInfos\",\"type\":{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"AServerInfo\",\"fields\":[{\"name\":\"infoPort\",\"type\":\"int\"},{\"name\":\"load\",\"type\":{\"type\":\"record\",\"name\":\"AServerLoad\",\"fields\":[{\"name\":\"load\",\"type\":\"int\"},{\"name\":\"maxHeapMB\",\"type\":\"int\"},{\"name\":\"memStoreSizeInMB\",\"type\":\"int\"},{\"name\":\"numberOfRegions\",\"type\":\"int\"},{\"name\":\"numberOfRequests\",\"type\":\"int\"},{\"name\":\"regionsLoad\",\"type\":{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"ARegionLoad\",\"fields\":[{\"name\":\"memStoreSizeMB\",\"type\":\"int\"},{\"name\":\"name\",\"type\":\"bytes\"},{\"name\":\"storefileIndexSizeMB\",\"type\":\"int\"},{\"name\":\"storefiles\",\"type\":\"int\"},{\"name\":\"storefileSizeMB\",\"type\":\"int\"},{\"name\":\"stores\",\"type\":\"int\"}]}}},{\"name\":\"storefileIndexSizeInMB\",\"type\":\"int\"},{\"name\":\"storefiles\",\"type\":\"int\"},{\"name\":\"storefileSizeInMB\",\"type\":\"int\"},{\"name\":\"usedHeapMB\",\"type\":\"int\"}]}},{\"name\":\"serverAddress\",\"type\":{\"type\":\"record\",\"name\":\"AServerAddress\",\"fields\":[{\"name\":\"hostname\",\"type\":\"string\"},{\"name\":\"inetSocketAddress\",\"type\":\"string\"},{\"name\":\"port\",\"type\":\"int\"}]}},{\"name\":\"serverName\",\"type\":\"string\"},{\"name\":\"startCode\",\"type\":\"long\"}]}}},{\"name\":\"servers\",\"type\":\"int\"}]}");
+   public double averageLoad;
+-  public org.apache.avro.generic.GenericArray<org.apache.avro.util.Utf8> deadServerNames;
++  public java.util.List<java.lang.CharSequence> deadServerNames;
+   public int deadServers;
+-  public org.apache.avro.util.Utf8 hbaseVersion;
++  public java.lang.CharSequence hbaseVersion;
+   public int regionsCount;
+   public int requestsCount;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AServerInfo> serverInfos;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.AServerInfo> serverInfos;
+   public int servers;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return averageLoad;
+@@ -25,16 +31,17 @@ public class AClusterStatus extends org.apache.avro.specific.SpecificRecordBase
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: averageLoad = (java.lang.Double)value$; break;
+-    case 1: deadServerNames = (org.apache.avro.generic.GenericArray<org.apache.avro.util.Utf8>)value$; break;
++    case 1: deadServerNames = (java.util.List<java.lang.CharSequence>)value$; break;
+     case 2: deadServers = (java.lang.Integer)value$; break;
+-    case 3: hbaseVersion = (org.apache.avro.util.Utf8)value$; break;
++    case 3: hbaseVersion = (java.lang.CharSequence)value$; break;
+     case 4: regionsCount = (java.lang.Integer)value$; break;
+     case 5: requestsCount = (java.lang.Integer)value$; break;
+-    case 6: serverInfos = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AServerInfo>)value$; break;
++    case 6: serverInfos = (java.util.List<org.apache.hadoop.hbase.avro.generated.AServerInfo>)value$; break;
+     case 7: servers = (java.lang.Integer)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumn.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumn.java
+index b3509f7..3daf3ff 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumn.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumn.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -6,6 +11,7 @@ public class AColumn extends org.apache.avro.specific.SpecificRecordBase impleme
+   public java.nio.ByteBuffer family;
+   public java.nio.ByteBuffer qualifier;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return family;
+@@ -13,6 +19,7 @@ public class AColumn extends org.apache.avro.specific.SpecificRecordBase impleme
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumnValue.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumnValue.java
+index 2b550cb..1fcc5ac 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumnValue.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AColumnValue.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -8,6 +13,7 @@ public class AColumnValue extends org.apache.avro.specific.SpecificRecordBase im
+   public java.nio.ByteBuffer value;
+   public java.lang.Long timestamp;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return family;
+@@ -17,6 +23,7 @@ public class AColumnValue extends org.apache.avro.specific.SpecificRecordBase im
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/ACompressionAlgorithm.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/ACompressionAlgorithm.java
+index 4f7736c..b6c0a41 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/ACompressionAlgorithm.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/ACompressionAlgorithm.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/ADelete.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/ADelete.java
+index 1d83512..377051b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/ADelete.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/ADelete.java
+@@ -1,11 +1,17 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class ADelete extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"ADelete\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"columns\",\"type\":[{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"AColumn\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":[\"bytes\",\"null\"]}]}},\"null\"]}]}");
+   public java.nio.ByteBuffer row;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumn> columns;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.AColumn> columns;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return row;
+@@ -13,11 +19,12 @@ public class ADelete extends org.apache.avro.specific.SpecificRecordBase impleme
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: row = (java.nio.ByteBuffer)value$; break;
+-    case 1: columns = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumn>)value$; break;
++    case 1: columns = (java.util.List<org.apache.hadoop.hbase.avro.generated.AColumn>)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AFamilyDescriptor.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AFamilyDescriptor.java
+index 5d6b93b..573219b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AFamilyDescriptor.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AFamilyDescriptor.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -11,6 +16,7 @@ public class AFamilyDescriptor extends org.apache.avro.specific.SpecificRecordBa
+   public java.lang.Integer timeToLive;
+   public java.lang.Boolean blockCacheEnabled;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return name;
+@@ -23,6 +29,7 @@ public class AFamilyDescriptor extends org.apache.avro.specific.SpecificRecordBa
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AGet.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AGet.java
+index 445b6c1..e69fa0e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AGet.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AGet.java
+@@ -1,14 +1,20 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class AGet extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"AGet\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"columns\",\"type\":[{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"AColumn\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":[\"bytes\",\"null\"]}]}},\"null\"]},{\"name\":\"timestamp\",\"type\":[\"long\",\"null\"]},{\"name\":\"timerange\",\"type\":[{\"type\":\"record\",\"name\":\"ATimeRange\",\"fields\":[{\"name\":\"minStamp\",\"type\":\"long\"},{\"name\":\"maxStamp\",\"type\":\"long\"}]},\"null\"]},{\"name\":\"maxVersions\",\"type\":[\"int\",\"null\"]}]}");
+   public java.nio.ByteBuffer row;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumn> columns;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.AColumn> columns;
+   public java.lang.Long timestamp;
+   public org.apache.hadoop.hbase.avro.generated.ATimeRange timerange;
+   public java.lang.Integer maxVersions;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return row;
+@@ -19,11 +25,12 @@ public class AGet extends org.apache.avro.specific.SpecificRecordBase implements
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: row = (java.nio.ByteBuffer)value$; break;
+-    case 1: columns = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumn>)value$; break;
++    case 1: columns = (java.util.List<org.apache.hadoop.hbase.avro.generated.AColumn>)value$; break;
+     case 2: timestamp = (java.lang.Long)value$; break;
+     case 3: timerange = (org.apache.hadoop.hbase.avro.generated.ATimeRange)value$; break;
+     case 4: maxVersions = (java.lang.Integer)value$; break;
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AIOError.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AIOError.java
+index 444f3de..16f1bec 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AIOError.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AIOError.java
+@@ -1,21 +1,27 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class AIOError extends org.apache.avro.specific.SpecificExceptionBase implements org.apache.avro.specific.SpecificRecord {
+-  public static final org.apache.avro.Schema SCHEMA$ =
+-    org.apache.avro.Schema.parse("{\"type\":\"error\",\"name\":\"AIOError\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]}");
+-  public org.apache.avro.util.Utf8 message;
++  public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"error\",\"name\":\"AIOError\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]}");
++  public java.lang.CharSequence message;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return message;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+-    case 0: message = (org.apache.avro.util.Utf8)value$; break;
++    case 0: message = (java.lang.CharSequence)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AIllegalArgument.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AIllegalArgument.java
+index 65c072d..1275cb9 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AIllegalArgument.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AIllegalArgument.java
+@@ -1,20 +1,27 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class AIllegalArgument extends org.apache.avro.specific.SpecificExceptionBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"error\",\"name\":\"AIllegalArgument\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]}");
+-  public org.apache.avro.util.Utf8 message;
++  public java.lang.CharSequence message;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return message;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+-    case 0: message = (org.apache.avro.util.Utf8)value$; break;
++    case 0: message = (java.lang.CharSequence)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AMasterNotRunning.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AMasterNotRunning.java
+index 5608464..bbeb17c 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AMasterNotRunning.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AMasterNotRunning.java
+@@ -1,20 +1,27 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class AMasterNotRunning extends org.apache.avro.specific.SpecificExceptionBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"error\",\"name\":\"AMasterNotRunning\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]}");
+-  public org.apache.avro.util.Utf8 message;
++  public java.lang.CharSequence message;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return message;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+-    case 0: message = (org.apache.avro.util.Utf8)value$; break;
++    case 0: message = (java.lang.CharSequence)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/APut.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/APut.java
+index badf142..a725ec9 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/APut.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/APut.java
+@@ -1,11 +1,17 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class APut extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"APut\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"columnValues\",\"type\":{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"AColumnValue\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":\"bytes\"},{\"name\":\"value\",\"type\":\"bytes\"},{\"name\":\"timestamp\",\"type\":[\"long\",\"null\"]}]}}}]}");
+   public java.nio.ByteBuffer row;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumnValue> columnValues;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.AColumnValue> columnValues;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return row;
+@@ -13,11 +19,12 @@ public class APut extends org.apache.avro.specific.SpecificRecordBase implements
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: row = (java.nio.ByteBuffer)value$; break;
+-    case 1: columnValues = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumnValue>)value$; break;
++    case 1: columnValues = (java.util.List<org.apache.hadoop.hbase.avro.generated.AColumnValue>)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/ARegionLoad.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/ARegionLoad.java
+index ca14d98..6dde86a 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/ARegionLoad.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/ARegionLoad.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -10,6 +15,7 @@ public class ARegionLoad extends org.apache.avro.specific.SpecificRecordBase imp
+   public int storefileSizeMB;
+   public int stores;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return memStoreSizeMB;
+@@ -21,6 +27,7 @@ public class ARegionLoad extends org.apache.avro.specific.SpecificRecordBase imp
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AResult.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AResult.java
+index f8df2d3..d5e8eca 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AResult.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AResult.java
+@@ -1,11 +1,17 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class AResult extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"AResult\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"entries\",\"type\":{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"AResultEntry\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":\"bytes\"},{\"name\":\"value\",\"type\":\"bytes\"},{\"name\":\"timestamp\",\"type\":\"long\"}]}}}]}");
+   public java.nio.ByteBuffer row;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AResultEntry> entries;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.AResultEntry> entries;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return row;
+@@ -13,11 +19,12 @@ public class AResult extends org.apache.avro.specific.SpecificRecordBase impleme
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: row = (java.nio.ByteBuffer)value$; break;
+-    case 1: entries = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AResultEntry>)value$; break;
++    case 1: entries = (java.util.List<org.apache.hadoop.hbase.avro.generated.AResultEntry>)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AResultEntry.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AResultEntry.java
+index 454ba13..703abb5 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AResultEntry.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AResultEntry.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -8,6 +13,7 @@ public class AResultEntry extends org.apache.avro.specific.SpecificRecordBase im
+   public java.nio.ByteBuffer value;
+   public long timestamp;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return family;
+@@ -17,6 +23,7 @@ public class AResultEntry extends org.apache.avro.specific.SpecificRecordBase im
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AScan.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AScan.java
+index 65c26c9..7a15f50 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AScan.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AScan.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -5,11 +10,12 @@ public class AScan extends org.apache.avro.specific.SpecificRecordBase implement
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"AScan\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"startRow\",\"type\":[\"bytes\",\"null\"]},{\"name\":\"stopRow\",\"type\":[\"bytes\",\"null\"]},{\"name\":\"columns\",\"type\":[{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"AColumn\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":[\"bytes\",\"null\"]}]}},\"null\"]},{\"name\":\"timestamp\",\"type\":[\"long\",\"null\"]},{\"name\":\"timerange\",\"type\":[{\"type\":\"record\",\"name\":\"ATimeRange\",\"fields\":[{\"name\":\"minStamp\",\"type\":\"long\"},{\"name\":\"maxStamp\",\"type\":\"long\"}]},\"null\"]},{\"name\":\"maxVersions\",\"type\":[\"int\",\"null\"]}]}");
+   public java.nio.ByteBuffer startRow;
+   public java.nio.ByteBuffer stopRow;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumn> columns;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.AColumn> columns;
+   public java.lang.Long timestamp;
+   public org.apache.hadoop.hbase.avro.generated.ATimeRange timerange;
+   public java.lang.Integer maxVersions;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return startRow;
+@@ -21,12 +27,13 @@ public class AScan extends org.apache.avro.specific.SpecificRecordBase implement
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: startRow = (java.nio.ByteBuffer)value$; break;
+     case 1: stopRow = (java.nio.ByteBuffer)value$; break;
+-    case 2: columns = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AColumn>)value$; break;
++    case 2: columns = (java.util.List<org.apache.hadoop.hbase.avro.generated.AColumn>)value$; break;
+     case 3: timestamp = (java.lang.Long)value$; break;
+     case 4: timerange = (org.apache.hadoop.hbase.avro.generated.ATimeRange)value$; break;
+     case 5: maxVersions = (java.lang.Integer)value$; break;
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerAddress.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerAddress.java
+index d1d1423..198e85d 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerAddress.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerAddress.java
+@@ -1,12 +1,18 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class AServerAddress extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"AServerAddress\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"hostname\",\"type\":\"string\"},{\"name\":\"inetSocketAddress\",\"type\":\"string\"},{\"name\":\"port\",\"type\":\"int\"}]}");
+-  public org.apache.avro.util.Utf8 hostname;
+-  public org.apache.avro.util.Utf8 inetSocketAddress;
++  public java.lang.CharSequence hostname;
++  public java.lang.CharSequence inetSocketAddress;
+   public int port;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return hostname;
+@@ -15,11 +21,12 @@ public class AServerAddress extends org.apache.avro.specific.SpecificRecordBase
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+-    case 0: hostname = (org.apache.avro.util.Utf8)value$; break;
+-    case 1: inetSocketAddress = (org.apache.avro.util.Utf8)value$; break;
++    case 0: hostname = (java.lang.CharSequence)value$; break;
++    case 1: inetSocketAddress = (java.lang.CharSequence)value$; break;
+     case 2: port = (java.lang.Integer)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerInfo.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerInfo.java
+index 297de0c..8229bcc 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerInfo.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerInfo.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -6,9 +11,10 @@ public class AServerInfo extends org.apache.avro.specific.SpecificRecordBase imp
+   public int infoPort;
+   public org.apache.hadoop.hbase.avro.generated.AServerLoad load;
+   public org.apache.hadoop.hbase.avro.generated.AServerAddress serverAddress;
+-  public org.apache.avro.util.Utf8 serverName;
++  public java.lang.CharSequence serverName;
+   public long startCode;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return infoPort;
+@@ -19,13 +25,14 @@ public class AServerInfo extends org.apache.avro.specific.SpecificRecordBase imp
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: infoPort = (java.lang.Integer)value$; break;
+     case 1: load = (org.apache.hadoop.hbase.avro.generated.AServerLoad)value$; break;
+     case 2: serverAddress = (org.apache.hadoop.hbase.avro.generated.AServerAddress)value$; break;
+-    case 3: serverName = (org.apache.avro.util.Utf8)value$; break;
++    case 3: serverName = (java.lang.CharSequence)value$; break;
+     case 4: startCode = (java.lang.Long)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerLoad.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerLoad.java
+index 8d4175d..b0d9c5b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerLoad.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/AServerLoad.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -8,12 +13,13 @@ public class AServerLoad extends org.apache.avro.specific.SpecificRecordBase imp
+   public int memStoreSizeInMB;
+   public int numberOfRegions;
+   public int numberOfRequests;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.ARegionLoad> regionsLoad;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.ARegionLoad> regionsLoad;
+   public int storefileIndexSizeInMB;
+   public int storefiles;
+   public int storefileSizeInMB;
+   public int usedHeapMB;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return load;
+@@ -29,6 +35,7 @@ public class AServerLoad extends org.apache.avro.specific.SpecificRecordBase imp
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+@@ -37,7 +44,7 @@ public class AServerLoad extends org.apache.avro.specific.SpecificRecordBase imp
+     case 2: memStoreSizeInMB = (java.lang.Integer)value$; break;
+     case 3: numberOfRegions = (java.lang.Integer)value$; break;
+     case 4: numberOfRequests = (java.lang.Integer)value$; break;
+-    case 5: regionsLoad = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.ARegionLoad>)value$; break;
++    case 5: regionsLoad = (java.util.List<org.apache.hadoop.hbase.avro.generated.ARegionLoad>)value$; break;
+     case 6: storefileIndexSizeInMB = (java.lang.Integer)value$; break;
+     case 7: storefiles = (java.lang.Integer)value$; break;
+     case 8: storefileSizeInMB = (java.lang.Integer)value$; break;
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableDescriptor.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableDescriptor.java
+index 7d285b2..97a534c 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableDescriptor.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableDescriptor.java
+@@ -1,10 +1,15 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class ATableDescriptor extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"record\",\"name\":\"ATableDescriptor\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"name\",\"type\":\"bytes\"},{\"name\":\"families\",\"type\":[{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"AFamilyDescriptor\",\"fields\":[{\"name\":\"name\",\"type\":\"bytes\"},{\"name\":\"compression\",\"type\":[{\"type\":\"enum\",\"name\":\"ACompressionAlgorithm\",\"symbols\":[\"LZO\",\"GZ\",\"NONE\"]},\"null\"]},{\"name\":\"maxVersions\",\"type\":[\"int\",\"null\"]},{\"name\":\"blocksize\",\"type\":[\"int\",\"null\"]},{\"name\":\"inMemory\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"timeToLive\",\"type\":[\"int\",\"null\"]},{\"name\":\"blockCacheEnabled\",\"type\":[\"boolean\",\"null\"]}]}},\"null\"]},{\"name\":\"maxFileSize\",\"type\":[\"long\",\"null\"]},{\"name\":\"memStoreFlushSize\",\"type\":[\"long\",\"null\"]},{\"name\":\"rootRegion\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"metaRegion\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"metaTable\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"readOnly\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"deferredLogFlush\",\"type\":[\"boolean\",\"null\"]}]}");
+   public java.nio.ByteBuffer name;
+-  public org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor> families;
++  public java.util.List<org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor> families;
+   public java.lang.Long maxFileSize;
+   public java.lang.Long memStoreFlushSize;
+   public java.lang.Boolean rootRegion;
+@@ -13,6 +18,7 @@ public class ATableDescriptor extends org.apache.avro.specific.SpecificRecordBas
+   public java.lang.Boolean readOnly;
+   public java.lang.Boolean deferredLogFlush;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return name;
+@@ -27,11 +33,12 @@ public class ATableDescriptor extends org.apache.avro.specific.SpecificRecordBas
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+     case 0: name = (java.nio.ByteBuffer)value$; break;
+-    case 1: families = (org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor>)value$; break;
++    case 1: families = (java.util.List<org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor>)value$; break;
+     case 2: maxFileSize = (java.lang.Long)value$; break;
+     case 3: memStoreFlushSize = (java.lang.Long)value$; break;
+     case 4: rootRegion = (java.lang.Boolean)value$; break;
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableExists.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableExists.java
+index 2ce4d4f..ac96c1c 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableExists.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/ATableExists.java
+@@ -1,20 +1,27 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public class ATableExists extends org.apache.avro.specific.SpecificExceptionBase implements org.apache.avro.specific.SpecificRecord {
+   public static final org.apache.avro.Schema SCHEMA$ = org.apache.avro.Schema.parse("{\"type\":\"error\",\"name\":\"ATableExists\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]}");
+-  public org.apache.avro.util.Utf8 message;
++  public java.lang.CharSequence message;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return message;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+-    case 0: message = (org.apache.avro.util.Utf8)value$; break;
++    case 0: message = (java.lang.CharSequence)value$; break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/ATimeRange.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/ATimeRange.java
+index 358f2c3..61ee9ff 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/ATimeRange.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/ATimeRange.java
+@@ -1,3 +1,8 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+@@ -6,6 +11,7 @@ public class ATimeRange extends org.apache.avro.specific.SpecificRecordBase impl
+   public long minStamp;
+   public long maxStamp;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
++  // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+     switch (field$) {
+     case 0: return minStamp;
+@@ -13,6 +19,7 @@ public class ATimeRange extends org.apache.avro.specific.SpecificRecordBase impl
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
++  // Used by DatumReader.  Applications should not call. 
+   @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value$) {
+     switch (field$) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/generated/HBase.java b/src/main/java/org/apache/hadoop/hbase/avro/generated/HBase.java
+index 7079fe8..d2efc95 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/generated/HBase.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/generated/HBase.java
+@@ -1,56 +1,36 @@
++/**
++ * Autogenerated by Avro
++ * 
++ * DO NOT EDIT DIRECTLY
++ */
+ package org.apache.hadoop.hbase.avro.generated;
+ 
+ @SuppressWarnings("all")
+ public interface HBase {
+   public static final org.apache.avro.Protocol PROTOCOL = org.apache.avro.Protocol.parse("{\"protocol\":\"HBase\",\"namespace\":\"org.apache.hadoop.hbase.avro.generated\",\"types\":[{\"type\":\"record\",\"name\":\"AServerAddress\",\"fields\":[{\"name\":\"hostname\",\"type\":\"string\"},{\"name\":\"inetSocketAddress\",\"type\":\"string\"},{\"name\":\"port\",\"type\":\"int\"}]},{\"type\":\"record\",\"name\":\"ARegionLoad\",\"fields\":[{\"name\":\"memStoreSizeMB\",\"type\":\"int\"},{\"name\":\"name\",\"type\":\"bytes\"},{\"name\":\"storefileIndexSizeMB\",\"type\":\"int\"},{\"name\":\"storefiles\",\"type\":\"int\"},{\"name\":\"storefileSizeMB\",\"type\":\"int\"},{\"name\":\"stores\",\"type\":\"int\"}]},{\"type\":\"record\",\"name\":\"AServerLoad\",\"fields\":[{\"name\":\"load\",\"type\":\"int\"},{\"name\":\"maxHeapMB\",\"type\":\"int\"},{\"name\":\"memStoreSizeInMB\",\"type\":\"int\"},{\"name\":\"numberOfRegions\",\"type\":\"int\"},{\"name\":\"numberOfRequests\",\"type\":\"int\"},{\"name\":\"regionsLoad\",\"type\":{\"type\":\"array\",\"items\":\"ARegionLoad\"}},{\"name\":\"storefileIndexSizeInMB\",\"type\":\"int\"},{\"name\":\"storefiles\",\"type\":\"int\"},{\"name\":\"storefileSizeInMB\",\"type\":\"int\"},{\"name\":\"usedHeapMB\",\"type\":\"int\"}]},{\"type\":\"record\",\"name\":\"AServerInfo\",\"fields\":[{\"name\":\"infoPort\",\"type\":\"int\"},{\"name\":\"load\",\"type\":\"AServerLoad\"},{\"name\":\"serverAddress\",\"type\":\"AServerAddress\"},{\"name\":\"serverName\",\"type\":\"string\"},{\"name\":\"startCode\",\"type\":\"long\"}]},{\"type\":\"record\",\"name\":\"AClusterStatus\",\"fields\":[{\"name\":\"averageLoad\",\"type\":\"double\"},{\"name\":\"deadServerNames\",\"type\":{\"type\":\"array\",\"items\":\"string\"}},{\"name\":\"deadServers\",\"type\":\"int\"},{\"name\":\"hbaseVersion\",\"type\":\"string\"},{\"name\":\"regionsCount\",\"type\":\"int\"},{\"name\":\"requestsCount\",\"type\":\"int\"},{\"name\":\"serverInfos\",\"type\":{\"type\":\"array\",\"items\":\"AServerInfo\"}},{\"name\":\"servers\",\"type\":\"int\"}]},{\"type\":\"enum\",\"name\":\"ACompressionAlgorithm\",\"symbols\":[\"LZO\",\"GZ\",\"NONE\"]},{\"type\":\"record\",\"name\":\"AFamilyDescriptor\",\"fields\":[{\"name\":\"name\",\"type\":\"bytes\"},{\"name\":\"compression\",\"type\":[\"ACompressionAlgorithm\",\"null\"]},{\"name\":\"maxVersions\",\"type\":[\"int\",\"null\"]},{\"name\":\"blocksize\",\"type\":[\"int\",\"null\"]},{\"name\":\"inMemory\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"timeToLive\",\"type\":[\"int\",\"null\"]},{\"name\":\"blockCacheEnabled\",\"type\":[\"boolean\",\"null\"]}]},{\"type\":\"record\",\"name\":\"ATableDescriptor\",\"fields\":[{\"name\":\"name\",\"type\":\"bytes\"},{\"name\":\"families\",\"type\":[{\"type\":\"array\",\"items\":\"AFamilyDescriptor\"},\"null\"]},{\"name\":\"maxFileSize\",\"type\":[\"long\",\"null\"]},{\"name\":\"memStoreFlushSize\",\"type\":[\"long\",\"null\"]},{\"name\":\"rootRegion\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"metaRegion\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"metaTable\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"readOnly\",\"type\":[\"boolean\",\"null\"]},{\"name\":\"deferredLogFlush\",\"type\":[\"boolean\",\"null\"]}]},{\"type\":\"record\",\"name\":\"AColumn\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":[\"bytes\",\"null\"]}]},{\"type\":\"record\",\"name\":\"ATimeRange\",\"fields\":[{\"name\":\"minStamp\",\"type\":\"long\"},{\"name\":\"maxStamp\",\"type\":\"long\"}]},{\"type\":\"record\",\"name\":\"AGet\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"columns\",\"type\":[{\"type\":\"array\",\"items\":\"AColumn\"},\"null\"]},{\"name\":\"timestamp\",\"type\":[\"long\",\"null\"]},{\"name\":\"timerange\",\"type\":[\"ATimeRange\",\"null\"]},{\"name\":\"maxVersions\",\"type\":[\"int\",\"null\"]}]},{\"type\":\"record\",\"name\":\"AResultEntry\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":\"bytes\"},{\"name\":\"value\",\"type\":\"bytes\"},{\"name\":\"timestamp\",\"type\":\"long\"}]},{\"type\":\"record\",\"name\":\"AResult\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"entries\",\"type\":{\"type\":\"array\",\"items\":\"AResultEntry\"}}]},{\"type\":\"record\",\"name\":\"AColumnValue\",\"fields\":[{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":\"bytes\"},{\"name\":\"value\",\"type\":\"bytes\"},{\"name\":\"timestamp\",\"type\":[\"long\",\"null\"]}]},{\"type\":\"record\",\"name\":\"APut\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"columnValues\",\"type\":{\"type\":\"array\",\"items\":\"AColumnValue\"}}]},{\"type\":\"record\",\"name\":\"ADelete\",\"fields\":[{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"columns\",\"type\":[{\"type\":\"array\",\"items\":\"AColumn\"},\"null\"]}]},{\"type\":\"record\",\"name\":\"AScan\",\"fields\":[{\"name\":\"startRow\",\"type\":[\"bytes\",\"null\"]},{\"name\":\"stopRow\",\"type\":[\"bytes\",\"null\"]},{\"name\":\"columns\",\"type\":[{\"type\":\"array\",\"items\":\"AColumn\"},\"null\"]},{\"name\":\"timestamp\",\"type\":[\"long\",\"null\"]},{\"name\":\"timerange\",\"type\":[\"ATimeRange\",\"null\"]},{\"name\":\"maxVersions\",\"type\":[\"int\",\"null\"]}]},{\"type\":\"error\",\"name\":\"AIOError\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]},{\"type\":\"error\",\"name\":\"AIllegalArgument\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]},{\"type\":\"error\",\"name\":\"ATableExists\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]},{\"type\":\"error\",\"name\":\"AMasterNotRunning\",\"fields\":[{\"name\":\"message\",\"type\":\"string\"}]}],\"messages\":{\"getHBaseVersion\":{\"request\":[],\"response\":\"string\",\"errors\":[\"AIOError\"]},\"getClusterStatus\":{\"request\":[],\"response\":\"AClusterStatus\",\"errors\":[\"AIOError\"]},\"listTables\":{\"request\":[],\"response\":{\"type\":\"array\",\"items\":\"ATableDescriptor\"},\"errors\":[\"AIOError\"]},\"describeTable\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"ATableDescriptor\",\"errors\":[\"AIOError\"]},\"isTableEnabled\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"boolean\",\"errors\":[\"AIOError\"]},\"tableExists\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"boolean\",\"errors\":[\"AIOError\"]},\"describeFamily\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"family\",\"type\":\"bytes\"}],\"response\":\"AFamilyDescriptor\",\"errors\":[\"AIOError\"]},\"createTable\":{\"request\":[{\"name\":\"table\",\"type\":\"ATableDescriptor\"}],\"response\":\"null\",\"errors\":[\"AIOError\",\"AIllegalArgument\",\"ATableExists\",\"AMasterNotRunning\"]},\"deleteTable\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"modifyTable\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"tableDescriptor\",\"type\":\"ATableDescriptor\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"enableTable\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"disableTable\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"flush\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"split\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"addFamily\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"family\",\"type\":\"AFamilyDescriptor\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"deleteFamily\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"family\",\"type\":\"bytes\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"modifyFamily\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"familyName\",\"type\":\"bytes\"},{\"name\":\"familyDescriptor\",\"type\":\"AFamilyDescriptor\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"get\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"get\",\"type\":\"AGet\"}],\"response\":\"AResult\",\"errors\":[\"AIOError\"]},\"exists\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"get\",\"type\":\"AGet\"}],\"response\":\"boolean\",\"errors\":[\"AIOError\"]},\"put\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"put\",\"type\":\"APut\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"delete\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"delete\",\"type\":\"ADelete\"}],\"response\":\"null\",\"errors\":[\"AIOError\"]},\"incrementColumnValue\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"row\",\"type\":\"bytes\"},{\"name\":\"family\",\"type\":\"bytes\"},{\"name\":\"qualifier\",\"type\":\"bytes\"},{\"name\":\"amount\",\"type\":\"long\"},{\"name\":\"writeToWAL\",\"type\":\"boolean\"}],\"response\":\"long\",\"errors\":[\"AIOError\"]},\"scannerOpen\":{\"request\":[{\"name\":\"table\",\"type\":\"bytes\"},{\"name\":\"scan\",\"type\":\"AScan\"}],\"response\":\"int\",\"errors\":[\"AIOError\"]},\"scannerClose\":{\"request\":[{\"name\":\"scannerId\",\"type\":\"int\"}],\"response\":\"null\",\"errors\":[\"AIOError\",\"AIllegalArgument\"]},\"scannerGetRows\":{\"request\":[{\"name\":\"scannerId\",\"type\":\"int\"},{\"name\":\"numberOfRows\",\"type\":\"int\"}],\"response\":{\"type\":\"array\",\"items\":\"AResult\"},\"errors\":[\"AIOError\",\"AIllegalArgument\"]}}}");
+-  org.apache.avro.util.Utf8 getHBaseVersion()
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  org.apache.hadoop.hbase.avro.generated.AClusterStatus getClusterStatus()
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.ATableDescriptor> listTables()
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  org.apache.hadoop.hbase.avro.generated.ATableDescriptor describeTable(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  boolean isTableEnabled(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  boolean tableExists(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor describeFamily(java.nio.ByteBuffer table, java.nio.ByteBuffer family)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void createTable(org.apache.hadoop.hbase.avro.generated.ATableDescriptor table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError, org.apache.hadoop.hbase.avro.generated.AIllegalArgument, org.apache.hadoop.hbase.avro.generated.ATableExists, org.apache.hadoop.hbase.avro.generated.AMasterNotRunning;
+-  java.lang.Void deleteTable(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void modifyTable(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.ATableDescriptor tableDescriptor)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void enableTable(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void disableTable(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void flush(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void split(java.nio.ByteBuffer table)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void addFamily(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor family)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void deleteFamily(java.nio.ByteBuffer table, java.nio.ByteBuffer family)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void modifyFamily(java.nio.ByteBuffer table, java.nio.ByteBuffer familyName, org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor familyDescriptor)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  org.apache.hadoop.hbase.avro.generated.AResult get(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AGet get)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  boolean exists(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AGet get)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void put(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.APut put)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void delete(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.ADelete delete)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  long incrementColumnValue(java.nio.ByteBuffer table, java.nio.ByteBuffer row, java.nio.ByteBuffer family, java.nio.ByteBuffer qualifier, long amount, boolean writeToWAL)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  int scannerOpen(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AScan scan)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
+-  java.lang.Void scannerClose(int scannerId)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError, org.apache.hadoop.hbase.avro.generated.AIllegalArgument;
+-  org.apache.avro.generic.GenericArray<org.apache.hadoop.hbase.avro.generated.AResult> scannerGetRows(int scannerId, int numberOfRows)
+-    throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError, org.apache.hadoop.hbase.avro.generated.AIllegalArgument;
++  java.lang.CharSequence getHBaseVersion() throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  org.apache.hadoop.hbase.avro.generated.AClusterStatus getClusterStatus() throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.util.List<org.apache.hadoop.hbase.avro.generated.ATableDescriptor> listTables() throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  org.apache.hadoop.hbase.avro.generated.ATableDescriptor describeTable(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  boolean isTableEnabled(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  boolean tableExists(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor describeFamily(java.nio.ByteBuffer table, java.nio.ByteBuffer family) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void createTable(org.apache.hadoop.hbase.avro.generated.ATableDescriptor table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError, org.apache.hadoop.hbase.avro.generated.AIllegalArgument, org.apache.hadoop.hbase.avro.generated.ATableExists, org.apache.hadoop.hbase.avro.generated.AMasterNotRunning;
++  java.lang.Void deleteTable(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void modifyTable(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.ATableDescriptor tableDescriptor) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void enableTable(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void disableTable(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void flush(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void split(java.nio.ByteBuffer table) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void addFamily(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor family) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void deleteFamily(java.nio.ByteBuffer table, java.nio.ByteBuffer family) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void modifyFamily(java.nio.ByteBuffer table, java.nio.ByteBuffer familyName, org.apache.hadoop.hbase.avro.generated.AFamilyDescriptor familyDescriptor) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  org.apache.hadoop.hbase.avro.generated.AResult get(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AGet get) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  boolean exists(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AGet get) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void put(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.APut put) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void delete(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.ADelete delete) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  long incrementColumnValue(java.nio.ByteBuffer table, java.nio.ByteBuffer row, java.nio.ByteBuffer family, java.nio.ByteBuffer qualifier, long amount, boolean writeToWAL) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  int scannerOpen(java.nio.ByteBuffer table, org.apache.hadoop.hbase.avro.generated.AScan scan) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError;
++  java.lang.Void scannerClose(int scannerId) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError, org.apache.hadoop.hbase.avro.generated.AIllegalArgument;
++  java.util.List<org.apache.hadoop.hbase.avro.generated.AResult> scannerGetRows(int scannerId, int numberOfRows) throws org.apache.avro.ipc.AvroRemoteException, org.apache.hadoop.hbase.avro.generated.AIOError, org.apache.hadoop.hbase.avro.generated.AIllegalArgument;
+ }
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/hbase.avdl b/src/main/java/org/apache/hadoop/hbase/avro/hbase.avdl
+new file mode 100644
+index 0000000..c326072
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/avro/hbase.avdl
+@@ -0,0 +1,271 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/**
++ * Avro protocol for a "gateway" service
++ */
++@namespace("org.apache.hadoop.hbase.avro.generated")
++protocol HBase {
++
++  //
++  // TYPES
++  //
++
++  //
++  // Cluster metadata
++  //
++  // TODO(hammer): Best way to represent java.net.InetSocketAddress?
++  record AServerAddress {
++    string hostname;
++    string inetSocketAddress;
++    int port;
++  }
++
++  record ARegionLoad {
++    int memStoreSizeMB;
++    bytes name;
++    int storefileIndexSizeMB;
++    int storefiles;
++    int storefileSizeMB;
++    int stores;
++  }
++
++  record AServerLoad {
++    int load;
++    int maxHeapMB;
++    int memStoreSizeInMB;
++    int numberOfRegions;
++    int numberOfRequests;
++    array<ARegionLoad> regionsLoad;
++    int storefileIndexSizeInMB;
++    int storefiles;
++    int storefileSizeInMB;
++    int usedHeapMB;
++  }
++
++  record AServerInfo {
++    int infoPort;
++    AServerLoad load;
++    AServerAddress serverAddress;
++    string serverName;
++    long startCode;
++  }
++
++  // TODO(hammer): Implement reusable Writable to Avro record converter?
++  record AClusterStatus {
++    double averageLoad;
++    array<string> deadServerNames;
++    int deadServers;
++    string hbaseVersion;
++    int regionsCount;
++    int requestsCount;
++    array<AServerInfo> serverInfos;
++    int servers;
++  }
++
++  //
++  // Family metadata
++  //
++  // TODO(hammer): how to keep in sync with Java Enum?
++  enum ACompressionAlgorithm {
++    LZO, GZ, NONE
++  }
++
++  // TODO(hammer): include COLUMN_DESCRIPTOR_VERSION?
++  // TODO(hammer): add new bloomfilter stuff
++  record AFamilyDescriptor {
++    bytes name;
++    union { ACompressionAlgorithm, null } compression;
++    union { int, null } maxVersions;
++    union { int, null } blocksize;
++    union { boolean, null } inMemory;
++    union { int, null } timeToLive;
++    union { boolean, null } blockCacheEnabled;
++  }
++
++  //
++  // Table metadata
++  //
++  // TODO(hammer): include TABLE_DESCRIPTOR_VERSION?
++  record ATableDescriptor {
++    bytes name;
++    union { array<AFamilyDescriptor>, null } families;
++    union { long, null } maxFileSize;
++    union { long, null } memStoreFlushSize;
++    union { boolean, null } rootRegion;
++    union { boolean, null } metaRegion;
++    union { boolean, null } metaTable;
++    union { boolean, null } readOnly;
++    union { boolean, null } deferredLogFlush;
++  }
++
++  //
++  // Single-Row DML (Get)
++  //
++  record AColumn {
++    bytes family;
++    union { bytes, null } qualifier;
++  }
++
++  record ATimeRange {
++    long minStamp;
++    long maxStamp;
++  }
++
++  // TODO(hammer): Add filter options
++  record AGet {
++    bytes row;
++    union { array<AColumn>, null } columns;
++    union { long, null } timestamp;
++    union { ATimeRange, null } timerange;
++    union { int, null } maxVersions;
++  }
++
++  record AResultEntry {
++    bytes family;
++    bytes qualifier;
++    bytes value;
++    long timestamp;
++  }
++
++  // Avro maps can't use non-string keys, so using an array for now
++  record AResult {
++    bytes row;
++    array<AResultEntry> entries;
++  }
++
++  //
++  // Single-Row DML (Put)
++  //
++  // TODO(hammer): Reuse a single KeyValue-style record for Get and Put?
++  record AColumnValue {
++    bytes family;
++    bytes qualifier;
++    bytes value;
++    union { long, null } timestamp;
++  }
++
++  record APut {
++    bytes row;
++    array<AColumnValue> columnValues;
++  }
++
++  //
++  // Single-Row DML (Delete)
++  //
++  // TODO(hammer): Add fields when API is rationalized (HBASE-2609)
++  record ADelete {
++    bytes row;
++    union { array<AColumn>, null } columns;
++  }
++
++  //
++  // Multi-Row DML (Scan)
++  //
++  record AScan {
++    union { bytes, null } startRow;
++    union { bytes, null } stopRow;
++    union { array<AColumn>, null } columns;
++    union { long, null } timestamp;
++    union { ATimeRange, null } timerange;
++    union { int, null } maxVersions;
++  }
++
++  //
++  // ERRORS
++  //
++
++  /**
++   * An AIOError error signals that an error occurred communicating
++   * to the HBase master or a HBase region server. Also used to return
++   * more general HBase error conditions.
++   */
++  error AIOError {
++    string message;
++  }
++
++  /**
++   * An AIllegalArgument error indicates an illegal or invalid
++   * argument was passed into a procedure.
++   */
++  error AIllegalArgument {
++    string message;
++  }
++
++  /**
++   * An ATableExists error that a table with the specified
++   * name already exists
++   */
++  error ATableExists {
++    string message;
++  }
++
++  /**
++   * An AMasterNotRunning error means we couldn't reach the Master.
++   */
++  error AMasterNotRunning {
++    string message;
++  }
++
++  //
++  // MESSAGES
++  //
++
++  // TODO(hammer): surgery tools
++  // TODO(hammer): checkAndPut/flushCommits
++  // TODO(hammer): MultiPut/Get/Delete
++
++  // Cluster metadata
++  string getHBaseVersion() throws AIOError;
++  AClusterStatus getClusterStatus() throws AIOError;
++  array<ATableDescriptor> listTables() throws AIOError;
++
++  // Table metadata
++  ATableDescriptor describeTable(bytes table) throws AIOError;
++  boolean isTableEnabled(bytes table) throws AIOError;
++  boolean tableExists(bytes table) throws AIOError;
++
++  // Family metadata
++  AFamilyDescriptor describeFamily(bytes table, bytes family) throws AIOError;
++
++  // Table admin
++  void createTable(ATableDescriptor table) throws AIOError, AIllegalArgument, ATableExists, AMasterNotRunning;
++  void deleteTable(bytes table) throws AIOError;
++  void modifyTable(bytes table, ATableDescriptor tableDescriptor) throws AIOError;
++  void enableTable(bytes table) throws AIOError;
++  void disableTable(bytes table) throws AIOError;
++  void flush(bytes table) throws AIOError;
++  void split(bytes table) throws AIOError;
++
++  // Family admin
++  void addFamily(bytes table, AFamilyDescriptor family) throws AIOError;
++  void deleteFamily(bytes table, bytes family) throws AIOError;
++  void modifyFamily(bytes table, bytes familyName, AFamilyDescriptor familyDescriptor) throws AIOError;
++
++  // Single-row DML
++  AResult get(bytes table, AGet get) throws AIOError;
++  boolean exists(bytes table, AGet get) throws AIOError;
++  void put(bytes table, APut put) throws AIOError;
++  void delete(bytes table, ADelete delete) throws AIOError;
++  long incrementColumnValue(bytes table, bytes row, bytes family, bytes qualifier, long amount, boolean writeToWAL) throws AIOError;
++
++  // Multi-row DML (read-only)
++  int scannerOpen(bytes table, AScan scan) throws AIOError;
++  void scannerClose(int scannerId) throws AIOError, AIllegalArgument;
++  array<AResult> scannerGetRows(int scannerId, int numberOfRows) throws AIOError, AIllegalArgument;
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/hbase.genavro b/src/main/java/org/apache/hadoop/hbase/avro/hbase.genavro
+index c326072..e69de29 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/hbase.genavro
++++ b/src/main/java/org/apache/hadoop/hbase/avro/hbase.genavro
+@@ -1,271 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements. See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership. The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at
+- *
+- * http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-/**
+- * Avro protocol for a "gateway" service
+- */
+-@namespace("org.apache.hadoop.hbase.avro.generated")
+-protocol HBase {
+-
+-  //
+-  // TYPES
+-  //
+-
+-  //
+-  // Cluster metadata
+-  //
+-  // TODO(hammer): Best way to represent java.net.InetSocketAddress?
+-  record AServerAddress {
+-    string hostname;
+-    string inetSocketAddress;
+-    int port;
+-  }
+-
+-  record ARegionLoad {
+-    int memStoreSizeMB;
+-    bytes name;
+-    int storefileIndexSizeMB;
+-    int storefiles;
+-    int storefileSizeMB;
+-    int stores;
+-  }
+-
+-  record AServerLoad {
+-    int load;
+-    int maxHeapMB;
+-    int memStoreSizeInMB;
+-    int numberOfRegions;
+-    int numberOfRequests;
+-    array<ARegionLoad> regionsLoad;
+-    int storefileIndexSizeInMB;
+-    int storefiles;
+-    int storefileSizeInMB;
+-    int usedHeapMB;
+-  }
+-
+-  record AServerInfo {
+-    int infoPort;
+-    AServerLoad load;
+-    AServerAddress serverAddress;
+-    string serverName;
+-    long startCode;
+-  }
+-
+-  // TODO(hammer): Implement reusable Writable to Avro record converter?
+-  record AClusterStatus {
+-    double averageLoad;
+-    array<string> deadServerNames;
+-    int deadServers;
+-    string hbaseVersion;
+-    int regionsCount;
+-    int requestsCount;
+-    array<AServerInfo> serverInfos;
+-    int servers;
+-  }
+-
+-  //
+-  // Family metadata
+-  //
+-  // TODO(hammer): how to keep in sync with Java Enum?
+-  enum ACompressionAlgorithm {
+-    LZO, GZ, NONE
+-  }
+-
+-  // TODO(hammer): include COLUMN_DESCRIPTOR_VERSION?
+-  // TODO(hammer): add new bloomfilter stuff
+-  record AFamilyDescriptor {
+-    bytes name;
+-    union { ACompressionAlgorithm, null } compression;
+-    union { int, null } maxVersions;
+-    union { int, null } blocksize;
+-    union { boolean, null } inMemory;
+-    union { int, null } timeToLive;
+-    union { boolean, null } blockCacheEnabled;
+-  }
+-
+-  //
+-  // Table metadata
+-  //
+-  // TODO(hammer): include TABLE_DESCRIPTOR_VERSION?
+-  record ATableDescriptor {
+-    bytes name;
+-    union { array<AFamilyDescriptor>, null } families;
+-    union { long, null } maxFileSize;
+-    union { long, null } memStoreFlushSize;
+-    union { boolean, null } rootRegion;
+-    union { boolean, null } metaRegion;
+-    union { boolean, null } metaTable;
+-    union { boolean, null } readOnly;
+-    union { boolean, null } deferredLogFlush;
+-  }
+-
+-  //
+-  // Single-Row DML (Get)
+-  //
+-  record AColumn {
+-    bytes family;
+-    union { bytes, null } qualifier;
+-  }
+-
+-  record ATimeRange {
+-    long minStamp;
+-    long maxStamp;
+-  }
+-
+-  // TODO(hammer): Add filter options
+-  record AGet {
+-    bytes row;
+-    union { array<AColumn>, null } columns;
+-    union { long, null } timestamp;
+-    union { ATimeRange, null } timerange;
+-    union { int, null } maxVersions;
+-  }
+-
+-  record AResultEntry {
+-    bytes family;
+-    bytes qualifier;
+-    bytes value;
+-    long timestamp;
+-  }
+-
+-  // Avro maps can't use non-string keys, so using an array for now
+-  record AResult {
+-    bytes row;
+-    array<AResultEntry> entries;
+-  }
+-
+-  //
+-  // Single-Row DML (Put)
+-  //
+-  // TODO(hammer): Reuse a single KeyValue-style record for Get and Put?
+-  record AColumnValue {
+-    bytes family;
+-    bytes qualifier;
+-    bytes value;
+-    union { long, null } timestamp;
+-  }
+-
+-  record APut {
+-    bytes row;
+-    array<AColumnValue> columnValues;
+-  }
+-
+-  //
+-  // Single-Row DML (Delete)
+-  //
+-  // TODO(hammer): Add fields when API is rationalized (HBASE-2609)
+-  record ADelete {
+-    bytes row;
+-    union { array<AColumn>, null } columns;
+-  }
+-
+-  //
+-  // Multi-Row DML (Scan)
+-  //
+-  record AScan {
+-    union { bytes, null } startRow;
+-    union { bytes, null } stopRow;
+-    union { array<AColumn>, null } columns;
+-    union { long, null } timestamp;
+-    union { ATimeRange, null } timerange;
+-    union { int, null } maxVersions;
+-  }
+-
+-  //
+-  // ERRORS
+-  //
+-
+-  /**
+-   * An AIOError error signals that an error occurred communicating
+-   * to the HBase master or a HBase region server. Also used to return
+-   * more general HBase error conditions.
+-   */
+-  error AIOError {
+-    string message;
+-  }
+-
+-  /**
+-   * An AIllegalArgument error indicates an illegal or invalid
+-   * argument was passed into a procedure.
+-   */
+-  error AIllegalArgument {
+-    string message;
+-  }
+-
+-  /**
+-   * An ATableExists error that a table with the specified
+-   * name already exists
+-   */
+-  error ATableExists {
+-    string message;
+-  }
+-
+-  /**
+-   * An AMasterNotRunning error means we couldn't reach the Master.
+-   */
+-  error AMasterNotRunning {
+-    string message;
+-  }
+-
+-  //
+-  // MESSAGES
+-  //
+-
+-  // TODO(hammer): surgery tools
+-  // TODO(hammer): checkAndPut/flushCommits
+-  // TODO(hammer): MultiPut/Get/Delete
+-
+-  // Cluster metadata
+-  string getHBaseVersion() throws AIOError;
+-  AClusterStatus getClusterStatus() throws AIOError;
+-  array<ATableDescriptor> listTables() throws AIOError;
+-
+-  // Table metadata
+-  ATableDescriptor describeTable(bytes table) throws AIOError;
+-  boolean isTableEnabled(bytes table) throws AIOError;
+-  boolean tableExists(bytes table) throws AIOError;
+-
+-  // Family metadata
+-  AFamilyDescriptor describeFamily(bytes table, bytes family) throws AIOError;
+-
+-  // Table admin
+-  void createTable(ATableDescriptor table) throws AIOError, AIllegalArgument, ATableExists, AMasterNotRunning;
+-  void deleteTable(bytes table) throws AIOError;
+-  void modifyTable(bytes table, ATableDescriptor tableDescriptor) throws AIOError;
+-  void enableTable(bytes table) throws AIOError;
+-  void disableTable(bytes table) throws AIOError;
+-  void flush(bytes table) throws AIOError;
+-  void split(bytes table) throws AIOError;
+-
+-  // Family admin
+-  void addFamily(bytes table, AFamilyDescriptor family) throws AIOError;
+-  void deleteFamily(bytes table, bytes family) throws AIOError;
+-  void modifyFamily(bytes table, bytes familyName, AFamilyDescriptor familyDescriptor) throws AIOError;
+-
+-  // Single-row DML
+-  AResult get(bytes table, AGet get) throws AIOError;
+-  boolean exists(bytes table, AGet get) throws AIOError;
+-  void put(bytes table, APut put) throws AIOError;
+-  void delete(bytes table, ADelete delete) throws AIOError;
+-  long incrementColumnValue(bytes table, bytes row, bytes family, bytes qualifier, long amount, boolean writeToWAL) throws AIOError;
+-
+-  // Multi-row DML (read-only)
+-  int scannerOpen(bytes table, AScan scan) throws AIOError;
+-  void scannerClose(int scannerId) throws AIOError, AIllegalArgument;
+-  array<AResult> scannerGetRows(int scannerId, int numberOfRows) throws AIOError, AIllegalArgument;
+-}
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/package.html b/src/main/java/org/apache/hadoop/hbase/avro/package.html
+index 298b561..0588095 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/package.html
++++ b/src/main/java/org/apache/hadoop/hbase/avro/package.html
+@@ -43,8 +43,8 @@ types, and RPC utility files are checked into SVN under the
+ 
+ <p>The files were generated by running the commands:
+ <pre>
+-  java -jar avro-tools-1.3.2.jar genavro hbase.genavro hbase.avpr
+-  java -jar avro-tools-1.3.2.jar compile protocol hbase.avro $HBASE_HOME/src/java
++  java -jar avro-tools-1.4.1.jar idl hbase.avdl hbase.avpr
++  java -jar avro-tools-1.4.1.jar compile protocol hbase.avpr $HBASE_HOME/src/main/java
+ </pre>
+ </p>
+ 
+-- 
+1.7.0.4
+

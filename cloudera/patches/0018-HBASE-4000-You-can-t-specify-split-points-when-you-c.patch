@@ -1,0 +1,110 @@
+From e9b45b21e026b4857f45b1ad65a0ef61b3f5cbbc Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Mon, 8 Aug 2011 18:44:51 -0700
+Subject: [PATCH 18/50] HBASE-4000 You can't specify split points when you create a table in the shell
+
+This patch enables the specification of splits during table creation.
+
+For example:
+ hbase> create 't1', 'f1', {SPLITS => ['01', '02', '03', '04']}
+
+Reason: Supportablity
+Author: Joey Echeverria
+Ref: CDH-3354
+---
+ src/main/ruby/hbase.rb                 |    2 +
+ src/main/ruby/hbase/admin.rb           |   42 +++++++++++++++++++++++++-------
+ src/main/ruby/shell/commands/create.rb |    2 +
+ 3 files changed, 37 insertions(+), 9 deletions(-)
+
+diff --git a/src/main/ruby/hbase.rb b/src/main/ruby/hbase.rb
+index 82bdb14..4d27191 100644
+--- a/src/main/ruby/hbase.rb
++++ b/src/main/ruby/hbase.rb
+@@ -51,6 +51,8 @@ module HBaseConstants
+   INTERVAL = 'INTERVAL'
+   CACHE = 'CACHE'
+   FILTER = 'FILTER'
++  SPLITS = 'SPLITS'
++  SPLITS_FILE = 'SPLITS_FILE'
+ 
+   # Load constants from hbase java API
+   def self.promote_constants(constants)
+diff --git a/src/main/ruby/hbase/admin.rb b/src/main/ruby/hbase/admin.rb
+index 5f40068..9fcd55c 100644
+--- a/src/main/ruby/hbase/admin.rb
++++ b/src/main/ruby/hbase/admin.rb
+@@ -138,24 +138,48 @@ module Hbase
+ 
+       # Start defining the table
+       htd = org.apache.hadoop.hbase.HTableDescriptor.new(table_name)
+-
+-      # All args are columns, add them to the table definition
++      splits = nil
++      # Args are either columns or splits, add them to the table definition
+       # TODO: add table options support
+       args.each do |arg|
+         unless arg.kind_of?(String) || arg.kind_of?(Hash)
+           raise(ArgumentError, "#{arg.class} of #{arg.inspect} is not of Hash or String type")
+         end
+ 
+-        # Add column to the table
+-        descriptor = hcd(arg, htd)
+-        if arg[COMPRESSION_COMPACT]
+-          descriptor.setValue(COMPRESSION_COMPACT, arg[COMPRESSION_COMPACT])
++        if arg.kind_of?(Hash) and (arg.has_key?(SPLITS) or arg.has_key?(SPLITS_FILE))
++          if arg.has_key?(SPLITS_FILE)
++            unless File.exist?(arg[SPLITS_FILE])
++              raise(ArgumentError, "Splits file #{arg[SPLITS_FILE]} doesn't exist")
++            end
++            arg[SPLITS] = []
++            File.foreach(arg[SPLITS_FILE]) do |line|
++              arg[SPLITS].push(line.strip())
++            end
++          end
++
++          splits = Java::byte[][arg[SPLITS].size].new
++          idx = 0
++          arg[SPLITS].each do |split|
++            splits[idx] = split.to_java_bytes
++            idx = idx + 1
++          end
++        else
++          # Add column to the table
++          descriptor = hcd(arg, htd)
++          if arg[COMPRESSION_COMPACT]
++            descriptor.setValue(COMPRESSION_COMPACT, arg[COMPRESSION_COMPACT])
++          end
++          htd.addFamily(descriptor)
+         end
+-        htd.addFamily(descriptor)
+       end
+ 
+-      # Perform the create table call
+-      @admin.createTable(htd)
++      if splits.nil?
++        # Perform the create table call
++        @admin.createTable(htd)
++      else
++        # Perform the create table call
++        @admin.createTable(htd, splits)
++      end
+     end
+ 
+     #----------------------------------------------------------------------------------------------
+diff --git a/src/main/ruby/shell/commands/create.rb b/src/main/ruby/shell/commands/create.rb
+index cfe5d3f..e67e8c1 100644
+--- a/src/main/ruby/shell/commands/create.rb
++++ b/src/main/ruby/shell/commands/create.rb
+@@ -33,6 +33,8 @@ Examples:
+   hbase> # The above in shorthand would be the following:
+   hbase> create 't1', 'f1', 'f2', 'f3'
+   hbase> create 't1', {NAME => 'f1', VERSIONS => 1, TTL => 2592000, BLOCKCACHE => true}
++  hbase> create 't1', 'f1', {SPLITS => ['10', '20', '30', '40']}
++  hbase> create 't1', 'f1', {SPLITS_FILE => 'splits.txt'}
+ EOF
+       end
+ 
+-- 
+1.7.0.4
+

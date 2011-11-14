@@ -21,6 +21,8 @@ package org.apache.hadoop.hbase.catalog;
 
 import java.io.IOException;
 import java.net.ConnectException;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -43,6 +45,13 @@ import org.apache.hadoop.hbase.util.Writables;
 public class MetaEditor {
   private static final Log LOG = LogFactory.getLog(MetaEditor.class);
 
+  private static Put makePutFromRegionInfo(HRegionInfo regionInfo) throws IOException {
+    Put put = new Put(regionInfo.getRegionName());
+    put.add(HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER,
+        Writables.getBytes(regionInfo));
+    return put;
+  }
+  
   /**
    * Adds a META row for the specified new region.
    * @param regionInfo region information
@@ -51,12 +60,28 @@ public class MetaEditor {
   public static void addRegionToMeta(CatalogTracker catalogTracker,
       HRegionInfo regionInfo)
   throws IOException {
-    Put put = new Put(regionInfo.getRegionName());
-    put.add(HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER,
-        Writables.getBytes(regionInfo));
     catalogTracker.waitForMetaServerConnectionDefault().put(
-        CatalogTracker.META_REGION, put);
+        CatalogTracker.META_REGION, makePutFromRegionInfo(regionInfo));
     LOG.info("Added region " + regionInfo.getRegionNameAsString() + " to META");
+  }
+
+  /**
+   * Adds a META row for each of the specified new regions.
+   * @param catalogTracker CatalogTracker
+   * @param regionInfos region information list
+   * @throws IOException if problem connecting or updating meta
+   */
+  public static void addRegionsToMeta(CatalogTracker catalogTracker,
+      List<HRegionInfo> regionInfos)
+  throws IOException {
+    List<Put> puts = new ArrayList<Put>();
+    for (HRegionInfo regionInfo : regionInfos) {
+      puts.add(makePutFromRegionInfo(regionInfo));
+      LOG.debug("Added region " + regionInfo.getRegionNameAsString() + " to META");
+    }
+    catalogTracker.waitForMetaServerConnectionDefault().put(
+        CatalogTracker.META_REGION, puts);
+    LOG.info("Added " + puts.size() + " regions to META");
   }
 
   /**
@@ -163,7 +188,7 @@ public class MetaEditor {
     addLocation(put, serverInfo);
     server.put(catalogRegionName, put);
     LOG.info("Updated row " + regionInfo.getRegionNameAsString() +
-      " in region " + Bytes.toString(catalogRegionName) + " with " +
+      " in region " + Bytes.toStringBinary(catalogRegionName) + " with " +
       "server=" + serverInfo.getHostnamePort() + ", " +
       "startcode=" + serverInfo.getStartCode());
   }
@@ -201,7 +226,7 @@ public class MetaEditor {
     catalogTracker.waitForMetaServerConnectionDefault().
       delete(CatalogTracker.META_REGION, delete);
     LOG.info("Deleted daughter reference " + daughter.getRegionNameAsString() +
-      ", qualifier=" + Bytes.toString(qualifier) + ", from parent " +
+      ", qualifier=" + Bytes.toStringBinary(qualifier) + ", from parent " +
       parent.getRegionNameAsString());
   }
 

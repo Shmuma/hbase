@@ -20,11 +20,20 @@
 package org.apache.hadoop.hbase.util;
 
 import java.io.IOException;
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -51,14 +60,15 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
 import org.apache.hadoop.hbase.ipc.HRegionInterface;
 import org.apache.hadoop.hbase.regionserver.wal.HLog;
+import org.apache.hadoop.hbase.zookeeper.RootRegionTracker;
+import org.apache.hadoop.hbase.util.HBaseFsck.ErrorReporter.ERROR_CODE;
 import org.apache.hadoop.hbase.zookeeper.ZKTable;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.zookeeper.KeeperException;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
-
-import static org.apache.hadoop.hbase.util.HBaseFsck.ErrorReporter.ERROR_CODE;
+import com.google.common.collect.Multimap;
 
 /**
  * Check consistency among the in-memory states of the master and the
@@ -88,6 +98,8 @@ public class HBaseFsck {
   private boolean fix = false; // do we want to try fixing the errors?
   private boolean rerun = false; // if we tried to fix something rerun hbck
   private static boolean summary = false; // if we want to print less output
+  private boolean checkMetaOnly = false;
+  
   // Empty regioninfo qualifiers in .META.
   private Set<Result> emptyRegionInfoQualifiers = new HashSet<Result>();
   private int numThreads = MAX_NUM_THREADS;
@@ -140,6 +152,7 @@ public class HBaseFsck {
       errors.reportError("Encountered fatal error. Exiting...");
       return -1;
     }
+    
     getMetaEntries();
 
     // Check if .META. is found only once and in the right place
@@ -150,23 +163,25 @@ public class HBaseFsck {
     }
 
     // get a list of all tables that have not changed recently.
-    AtomicInteger numSkipped = new AtomicInteger(0);
-    HTableDescriptor[] allTables = getTables(numSkipped);
-    errors.print("Number of Tables: " + allTables.length);
-    if (details) {
-      if (numSkipped.get() > 0) {
-        errors.detail("Number of Tables in flux: " + numSkipped.get());
-      }
-      for (HTableDescriptor td : allTables) {
-        String tableName = td.getNameAsString();
-        errors.detail("  Table: " + tableName + "\t" +
-                           (td.isReadOnly() ? "ro" : "rw") + "\t" +
-                           (td.isRootRegion() ? "ROOT" :
-                            (td.isMetaRegion() ? "META" : "    ")) + "\t" +
-                           " families: " + td.getFamilies().size());
+    if (!checkMetaOnly) {
+      AtomicInteger numSkipped = new AtomicInteger(0);
+      HTableDescriptor[] allTables = getTables(numSkipped);
+      errors.print("Number of Tables: " + allTables.length);
+      if (details) {
+        if (numSkipped.get() > 0) {
+          errors.detail("Number of Tables in flux: " + numSkipped.get());
+        }
+        for (HTableDescriptor td : allTables) {
+          String tableName = td.getNameAsString();
+          errors.detail("  Table: " + tableName + "\t" +
+                             (td.isReadOnly() ? "ro" : "rw") + "\t" +
+                             (td.isRootRegion() ? "ROOT" :
+                              (td.isMetaRegion() ? "META" : "    ")) + "\t" +
+                             " families: " + td.getFamilies().size());
+        }
       }
     }
-
+    
     // From the master, get a list of all known live region servers
     Collection<HServerInfo> regionServers = status.getServerInfo();
     errors.print("Number of live region servers: " +
@@ -260,10 +275,15 @@ public class HBaseFsck {
     boolean foundVersionFile = false;
     FileStatus[] files = fs.listStatus(rootDir);
     for (FileStatus file : files) {
-      if (file.getPath().getName().equals(HConstants.VERSION_FILE_NAME)) {
+      String dirName = file.getPath().getName();
+      if (dirName.equals(HConstants.VERSION_FILE_NAME)) {
         foundVersionFile = true;
       } else {
-        tableDirs.add(file);
+        if (!checkMetaOnly ||
+            dirName.equals("-ROOT-") ||
+            dirName.equals(".META.")) {
+          tableDirs.add(file);
+        }
       }
     }
 
@@ -386,12 +406,8 @@ public class HBaseFsck {
     if (inMeta && inHdfs && isDeployed && deploymentMatchesMeta && shouldBeDeployed) {
       return;
     } else if (inMeta && !isDeployed && splitParent) {
-      // Offline regions shouldn't cause complaints
-      LOG.debug("Region " + descriptiveName + " offline, split, parent, ignoring.");
       return;
     } else if (inMeta && !shouldBeDeployed && !isDeployed) {
-      // offline regions shouldn't cause complaints
-      LOG.debug("Region " + descriptiveName + " offline, ignoring.");
       return;
     } else if (recentlyModified) {
       LOG.warn("Region " + descriptiveName + " was recently modified -- skipping");
@@ -408,7 +424,7 @@ public class HBaseFsck {
     } else if (!inMeta && inHdfs && !isDeployed) {
       errors.reportError(ERROR_CODE.NOT_IN_META_OR_DEPLOYED, "Region "
           + descriptiveName + " on HDFS, but not listed in META " +
-          "or deployed on any region server.");
+          "or deployed on any region server");
     } else if (!inMeta && inHdfs && isDeployed) {
       errors.reportError(ERROR_CODE.NOT_IN_META, "Region " + descriptiveName
           + " not in META, but deployed on " + Joiner.on(", ").join(hbi.deployedOn));
@@ -498,7 +514,6 @@ public class HBaseFsck {
         modTInfo.addServer(server);
       }
 
-      //modTInfo.addEdge(hbi.metaEntry.getStartKey(), hbi.metaEntry.getEndKey());
       modTInfo.addRegionInfo(hbi);
 
       tablesInfo.put(tableName, modTInfo);
@@ -518,15 +533,35 @@ public class HBaseFsck {
     String tableName;
     TreeSet <HServerAddress> deployedOn;
 
-    List<HbckInfo> regions = new ArrayList<HbckInfo>();
+    final List<HbckInfo> backwards = new ArrayList<HbckInfo>();
+    final RegionSplitCalculator<HbckInfo> sc = new RegionSplitCalculator<HbckInfo>(cmp);
 
     TInfo(String name) {
       this.tableName = name;
       deployedOn = new TreeSet <HServerAddress>();
     }
 
-    public void addRegionInfo (HbckInfo r) {
-      regions.add(r);
+    public void addRegionInfo(HbckInfo hir) {
+      if (Bytes.equals(hir.getEndKey(), HConstants.EMPTY_END_ROW)) {
+        // end key is absolute end key, just add it.
+        sc.add(hir);
+        return;
+      }
+
+      // if not the absolute end key, check for cycle 
+      if (Bytes.compareTo(hir.getStartKey(), hir.getEndKey()) > 0) {
+        errors.reportError(
+            ERROR_CODE.REGION_CYCLE,
+            String.format("The endkey for this region comes before the "
+                + "startkey, startkey=%s, endkey=%s",
+                Bytes.toStringBinary(hir.getStartKey()),
+                Bytes.toStringBinary(hir.getEndKey())), this, hir);
+        backwards.add(hir);
+        return;
+      }
+
+      // main case, add to split calculator
+      sc.add(hir);
     }
 
     public void addServer(HServerAddress server) {
@@ -538,7 +573,7 @@ public class HBaseFsck {
     }
 
     public int getNumRegions() {
-      return regions.size();
+      return sc.getStarts().size() + backwards.size();
     }
 
     /**
@@ -547,68 +582,84 @@ public class HBaseFsck {
      * @return false if there are errors
      */
     public boolean checkRegionChain() {
-      Collections.sort(regions);
-      HbckInfo last = null;
+      
+      int originalErrorsCount = errors.getErrorList().size();
+      Multimap<byte[], HbckInfo> regions = sc.calcCoverage();
+      SortedSet<byte[]> splits = sc.getSplits();
 
-      for (HbckInfo r : regions) {
-        if (last == null) {
-          // This is the first region, check that the start key is empty
-          if (! Bytes.equals(r.metaEntry.getStartKey(), HConstants.EMPTY_BYTE_ARRAY)) {
+      byte[] prevKey = null;
+      for (byte[] key: splits) {
+        Collection<HbckInfo> ranges = regions.get(key);
+        if (prevKey == null && !Bytes.equals(key, HConstants.EMPTY_BYTE_ARRAY)) {
+          for (HbckInfo rng : ranges) {
             errors.reportError(ERROR_CODE.FIRST_REGION_STARTKEY_NOT_EMPTY,
                 "First region should start with an empty key.",
-                this, r);
+                this, rng);
           }
-        } else {
-
-          // Check if endKey < startKey
-          // Previous implementation of this code checked for a cycle in the
-          // region chain.  A cycle would imply that the endKey comes before
-          // the startKey (i.e. endKey < startKey).
-          if (! Bytes.equals(r.metaEntry.getEndKey(), HConstants.EMPTY_BYTE_ARRAY)) {
-            // continue with this check if this is not the last region
-            int cmpRegionKeys = Bytes.compareTo(r.metaEntry.getStartKey(),
-                r.metaEntry.getEndKey());
-            if (cmpRegionKeys > 0) {
-              errors.reportError(ERROR_CODE.REGION_CYCLE,
-                  String.format("The endkey for this region comes before the "
-                      + "startkey, startkey=%s, endkey=%s",
-                      Bytes.toString(r.metaEntry.getStartKey()),
-                      Bytes.toString(r.metaEntry.getEndKey())),
-                  this, r, last);
-            }
-          }
-
-          // Check if the startkeys are different
-          if (Bytes.equals(r.metaEntry.getStartKey(), last.metaEntry.getStartKey())) {
-            errors.reportError(ERROR_CODE.DUPE_STARTKEYS,
-                "Two regions have the same startkey: "
-                    + Bytes.toString(r.metaEntry.getStartKey()),
-                this, r, last);
-          } else {
-            // Check that the startkey is the same as the previous end key
-            int cmp = Bytes.compareTo(r.metaEntry.getStartKey(),
-                last.metaEntry.getEndKey());
-            if (cmp > 0) {
-              // hole
-              errors.reportError(ERROR_CODE.HOLE_IN_REGION_CHAIN,
-                  "There is a hole in the region chain.",
-                  this, r, last);
-            } else if (cmp < 0) {
-              // overlap
-              errors.reportError(ERROR_CODE.OVERLAP_IN_REGION_CHAIN,
-                  "There is an overlap in the region chain.",
-                  this, r, last);
-            }
-          }
-
         }
-
-        last = r;
+        
+        // Check if the startkeys are different
+        if (ranges.size() > 1) {
+          ArrayList<HbckInfo> subRange = new ArrayList<HbckInfo>(ranges);
+          // this dumb and n^2 but this shouldn't happen often
+          for (HbckInfo r1 : ranges) {
+            subRange.remove(r1);
+            for (HbckInfo r2 : subRange) {
+              if (Bytes.compareTo(r1.getStartKey(), r2.getStartKey())==0) {
+            // dup start key
+            errors.reportError(ERROR_CODE.DUPE_STARTKEYS,
+              "Multiple regions have the same startkey: "
+                  + Bytes.toStringBinary(key), this, r1);
+            errors.reportError(ERROR_CODE.DUPE_STARTKEYS,
+                "Multiple regions have the same startkey: "
+                    + Bytes.toStringBinary(key), this, r2);
+              } else {
+            // overlap
+            errors.reportError(ERROR_CODE.OVERLAP_IN_REGION_CHAIN,
+                "There is an overlap in the region chain.",
+                this, r1);
+              }
+            }
+          }
+        }
+        
+        if (ranges.size() == 0) {
+          byte[] holeStopKey = sc.getSplits().higher(key);
+          // if higher key is null we reached the top.
+          if (holeStopKey != null) {
+            // hole
+            errors.reportError(ERROR_CODE.HOLE_IN_REGION_CHAIN,
+                "There is a hole in the region chain between "
+                + Bytes.toString(key) + " and " + Bytes.toString(holeStopKey));
+          }
+        }
+        prevKey = key;
       }
-
-      return errors.getErrorList().size() == 0;
+      if (details) {
+        // do full region split map dump
+        dump(sc.getSplits(), regions);
+      }
+      return errors.getErrorList().size() == originalErrorsCount;
     }
 
+    /**
+     * This dumps data in a visually reasonable way for visual debugging
+     * 
+     * @param splits
+     * @param regions
+     */
+    void dump(TreeSet<byte[]> splits, Multimap<byte[], HbckInfo> regions) {
+      // we display this way because the last end key should be displayed as well.
+      for (byte[] k : splits) {
+        System.out.print(Bytes.toString(k) + ":\t");
+        for (HbckInfo r : regions.get(k)) {
+          System.out.print("[ "+ r.toString() + ", " 
+              + Bytes.toString(r.getEndKey())+ "]\t");
+        }
+        System.out.println();
+      }
+    }
+    
   }
 
   /**
@@ -780,15 +831,18 @@ public class HBaseFsck {
     MetaScanner.metaScan(conf, visitor, null, null,
       Integer.MAX_VALUE, HConstants.ROOT_TABLE_NAME);
 
-    // Scan .META. to pick up user regions
-    MetaScanner.metaScan(conf, visitor);
+    if (!checkMetaOnly) {
+      // Scan .META. to pick up user regions
+      MetaScanner.metaScan(conf, visitor);
+    }
+    
     errors.print("");
   }
 
   /**
    * Stores the entries scanned from META
    */
-  private static class MetaEntry extends HRegionInfo {
+  static class MetaEntry extends HRegionInfo {
     HServerAddress regionServer;   // server hosting this region
     long modTime;          // timestamp of most recent modification metadata
 
@@ -803,7 +857,7 @@ public class HBaseFsck {
   /**
    * Maintain information about a particular region.
    */
-  static class HbckInfo implements Comparable {
+  static class HbckInfo implements KeyRange {
     boolean onlyEdits = false;
     MetaEntry metaEntry = null;
     FileStatus foundRegionDir = null;
@@ -828,15 +882,52 @@ public class HBaseFsck {
     }
 
     @Override
-    public int compareTo(Object o) {
-      HbckInfo other = (HbckInfo) o;
-      int startComparison = Bytes.compareTo(this.metaEntry.getStartKey(), other.metaEntry.getStartKey());
-      if (startComparison != 0)
-        return startComparison;
-      else
-        return Bytes.compareTo(this.metaEntry.getEndKey(), other.metaEntry.getEndKey());
+    public byte[] getStartKey() {
+      return this.metaEntry.getStartKey();
+    }
+
+    @Override
+    public byte[] getEndKey() {
+      return this.metaEntry.getEndKey();
     }
   }
+
+  final static Comparator<HbckInfo> cmp = new Comparator<HbckInfo>() {
+    @Override
+    public int compare(HbckInfo l, HbckInfo r) {
+      if (l == r) {
+        // same instance
+        return 0;
+      }
+
+      int tableCompare = RegionSplitCalculator.BYTES_COMPARATOR.compare(
+          l.metaEntry.getTableDesc().getName(), r.metaEntry.getTableDesc().getName());
+      if (tableCompare != 0) {
+        return tableCompare;
+      }
+
+      int startComparison = RegionSplitCalculator.BYTES_COMPARATOR.compare(
+          l.metaEntry.getStartKey(), r.metaEntry.getStartKey());
+      if (startComparison != 0) {
+        return startComparison;
+      }
+
+      // Special case for absolute endkey
+      byte[] endKey = r.metaEntry.getEndKey();
+      endKey = (endKey.length == 0) ? null : endKey;
+      byte[] endKey2 = l.metaEntry.getEndKey();
+      endKey2 = (endKey2.length == 0) ? null : endKey2;
+      int endComparison = RegionSplitCalculator.BYTES_COMPARATOR.compare(
+          endKey2,  endKey);
+
+      if (endComparison != 0) {
+        return endComparison;
+      }
+
+      // use modTime as tiebreaker.
+      return (int) (l.metaEntry.modTime - r.metaEntry.modTime);
+    }
+  };
 
   /**
    * Prints summary of all tables found on the system.
@@ -1018,6 +1109,9 @@ public class HBaseFsck {
 
         // list all online regions from this region server
         List<HRegionInfo> regions = server.getOnlineRegions();
+        if (hbck.checkMetaOnly) {
+          regions = filterOnlyMetaRegions(regions);
+        }
         if (details) {
           errors.detail("RegionServer: " + rsinfo.getServerName() +
                            " number of regions: " + regions.size());
@@ -1043,10 +1137,20 @@ public class HBaseFsck {
         notifyAll(); // wakeup anybody waiting for this item to be done
       }
     }
+
+    private List<HRegionInfo> filterOnlyMetaRegions(List<HRegionInfo> regions) {
+      List<HRegionInfo> ret = Lists.newArrayList();
+      for (HRegionInfo hri : regions) {
+        if (hri.isMetaRegion() || hri.isRootRegion()) {
+          ret.add(hri);
+        }
+      }
+      return ret;
+    }
   }
 
   /**
-   * Contact hdfs and get all information about spcified table directory.
+   * Contact hdfs and get all information about specified table directory.
    */
   static class WorkItemHdfsDir implements Runnable {
     private HBaseFsck hbck;
@@ -1133,6 +1237,14 @@ public class HBaseFsck {
   }
 
   /**
+   * Set META check mode.
+   * Print only info about META table deployment/state
+   */
+  void setCheckMetaOnly() {
+    checkMetaOnly = true;
+  }
+
+  /**
    * Check if we should rerun fsck again. This checks if we've tried to
    * fix something and we should rerun fsck tool again.
    * Display the full report from fsck. This displays all live and dead
@@ -1178,7 +1290,7 @@ public class HBaseFsck {
     System.err.println("   -sleepBeforeRerun {timeInSeconds} Sleep this many seconds" +
                        " before checking if the fix worked if run with -fix");
     System.err.println("   -summary Print only summary of the tables and status.");
-
+    System.err.println("   -metaonly Only check the state of ROOT and META tables.");
     Runtime.getRuntime().exit(-2);
   }
 
@@ -1229,6 +1341,8 @@ public class HBaseFsck {
         fsck.setFixErrors(true);
       } else if (cmd.equals("-summary")) {
         fsck.setSummary();
+      } else if (cmd.equals("-metaonly")) {
+        fsck.setCheckMetaOnly();
       } else {
         String str = "Unknown command line option : " + cmd;
         LOG.info(str);
@@ -1258,4 +1372,3 @@ public class HBaseFsck {
     Runtime.getRuntime().exit(code);
   }
 }
-

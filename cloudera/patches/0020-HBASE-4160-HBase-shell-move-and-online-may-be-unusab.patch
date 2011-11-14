@@ -1,0 +1,37 @@
+From 0806d7d604d4dcfa5546728fb5ba4f88d3445e3a Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Tue, 9 Aug 2011 00:15:41 +0000
+Subject: [PATCH 20/50] HBASE-4160 HBase shell move and online may be unusable if region name or server includes binary-encoded data
+
+Reason: Bug
+Author: Jonathan Hsieh
+Ref: CDH-3358
+---
+ src/main/ruby/hbase/admin.rb |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/ruby/hbase/admin.rb b/src/main/ruby/hbase/admin.rb
+index 9fcd55c..257dfa0 100644
+--- a/src/main/ruby/hbase/admin.rb
++++ b/src/main/ruby/hbase/admin.rb
+@@ -203,7 +203,7 @@ module Hbase
+     #----------------------------------------------------------------------------------------------
+     # Move a region
+     def move(encoded_region_name, server = nil)
+-      @admin.move(org.apache.hadoop.hbase.util.Bytes.toBytes(encoded_region_name), server ? org.apache.hadoop.hbase.util.Bytes.toBytes(server): nil)
++      @admin.move(encoded_region_name.to_java_bytes, server ? server.to_java_bytes: nil)
+     end
+ 
+     #----------------------------------------------------------------------------------------------
+@@ -408,7 +408,7 @@ module Hbase
+ 
+       # Read region info
+       # FIXME: fail gracefully if can't find the region
+-      region_bytes = org.apache.hadoop.hbase.util.Bytes.toBytes(region_name)
++      region_bytes = region_name.to_java_bytes
+       g = org.apache.hadoop.hbase.client.Get.new(region_bytes)
+       g.addColumn(org.apache.hadoop.hbase.HConstants::CATALOG_FAMILY, org.apache.hadoop.hbase.HConstants::REGIONINFO_QUALIFIER)
+       hri_bytes = meta.get(g).value
+-- 
+1.7.0.4
+

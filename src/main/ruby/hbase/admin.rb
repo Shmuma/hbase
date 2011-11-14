@@ -138,48 +138,72 @@ module Hbase
 
       # Start defining the table
       htd = org.apache.hadoop.hbase.HTableDescriptor.new(table_name)
-
-      # All args are columns, add them to the table definition
+      splits = nil
+      # Args are either columns or splits, add them to the table definition
       # TODO: add table options support
       args.each do |arg|
         unless arg.kind_of?(String) || arg.kind_of?(Hash)
           raise(ArgumentError, "#{arg.class} of #{arg.inspect} is not of Hash or String type")
         end
 
-        # Add column to the table
-        descriptor = hcd(arg, htd)
-        if arg[COMPRESSION_COMPACT]
-          descriptor.setValue(COMPRESSION_COMPACT, arg[COMPRESSION_COMPACT])
+        if arg.kind_of?(Hash) and (arg.has_key?(SPLITS) or arg.has_key?(SPLITS_FILE))
+          if arg.has_key?(SPLITS_FILE)
+            unless File.exist?(arg[SPLITS_FILE])
+              raise(ArgumentError, "Splits file #{arg[SPLITS_FILE]} doesn't exist")
+            end
+            arg[SPLITS] = []
+            File.foreach(arg[SPLITS_FILE]) do |line|
+              arg[SPLITS].push(line.strip())
+            end
+          end
+
+          splits = Java::byte[][arg[SPLITS].size].new
+          idx = 0
+          arg[SPLITS].each do |split|
+            splits[idx] = split.to_java_bytes
+            idx = idx + 1
+          end
+        else
+          # Add column to the table
+          descriptor = hcd(arg, htd)
+          if arg[COMPRESSION_COMPACT]
+            descriptor.setValue(COMPRESSION_COMPACT, arg[COMPRESSION_COMPACT])
+          end
+          htd.addFamily(descriptor)
         end
-        htd.addFamily(descriptor)
       end
 
-      # Perform the create table call
-      @admin.createTable(htd)
+      if splits.nil?
+        # Perform the create table call
+        @admin.createTable(htd)
+      else
+        # Perform the create table call
+        @admin.createTable(htd, splits)
+      end
     end
 
     #----------------------------------------------------------------------------------------------
     # Closes a region
     def close_region(region_name, server = nil)
-      @admin.closeRegion(region_name, server ? [server].to_java : nil)
+      @admin.closeRegion(region_name, server)
     end
 
     #----------------------------------------------------------------------------------------------
     # Assign a region
     def assign(region_name, force)
-      @admin.assign(org.apache.hadoop.hbase.util.Bytes.toBytes(region_name), java.lang.Boolean::valueOf(force))
+      @admin.assign(region_name.to_java_bytes, java.lang.Boolean::valueOf(force))
     end
 
     #----------------------------------------------------------------------------------------------
     # Unassign a region
     def unassign(region_name, force)
-      @admin.unassign(org.apache.hadoop.hbase.util.Bytes.toBytes(region_name), java.lang.Boolean::valueOf(force))
+      @admin.unassign(region_name.to_java_bytes, java.lang.Boolean::valueOf(force))
     end
 
     #----------------------------------------------------------------------------------------------
     # Move a region
     def move(encoded_region_name, server = nil)
-      @admin.move(org.apache.hadoop.hbase.util.Bytes.toBytes(encoded_region_name), server ? org.apache.hadoop.hbase.util.Bytes.toBytes(server): nil)
+      @admin.move(encoded_region_name.to_java_bytes, server ? server.to_java_bytes: nil)
     end
 
     #----------------------------------------------------------------------------------------------
@@ -384,7 +408,7 @@ module Hbase
 
       # Read region info
       # FIXME: fail gracefully if can't find the region
-      region_bytes = org.apache.hadoop.hbase.util.Bytes.toBytes(region_name)
+      region_bytes = region_name.to_java_bytes
       g = org.apache.hadoop.hbase.client.Get.new(region_bytes)
       g.addColumn(org.apache.hadoop.hbase.HConstants::CATALOG_FAMILY, org.apache.hadoop.hbase.HConstants::REGIONINFO_QUALIFIER)
       hri_bytes = meta.get(g).value

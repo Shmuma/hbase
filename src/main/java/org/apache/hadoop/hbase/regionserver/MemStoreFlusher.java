@@ -135,11 +135,13 @@ class MemStoreFlusher extends Thread implements FlushRequester {
 
   static long getMemStoreLimit(final long max, final float limit,
       final float defaultLimit) {
+    float effectiveLimit = limit;
     if (limit >= 0.9f || limit < 0.1f) {
       LOG.warn("Setting global memstore limit to default of " + defaultLimit +
         " because supplied value outside allowed range of 0.1 -> 0.9");
+      effectiveLimit = defaultLimit;
     }
-    return (long)(max * limit);
+    return (long)(max * effectiveLimit);
   }
 
   /**
@@ -403,7 +405,7 @@ class MemStoreFlusher extends Thread implements FlushRequester {
       return false;
     } catch (IOException ex) {
       LOG.error("Cache flush failed" +
-        (region != null ? (" for region " + Bytes.toString(region.getRegionName())) : ""),
+        (region != null ? (" for region " + Bytes.toStringBinary(region.getRegionName())) : ""),
         RemoteExceptionHandler.checkIOException(ex));
       if (!server.checkFileSystem()) {
         return false;
@@ -532,7 +534,7 @@ class MemStoreFlusher extends Thread implements FlushRequester {
 
     @Override
     public String toString() {
-      return "[flush region " + Bytes.toString(region.getRegionName()) + "]";
+      return "[flush region " + Bytes.toStringBinary(region.getRegionName()) + "]";
     }
   }
 }

@@ -20,8 +20,11 @@
 package org.apache.hadoop.hbase.client;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.SocketTimeoutException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -44,10 +47,12 @@ import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.catalog.CatalogTracker;
 import org.apache.hadoop.hbase.catalog.MetaReader;
+import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
 import org.apache.hadoop.hbase.ipc.HMasterInterface;
 import org.apache.hadoop.hbase.ipc.HRegionInterface;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.Writables;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.util.StringUtils;
 
@@ -282,39 +287,64 @@ public class HBaseAdmin implements Abortable {
    * and attempt-at-creation).
    * @throws IOException
    */
-  public void createTable(HTableDescriptor desc, byte [][] splitKeys)
+  public void createTable(final HTableDescriptor desc, byte [][] splitKeys)
   throws IOException {
     HTableDescriptor.isLegalTableName(desc.getName());
-    if(splitKeys != null && splitKeys.length > 1) {
-      Arrays.sort(splitKeys, Bytes.BYTES_COMPARATOR);
-      // Verify there are no duplicate split keys
-      byte [] lastKey = null;
-      for(byte [] splitKey : splitKeys) {
-        if(lastKey != null && Bytes.equals(splitKey, lastKey)) {
-          throw new IllegalArgumentException("All split keys must be unique, " +
-            "found duplicate: " + Bytes.toStringBinary(splitKey) +
-            ", " + Bytes.toStringBinary(lastKey));
-        }
-        lastKey = splitKey;
-      }
+    try {
+      createTableAsync(desc, splitKeys);
+    } catch (SocketTimeoutException ste) {
+      LOG.warn("Creating " + desc.getNameAsString() + " took too long", ste);
     }
-    createTableAsync(desc, splitKeys);
-    for (int tries = 0; tries < numRetries; tries++) {
-      try {
-        // Wait for new table to come on-line
-        connection.locateRegion(desc.getName(), HConstants.EMPTY_START_ROW);
-        break;
-
-      } catch (RegionException e) {
-        if (tries == numRetries - 1) {
-          // Ran out of tries
-          throw e;
+    int numRegs = splitKeys == null ? 1 : splitKeys.length + 1;
+    int prevRegCount = 0;
+    for (int tries = 0; tries < numRetries; ++tries) {
+      // Wait for new table to come on-line
+      final AtomicInteger actualRegCount = new AtomicInteger(0);
+      MetaScannerVisitor visitor = new MetaScannerVisitor() {
+        @Override
+        public boolean processRow(Result rowResult) throws IOException {
+          HRegionInfo info = Writables.getHRegionInfoOrNull(rowResult.getValue(
+              HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER));
+          
+          //If regioninfo is null, skip this row
+          if (null == info) {
+            return true;
+          }
+          if (!(Bytes.equals(info.getTableDesc().getName(), desc.getName()))) {
+            return false;
+          }
+          String hostAndPort = null;
+          byte [] value = rowResult.getValue(HConstants.CATALOG_FAMILY,
+              HConstants.SERVER_QUALIFIER);
+          // Make sure that regions are assigned to server
+          if (value != null && value.length > 0) {
+            hostAndPort = Bytes.toString(value);
+          }
+          if (!(info.isOffline() || info.isSplit()) && hostAndPort != null) {
+            actualRegCount.incrementAndGet();
+          }
+          return true;
         }
-      }
-      try {
-        Thread.sleep(getPauseTime(tries));
-      } catch (InterruptedException e) {
-        // Just continue; ignore the interruption.
+      };
+      MetaScanner.metaScan(conf, visitor, desc.getName());
+      if (actualRegCount.get() != numRegs) {
+        if (tries == numRetries - 1) {
+          throw new RegionOfflineException("Only " + actualRegCount.get() + 
+              " of " + numRegs + " regions are online; retries exhausted.");
+        }
+        try { // Sleep
+          Thread.sleep(getPauseTime(tries));
+        } catch (InterruptedException e) {
+          throw new InterruptedIOException("Interrupted when opening" +
+              " regions; " + actualRegCount.get() + " of " + numRegs + 
+              " regions processed so far");
+        }
+        if (actualRegCount.get() > prevRegCount) { // Making progress
+          prevRegCount = actualRegCount.get();
+          tries = -1;
+        }
+      } else {
+        return;
       }
     }
   }
@@ -335,6 +365,19 @@ public class HBaseAdmin implements Abortable {
   public void createTableAsync(HTableDescriptor desc, byte [][] splitKeys)
   throws IOException {
     HTableDescriptor.isLegalTableName(desc.getName());
+    if(splitKeys != null && splitKeys.length > 1) {
+      Arrays.sort(splitKeys, Bytes.BYTES_COMPARATOR);
+      // Verify there are no duplicate split keys
+      byte [] lastKey = null;
+      for(byte [] splitKey : splitKeys) {
+        if(lastKey != null && Bytes.equals(splitKey, lastKey)) {
+          throw new IllegalArgumentException("All split keys must be unique, " +
+            "found duplicate: " + Bytes.toStringBinary(splitKey) +
+            ", " + Bytes.toStringBinary(lastKey));
+        }
+        lastKey = splitKey;
+      }
+    }
     try {
       getMaster().createTable(desc, splitKeys);
     } catch (RemoteException e) {
@@ -774,7 +817,7 @@ public class HBaseAdmin implements Abortable {
           MetaReader.getRegion(ct, regionname);
         if (pair == null || pair.getSecond() == null) {
           LOG.info("No server in .META. for " +
-            Bytes.toString(regionname) + "; pair=" + pair);
+            Bytes.toStringBinary(regionname) + "; pair=" + pair);
         } else {
           closeRegion(pair.getSecond(), pair.getFirst());
         }
@@ -784,7 +827,7 @@ public class HBaseAdmin implements Abortable {
     }
   }
 
-  private void closeRegion(final HServerAddress hsa, final HRegionInfo hri)
+  public void closeRegion(final HServerAddress hsa, final HRegionInfo hri)
   throws IOException {
     HRegionInterface rs = this.connection.getHRegionConnection(hsa);
     // Close the region without updating zk state.
@@ -822,7 +865,7 @@ public class HBaseAdmin implements Abortable {
           MetaReader.getRegion(ct, tableNameOrRegionName);
         if (pair == null || pair.getSecond() == null) {
           LOG.info("No server in .META. for " +
-            Bytes.toString(tableNameOrRegionName) + "; pair=" + pair);
+            Bytes.toStringBinary(tableNameOrRegionName) + "; pair=" + pair);
         } else {
           flush(pair.getSecond(), pair.getFirst());
         }
@@ -924,7 +967,7 @@ public class HBaseAdmin implements Abortable {
           MetaReader.getRegion(ct, tableNameOrRegionName);
         if (pair == null || pair.getSecond() == null) {
           LOG.info("No server in .META. for " +
-            Bytes.toString(tableNameOrRegionName) + "; pair=" + pair);
+            Bytes.toStringBinary(tableNameOrRegionName) + "; pair=" + pair);
         } else {
           compact(pair.getSecond(), pair.getFirst(), major);
         }
@@ -1074,7 +1117,7 @@ public class HBaseAdmin implements Abortable {
           MetaReader.getRegion(ct, tableNameOrRegionName);
         if (pair == null || pair.getSecond() == null) {
           LOG.info("No server in .META. for " +
-            Bytes.toString(tableNameOrRegionName) + "; pair=" + pair);
+            Bytes.toStringBinary(tableNameOrRegionName) + "; pair=" + pair);
         } else {
           split(pair.getSecond(), pair.getFirst(), splitPoint);
         }

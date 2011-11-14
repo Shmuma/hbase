@@ -1,0 +1,31 @@
+From ee50fe0abdd338c76ca678132567fedd85b61dd7 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Mon, 29 Aug 2011 18:15:19 -0700
+Subject: [PATCH 37/50] HBASE-4294. Fix 1-second sleep in HLogSplitter
+
+Reason: slightly improve recovery time during log splitting
+Author: Todd Lipcon
+Ref: CDH-3542
+---
+ .../hbase/regionserver/wal/HLogSplitter.java       |    5 ++++-
+ 1 files changed, 4 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+index 39e8b3c..9d6e716 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+@@ -728,7 +728,10 @@ public class HLogSplitter {
+     }
+     
+     void finish() {
+-      shouldStop = true;
++      synchronized (dataAvailable) {
++        shouldStop = true;
++        dataAvailable.notifyAll();
++      }
+     }
+   }
+ 
+-- 
+1.7.0.4
+

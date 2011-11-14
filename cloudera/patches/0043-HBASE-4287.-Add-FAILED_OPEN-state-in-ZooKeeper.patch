@@ -1,0 +1,295 @@
+From f9f33f74c85ab46b092db270f9888ac0253981de Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Mon, 12 Sep 2011 18:57:50 -0700
+Subject: [PATCH 43/50] HBASE-4287. Add FAILED_OPEN state in ZooKeeper
+
+Reason: prevents stuck regions in transition when region-opening fails on one server
+Author: Todd Lipcon
+Ref: CDH-3541
+---
+ .../apache/hadoop/hbase/executor/EventHandler.java |    2 +
+ .../hadoop/hbase/executor/ExecutorService.java     |    1 +
+ .../hadoop/hbase/master/AssignmentManager.java     |   16 +++++
+ .../regionserver/handler/OpenRegionHandler.java    |   53 +++++++++++++--
+ .../handler/TestOpenRegionHandler.java             |   72 ++++++++++++++++++-
+ 5 files changed, 134 insertions(+), 10 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java b/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java
+index cbe7bca..a8c92a8 100644
+--- a/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java
+@@ -107,6 +107,8 @@ public abstract class EventHandler implements Runnable, Comparable<Runnable> {
+     RS_ZK_REGION_CLOSED       (2),   // RS has finished closing a region
+     RS_ZK_REGION_OPENING      (3),   // RS is in process of opening a region
+     RS_ZK_REGION_OPENED       (4),   // RS has finished opening a region
++    // Skip 5 and 6, for compatibility with trunk
++    RS_ZK_REGION_FAILED_OPEN  (7),   // RS failed to open a region
+ 
+     // Messages originating from Master to RS
+     M_RS_OPEN_REGION          (20),  // Master asking RS to open a region
+diff --git a/src/main/java/org/apache/hadoop/hbase/executor/ExecutorService.java b/src/main/java/org/apache/hadoop/hbase/executor/ExecutorService.java
+index e88e653..617da47 100644
+--- a/src/main/java/org/apache/hadoop/hbase/executor/ExecutorService.java
++++ b/src/main/java/org/apache/hadoop/hbase/executor/ExecutorService.java
+@@ -117,6 +117,7 @@ public class ExecutorService {
+       // Master executor services
+ 
+       case RS_ZK_REGION_CLOSED:
++      case RS_ZK_REGION_FAILED_OPEN:
+         return ExecutorType.MASTER_CLOSE_REGION;
+ 
+       case RS_ZK_REGION_OPENED:
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index 8d36d0d..96278de 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -341,6 +341,7 @@ public class AssignmentManager extends ZooKeeperListener {
+         break;
+ 
+       case RS_ZK_REGION_CLOSED:
++      case RS_ZK_REGION_FAILED_OPEN:
+         // Region is closed, insert into RIT and handle it
+         addToRITandCallClose(regionInfo, RegionState.State.CLOSED, data);
+         break;
+@@ -520,6 +521,21 @@ public class AssignmentManager extends ZooKeeperListener {
+           this.executorService.submit(new ClosedRegionHandler(master,
+             this, regionState.getRegion()));
+           break;
++          
++        case RS_ZK_REGION_FAILED_OPEN:
++          if (regionState == null ||
++              (!regionState.isPendingOpen() && !regionState.isOpening())) {
++            LOG.warn("Received FAILED_OPEN for region " + prettyPrintedRegionName +
++                " from server " + data.getServerName() + " but region was in " +
++                " the state " + regionState + " and not in PENDING_OPEN or OPENING");
++            return;
++          }
++          // Handle this the same as if it were opened and then closed.
++          regionState.update(RegionState.State.CLOSED,
++              data.getStamp(), data.getServerName());
++          this.executorService.submit(new ClosedRegionHandler(master,
++            this, regionState.getRegion()));
++          break;
+ 
+         case RS_ZK_REGION_OPENING:
+           // Should see OPENING after we have asked it to OPEN or additional
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/handler/OpenRegionHandler.java b/src/main/java/org/apache/hadoop/hbase/regionserver/handler/OpenRegionHandler.java
+index e308d50..1671ed2 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/handler/OpenRegionHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/handler/OpenRegionHandler.java
+@@ -97,7 +97,11 @@ public class OpenRegionHandler extends EventHandler {
+       // Open region.  After a successful open, failures in subsequent
+       // processing needs to do a close as part of cleanup.
+       region = openRegion();
+-      if (region == null) return;
++      if (region == null) {
++        tryTransitionToFailedOpen(regionInfo);
++        return;
++      }
++
+       boolean failed = true;
+       if (tickleOpening("post_region_open")) {
+         if (updateMeta(region)) failed = false;
+@@ -106,10 +110,17 @@ public class OpenRegionHandler extends EventHandler {
+       if (failed || this.server.isStopped() ||
+           this.rsServices.isStopping()) {
+         cleanupFailedOpen(region);
++        tryTransitionToFailedOpen(regionInfo);
+         return;
+       }
+ 
+       if (!transitionToOpened(region)) {
++        // If we fail to transition to opened, it's because of one of two cases:
++        //    (a) we lost our ZK lease
++        // OR (b) someone else opened the region before us
++        // In either case, we don't need to transition to FAILED_OPEN state.
++        // In case (a), the Master will process us as a dead server. In case
++        // (b) the region is already being handled elsewhere anyway.
+         cleanupFailedOpen(region);
+         return;
+       }
+@@ -129,7 +140,7 @@ public class OpenRegionHandler extends EventHandler {
+    * state meantime so master doesn't timeout our region-in-transition.
+    * Caller must cleanup region if this fails.
+    */
+-  private boolean updateMeta(final HRegion r) {
++  boolean updateMeta(final HRegion r) {
+     if (this.server.isStopped() || this.rsServices.isStopping()) {
+       return false;
+     }
+@@ -260,6 +271,35 @@ public class OpenRegionHandler extends EventHandler {
+     }
+     return result;
+   }
++  
++  /**
++   * @param  Region we're working on.
++   * This is not guaranteed to succeed, we just do our best.
++   * @return Transition znode to CLOSED state.
++   */
++  private boolean tryTransitionToFailedOpen(final HRegionInfo hri) {
++    boolean result = false;
++    final String name = hri.getRegionNameAsString();
++    try {
++      LOG.info("Opening of region " + hri + " failed, marking as FAILED_OPEN in ZK");
++      if (ZKAssign.transitionNode(
++          this.server.getZooKeeper(), hri,
++          this.server.getServerName(),
++          EventType.RS_ZK_REGION_OPENING,
++          EventType.RS_ZK_REGION_FAILED_OPEN,
++          this.version) == -1) {
++        LOG.warn("Unable to mark region " + hri + " as FAILED_OPEN. " +
++            "It's likely that the master already timed out this open " +
++            "attempt, and thus another RS already has the region.");
++      } else {
++        result = true;
++      }
++    } catch (KeeperException e) {
++      LOG.error("Failed transitioning node " + name +
++        " from OPENING to FAILED_OPEN", e);
++    }
++    return result;
++  }
+ 
+   /**
+    * @return Instance of HRegion if successful open else null.
+@@ -279,11 +319,12 @@ public class OpenRegionHandler extends EventHandler {
+             return tickleOpening("open_region_progress");
+           }
+         });
+-    } catch (IOException e) {
+-      // We failed open.  Let our znode expire in regions-in-transition and
+-      // Master will assign elsewhere.  Presumes nothing to close.
++    } catch (Throwable t) {
++      // We failed open. Our caller will see the 'null' return value
++      // and transition the node back to FAILED_OPEN. If that fails,
++      // we rely on the Timeout Monitor in the master to reassign.
+       LOG.error("Failed open of region=" +
+-        this.regionInfo.getRegionNameAsString(), e);
++        this.regionInfo.getRegionNameAsString(), t);
+     }
+     return region;
+   }
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java b/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
+index c80e71d..e9d839d 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
+@@ -19,6 +19,8 @@
+  */
+ package org.apache.hadoop.hbase.regionserver.handler;
+ 
++import static org.junit.Assert.*;
++
+ import java.io.IOException;
+ import java.util.HashMap;
+ import java.util.HashSet;
+@@ -36,6 +38,8 @@ import org.apache.hadoop.hbase.HTableDescriptor;
+ import org.apache.hadoop.hbase.Server;
+ import org.apache.hadoop.hbase.ZooKeeperConnectionException;
+ import org.apache.hadoop.hbase.catalog.CatalogTracker;
++import org.apache.hadoop.hbase.executor.EventHandler.EventType;
++import org.apache.hadoop.hbase.executor.RegionTransitionData;
+ import org.apache.hadoop.hbase.ipc.HBaseRpcMetrics;
+ import org.apache.hadoop.hbase.regionserver.CompactionRequestor;
+ import org.apache.hadoop.hbase.regionserver.FlushRequester;
+@@ -50,6 +54,7 @@ import org.apache.zookeeper.KeeperException.NodeExistsException;
+ import org.junit.AfterClass;
+ import org.junit.BeforeClass;
+ import org.junit.Test;
++import org.mockito.Mockito;
+ 
+ /**
+  * Test of the {@link OpenRegionHandler}.
+@@ -57,6 +62,11 @@ import org.junit.Test;
+ public class TestOpenRegionHandler {
+   private static final Log LOG = LogFactory.getLog(TestOpenRegionHandler.class);
+   private final static HBaseTestingUtility HTU = new HBaseTestingUtility();
++  private static final HTableDescriptor TEST_HTD =
++    new HTableDescriptor("TestOpenRegionHandler.java");
++  private static final HRegionInfo TEST_HRI = 
++    new HRegionInfo(TEST_HTD, HConstants.EMPTY_END_ROW,
++          HConstants.EMPTY_END_ROW);
+ 
+   @BeforeClass public static void before() throws Exception {
+     HTU.startMiniZKCluster();
+@@ -195,14 +205,16 @@ public class TestOpenRegionHandler {
+     final Server server = new MockServer();
+     final RegionServerServices rss = new MockRegionServerServices();
+ 
+-    HTableDescriptor htd =
+-      new HTableDescriptor("testOpenRegionHandlerYankingRegionFromUnderIt");
+-    final HRegionInfo hri =
+-      new HRegionInfo(htd, HConstants.EMPTY_END_ROW, HConstants.EMPTY_END_ROW);
++    final HRegionInfo hri = TEST_HRI;
++    HRegion region =
++         HRegion.createHRegion(hri, HBaseTestingUtility.getTestDir(), HTU
++            .getConfiguration());
++    assertNotNull(region);
+     OpenRegionHandler handler = new OpenRegionHandler(server, rss, hri) {
+       HRegion openRegion() {
+         // Open region first, then remove znode as though it'd been hijacked.
+         HRegion region = super.openRegion();
++        
+         // Don't actually open region BUT remove the znode as though it'd
+         // been hijacked on us.
+         ZooKeeperWatcher zkw = this.server.getZooKeeper();
+@@ -223,4 +235,56 @@ public class TestOpenRegionHandler {
+     // post OPENING; again will expect it to come back w/o NPE or exception.
+     handler.process();
+   }
++
++  
++  @Test
++  public void testFailedOpenRegion() throws Exception {
++    Server server = new MockServer();
++    RegionServerServices rsServices = Mockito.mock(RegionServerServices.class);
++
++    // Create it OFFLINE, which is what it expects
++    ZKAssign.createNodeOffline(server.getZooKeeper(), TEST_HRI, server.getServerName());
++
++    // Create the handler
++    OpenRegionHandler handler =
++      new OpenRegionHandler(server, rsServices, TEST_HRI) {
++        @Override
++        HRegion openRegion() {
++          // Fake failure of opening a region due to an IOE, which is caught
++          return null;
++        }
++    };
++    handler.process();
++
++    // Handler should have transitioned it to FAILED_OPEN
++    RegionTransitionData data =
++      ZKAssign.getData(server.getZooKeeper(), TEST_HRI.getEncodedName());
++    assertEquals(EventType.RS_ZK_REGION_FAILED_OPEN, data.getEventType());
++  }
++  
++  @Test
++  public void testFailedUpdateMeta() throws Exception {
++    Server server = new MockServer();
++    RegionServerServices rsServices = Mockito.mock(RegionServerServices.class);
++
++    // Create it OFFLINE, which is what it expects
++    ZKAssign.createNodeOffline(server.getZooKeeper(), TEST_HRI, server.getServerName());
++
++    // Create the handler
++    OpenRegionHandler handler =
++      new OpenRegionHandler(server, rsServices, TEST_HRI) {
++        @Override
++        boolean updateMeta(final HRegion r) {
++          // Fake failure of updating META
++          return false;
++        }
++    };
++    handler.process();
++
++    // Handler should have transitioned it to FAILED_OPEN
++    RegionTransitionData data =
++      ZKAssign.getData(server.getZooKeeper(), TEST_HRI.getEncodedName());
++    assertEquals(EventType.RS_ZK_REGION_FAILED_OPEN, data.getEventType());
++  }
++  
+ }
+-- 
+1.7.0.4
+
