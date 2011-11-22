@@ -189,7 +189,7 @@ class CatalogJanitor extends Chore {
       checkDaughterInFs(parent, a_region, HConstants.SPLITA_QUALIFIER);
     Pair<Boolean, Boolean> b =
       checkDaughterInFs(parent, b_region, HConstants.SPLITB_QUALIFIER);
-    if ((a.getFirst() && !a.getSecond()) && (b.getFirst() && !b.getSecond())) {
+    if (hasNoReferences(a) && hasNoReferences(b)) {
       LOG.debug("Deleting region " + parent.getRegionNameAsString() +
         " because daughter splits no longer hold references");
       removeDaughtersFromParent(parent);
@@ -209,7 +209,16 @@ class CatalogJanitor extends Chore {
     return result;
   }
 
-  
+  /**
+   * @param p A pair where the first boolean says whether or not the daughter
+   * region directory exists in the filesystem and then the second boolean says
+   * whether the daughter has references to the parent.
+   * @return True the passed <code>p</code> signifies no references.
+   */
+  private boolean hasNoReferences(final Pair<Boolean, Boolean> p) {
+    return !p.getFirst() || !p.getSecond();
+  }
+
   /**
    * Get daughter HRegionInfo out of parent info:splitA/info:splitB columns.
    * @param result
