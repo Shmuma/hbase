@@ -697,13 +697,16 @@ public class Store implements HeapSize {
          * last file becomes an aggregate of the previous compactions.
          */
         while(countOfFiles - start >= this.compactionThreshold &&
-              fileSizes[start] >
-                Math.max(minCompactSize, (long)(sumSize[start+1] * r))) {
+              fileSizes[start] > minCompactSize)
           ++start;
-        }
         int end = Math.min(countOfFiles, start + this.maxFilesToCompact);
         totalSize = fileSizes[start]
                   + ((start+1 < countOfFiles) ? sumSize[start+1] : 0);
+        while (start < end &&
+               fileSizes[end-1] > minCompactSize) {
+            totalSize -= fileSizes[end-1];
+            --end;
+        }
 
         // if we don't have enough files to compact, just wait
         if (end - start < this.compactionThreshold) {
@@ -718,6 +721,7 @@ public class Store implements HeapSize {
 
         if (0 == start && end == countOfFiles) {
           // we decided all the files were candidates! major compact
+          LOG.info("compact: upgrading to major compaction" + " [cf=" + this.storeNameStr +"], start = " + start + ", end = " + end);
           majorcompaction = true;
         } else {
           filesToCompact = new ArrayList<StoreFile>(filesToCompact.subList(start,
