@@ -670,6 +670,7 @@ public class Store implements HeapSize {
           return null;
         }
         fileSizes[i] = file.getReader().length();
+        LOG.debug("compact: fileSizes[" + i + "] = " + fileSizes[i] + " [cf=" + this.storeNameStr +"]");
         // calculate the sum of fileSizes[i,i+maxFilesToCompact-1) for algo
         int tooFar = i + this.maxFilesToCompact - 1;
         sumSize[i] = fileSizes[i]
@@ -697,13 +698,16 @@ public class Store implements HeapSize {
          * last file becomes an aggregate of the previous compactions.
          */
         while(countOfFiles - start >= this.compactionThreshold &&
-              fileSizes[start] > minCompactSize)
-          ++start;
+              fileSizes[start] > minCompactSize) {
+            LOG.debug("File " + start + " is greater than limit (" + fileSizes[start] + "), skip it from compact list");
+            ++start;
+        }
         int end = Math.min(countOfFiles, start + this.maxFilesToCompact);
         totalSize = fileSizes[start]
                   + ((start+1 < countOfFiles) ? sumSize[start+1] : 0);
         while (start < end &&
                fileSizes[end-1] > minCompactSize) {
+            LOG.debug("File " + (end-1) + " is greater than limit (" + fileSizes[end-1] + "), skip it from compact list");
             totalSize -= fileSizes[end-1];
             --end;
         }
