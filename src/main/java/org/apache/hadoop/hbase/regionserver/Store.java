@@ -701,6 +701,9 @@ public class Store implements HeapSize {
                         best_len = len;
                     }
                 }
+                // start fresh chain
+                start = -1;
+                len = 0;
             }
         }
 
