@@ -656,72 +656,83 @@ public class Store implements HeapSize {
        */
       int countOfFiles = filesToCompact.size();
       long [] fileSizes = new long[countOfFiles];
-      long [] sumSize = new long[countOfFiles];
-      for (int i = countOfFiles-1; i >= 0; --i) {
-        StoreFile file = filesToCompact.get(i);
-        Path path = file.getPath();
-        if (path == null) {
-          LOG.error("Path is null for " + file);
-          return null;
-        }
-        StoreFile.Reader r = file.getReader();
-        if (r == null) {
-          LOG.error("StoreFile " + file + " has a null Reader");
-          return null;
-        }
-        fileSizes[i] = file.getReader().length();
-        LOG.debug("compact: fileSizes[" + i + "] = " + fileSizes[i] + " [cf=" + this.storeNameStr +"]");
-        // calculate the sum of fileSizes[i,i+maxFilesToCompact-1) for algo
-        int tooFar = i + this.maxFilesToCompact - 1;
-        sumSize[i] = fileSizes[i]
-                   + ((i+1    < countOfFiles) ? sumSize[i+1]      : 0)
-                   - ((tooFar < countOfFiles) ? fileSizes[tooFar] : 0);
+
+      for (int i = 0; i < countOfFiles; i++) {
+          StoreFile file = filesToCompact.get(i);
+          StoreFile.Reader r = file.getReader();
+          if (r == null) {
+              LOG.error("StoreFile " + file + " has a null Reader");
+              return null;
+          }
+          fileSizes[i] = r.length ();
+          LOG.debug("compact: fileSizes[" + i + "] = " + fileSizes[i] + " [cf=" + this.storeNameStr +"]");
       }
 
       long totalSize = 0;
       if (!majorcompaction && !references) {
         // we're doing a minor compaction, let's see what files are applicable
-        int start = 0;
         double r = this.compactRatio;
 
-        /* Start at the oldest file and stop when you find the first file that
-         * meets compaction criteria:
-         *   (1) a recently-flushed, small file (i.e. <= minCompactSize)
-         *      OR
-         *   (2) within the compactRatio of sum(newer_files)
-         * Given normal skew, any newer files will also meet this criteria
-         *
-         * Additional Note:
-         * If fileSizes.size() >> maxFilesToCompact, we will recurse on
-         * compact().  Consider the oldest files first to avoid a
-         * situation where we always compact [end-threshold,end).  Then, the
-         * last file becomes an aggregate of the previous compactions.
-         */
-        while(countOfFiles - start >= this.compactionThreshold &&
-              fileSizes[start] > minCompactSize) {
-            LOG.debug("File " + start + " is greater than limit (" + fileSizes[start] + "), skip it from compact list");
-            ++start;
-        }
-        int end = Math.min(countOfFiles, start + this.maxFilesToCompact);
-        totalSize = fileSizes[start]
-                  + ((start+1 < countOfFiles) ? sumSize[start+1] : 0);
-        while (start < end &&
-               fileSizes[end-1] > minCompactSize) {
-            LOG.debug("File " + (end-1) + " is greater than limit (" + fileSizes[end-1] + "), skip it from compact list");
-            totalSize -= fileSizes[end-1];
-            --end;
+        // Search for optimal compact bounds. We look for maximum chain of files
+        // less than minCompactSize (which, in fact stand for maxCompactSize).
+        int start, len, best_start, best_len;
+
+        start = best_start = -1;
+        len = best_len = 0;
+
+        for (int i = 0; i < countOfFiles; i++) {
+            if (fileSizes[i] < minCompactSize) {
+                LOG.debug ("File " + i + " is ok, start = " + start + ", len = " + len);
+                // ok to include in chain
+                if (start == -1) {
+                    // start of new chain
+                    start = i;
+                    len = 1;
+                }
+                else            // chain exists, increase it
+                    len++;
+            }
+            else {
+                LOG.debug ("File " + i + " is too large, start = " + start + ", len = " + len);
+                if (start != -1) {
+                    // Chain finished. Check that it exceeds best found.
+                    if (best_start == -1 || best_len < len) {
+                        best_start = start;
+                        best_len = len;
+                    }
+                }
+            }
         }
 
-        // if we don't have enough files to compact, just wait
-        if (end - start < this.compactionThreshold) {
-          if (LOG.isDebugEnabled()) {
-            LOG.debug("Skipped compaction of " + this.storeNameStr
-              + " because only " + (end - start) + " file(s) of size "
-              + StringUtils.humanReadableInt(totalSize)
-              + " meet compaction criteria.");
-          }
-          return checkSplit(forceSplit);
+        if (best_start == -1 || best_len < len) {
+            best_start = start;
+            best_len = len;
         }
+
+        LOG.debug ("Best compaction chain: start = " + best_start + ", len = " + best_len);
+
+        // check for search result
+        if (best_start == -1 || best_len < this.compactionThreshold) {
+            if (best_start == -1)
+                LOG.debug ("Skipped compaction of " + this.storeNameStr + " because of all files are exceeds limit");
+            else
+                LOG.debug ("Skipped compaction of " + this.storeNameStr + " because of chain is too short (found " +
+                           best_len + ", need " + this.compactionThreshold + "))");
+            return checkSplit (forceSplit);
+        }
+
+        // check for max files to compact
+        if (best_len > this.maxFilesToCompact) {
+            LOG.debug ("Found chain length (" + best_len + ") exceeds maximum (" + this.maxFilesToCompact + "). Crop chain.");
+            best_len = this.maxFilesToCompact;
+        }
+
+        // chain seems ok, calculate it's size
+        start = best_start;
+        int end = start + best_len;
+
+        for (int i = start; i < end; i++)
+            totalSize += fileSizes[i];
 
         if (0 == start && end == countOfFiles) {
           // we decided all the files were candidates! major compact
