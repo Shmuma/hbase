@@ -25,6 +25,9 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.util.Bytes;
 
+import java.util.List;
+import java.util.ArrayList;
+
 /**
  * Tests for {@link SingleColumnValueExcludeFilter}. Because this filter
  * extends {@link SingleColumnValueFilter}, only the added functionality is
@@ -50,17 +53,18 @@ public class TestSingleColumnValueExcludeFilter extends TestCase {
         CompareOp.EQUAL, VAL_1);
 
     // A 'match' situation
-    KeyValue kv;
-    kv = new KeyValue(ROW, COLUMN_FAMILY, COLUMN_QUALIFIER_2, VAL_1);
-    // INCLUDE expected because test column has not yet passed
-    assertTrue("otherColumn", filter.filterKeyValue(kv) == Filter.ReturnCode.INCLUDE);
-    kv = new KeyValue(ROW, COLUMN_FAMILY, COLUMN_QUALIFIER, VAL_1);
-    // Test column will pass (will match), will SKIP because test columns are excluded
-    assertTrue("testedMatch", filter.filterKeyValue(kv) == Filter.ReturnCode.SKIP);
-    // Test column has already passed and matched, all subsequent columns are INCLUDE
-    kv = new KeyValue(ROW, COLUMN_FAMILY, COLUMN_QUALIFIER_2, VAL_1);
-    assertTrue("otherColumn", filter.filterKeyValue(kv) == Filter.ReturnCode.INCLUDE);
-    assertFalse("allRemainingWhenMatch", filter.filterAllRemaining());
+    List<KeyValue> kvs = new ArrayList<KeyValue>();
+    KeyValue kv = new KeyValue(ROW, COLUMN_FAMILY, COLUMN_QUALIFIER_2, VAL_1);
+
+    kvs.add (new KeyValue(ROW, COLUMN_FAMILY, COLUMN_QUALIFIER_2, VAL_1));
+    kvs.add (new KeyValue(ROW, COLUMN_FAMILY, COLUMN_QUALIFIER, VAL_1));
+    kvs.add (new KeyValue(ROW, COLUMN_FAMILY, COLUMN_QUALIFIER_2, VAL_1));
+
+    filter.filterRow(kvs);
+
+    assertEquals("resultSize", kvs.size(), 2);
+    assertTrue("leftKV1", KeyValue.COMPARATOR.compare(kvs.get(0), kv) == 0);
+    assertTrue("leftKV2", KeyValue.COMPARATOR.compare(kvs.get(1), kv) == 0);
 
     // A 'mismatch' situation
     filter.reset();
