@@ -2495,6 +2495,10 @@ public class HRegion implements HeapSize { // , Writable{
                   break;
                 }
               }
+              // As the data obtained from two independed heaps, we need to
+              // ensure that result list is sorted, because Result rely blindly
+              // on that.
+              Collections.sort(results, comparator);
             }
 
             // Double check to prevent empty rows to appear in result. It could be
