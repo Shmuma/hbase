@@ -59,6 +59,7 @@ import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
+import org.apache.hadoop.hbase.filter.SingleColumnValueExcludeFilter;
 import org.apache.hadoop.hbase.regionserver.HRegion.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.wal.HLog;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -2231,6 +2232,64 @@ public class TestHRegion extends HBaseTestCase {
     for(int i=0; i<expected.size(); i++) {
       assertEquals(expected.get(i), actual.get(i));
     }
+  }
+
+  public void testScanner_JoinedScanners() throws IOException {
+    byte [] tableName = Bytes.toBytes("testTable");
+    byte [] cf_essential = Bytes.toBytes("essential");
+    byte [] cf_joined = Bytes.toBytes("joined");
+    byte [] cf_alpha = Bytes.toBytes("alpha");
+    initHRegion(tableName, getName(), cf_essential, cf_joined, cf_alpha);
+
+    byte [] row1 = Bytes.toBytes("row1");
+    byte [] row2 = Bytes.toBytes("row2");
+    byte [] row3 = Bytes.toBytes("row3");
+
+    byte [] col_normal = Bytes.toBytes("d");
+    byte [] col_alpha = Bytes.toBytes("a");
+
+    byte [] filtered_val = Bytes.toBytes(3);
+
+    Put put = new Put(row1);
+    put.add(cf_essential, col_normal, Bytes.toBytes(1));
+    put.add(cf_joined, col_alpha, Bytes.toBytes(1));
+    region.put(put);
+
+    put = new Put(row2);
+    put.add(cf_essential, col_alpha, Bytes.toBytes(2));
+    put.add(cf_joined, col_normal, Bytes.toBytes(2));
+    put.add(cf_alpha, col_alpha, Bytes.toBytes(2));
+    region.put(put);
+
+    put = new Put(row3);
+    put.add(cf_essential, col_normal, filtered_val);
+    put.add(cf_joined, col_normal, filtered_val);
+    region.put(put);
+
+    // Check two things:
+    // 1. result list contains expected values
+    // 2. result list is sorted properly
+
+    Scan scan = new Scan();
+    Filter filter = new SingleColumnValueExcludeFilter(cf_essential, col_normal,
+                                                       CompareOp.NOT_EQUAL, filtered_val);
+    scan.setFilter(filter);
+    InternalScanner s = region.getScanner(scan);
+
+    List<KeyValue> results = new ArrayList<KeyValue>();
+    assertTrue(s.next(results));
+    assertEquals(results.size(), 1);
+    results.clear();
+
+    assertTrue(s.next(results));
+    assertEquals(results.size(), 3);
+    assertTrue("orderCheck", results.get(0).matchingFamily(cf_alpha));
+    assertTrue("orderCheck", results.get(1).matchingFamily(cf_essential));
+    assertTrue("orderCheck", results.get(2).matchingFamily(cf_joined));
+    results.clear();
+
+    assertFalse(s.next(results));
+    assertEquals(results.size(), 0);
   }
 
   //////////////////////////////////////////////////////////////////////////////
