@@ -2432,6 +2432,10 @@ public class HRegion implements HeapSize { // , Writable{
     private boolean nextInternal(int limit) throws IOException {
       while (true) {
         byte [] currentRow = peekRow();
+        boolean masks = false;
+        if (this.joinedHeap != null)
+          masks = Bytes.toString(currentRow).startsWith("jp.masks");
+        //          LOG.info("Scanner row peeked: " + Bytes.toString(currentRow));
         if (isStopRow(currentRow)) {
           if (filter != null && filter.hasFilterRow()) {
             filter.filterRow(results);
@@ -2446,7 +2450,17 @@ public class HRegion implements HeapSize { // , Writable{
         } else {
           byte [] nextRow;
           do {
-            this.storeHeap.next(results, limit - results.size());
+            if (masks) {
+              List<KeyValue> res = new ArrayList<KeyValue>();
+              this.storeHeap.next(res, limit - results.size());
+              LOG.info("Got " + Integer.toString(res.size()) + " records");
+              for (int i = 0; i < res.size(); i++) {
+                LOG.info(res.get(i));
+                results.add(res.get(i));
+              }
+            }
+            else
+              this.storeHeap.next(results, limit - results.size());
             if (limit > 0 && results.size() == limit) {
               if (this.filter != null && filter.hasFilterRow()) throw new IncompatibleFilterException(
                   "Filter with filterRow(List<KeyValue>) incompatible with scan with limit!");
@@ -2486,8 +2500,20 @@ public class HRegion implements HeapSize { // , Writable{
             if (this.joinedHeap != null && this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow))) {
               KeyValue nextKV = this.joinedHeap.peek();
               while (true) {
-                this.joinedHeap.next(results, limit - results.size());
+                if (masks) {
+                  List<KeyValue> res = new ArrayList<KeyValue>();
+                  this.joinedHeap.next(res, limit - results.size());
+                  LOG.info("Joined " + Integer.toString(res.size()) + " records");
+                  for (int i = 0; i < res.size(); i++) {
+                    LOG.info(res.get(i));
+                    results.add(res.get(i));
+                  }
+                }
+                else
+                  this.joinedHeap.next(results, limit - results.size());
                 nextKV = this.joinedHeap.peek();
+                if (masks)
+                  LOG.info("After " + nextKV);
                 if (nextKV == null) {
                   break;
                 }
