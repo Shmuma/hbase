@@ -2450,17 +2450,17 @@ public class HRegion implements HeapSize { // , Writable{
         } else {
           byte [] nextRow;
           do {
-            if (masks) {
-              List<KeyValue> res = new ArrayList<KeyValue>();
-              this.storeHeap.next(res, limit - results.size());
-              LOG.info("Got " + Integer.toString(res.size()) + " records");
-              for (int i = 0; i < res.size(); i++) {
-                LOG.info(res.get(i));
-                results.add(res.get(i));
-              }
-            }
-            else
-              this.storeHeap.next(results, limit - results.size());
+            // if (masks) {
+            //   List<KeyValue> res = new ArrayList<KeyValue>();
+            //   this.storeHeap.next(res, limit - results.size());
+            //   LOG.info("Got " + Integer.toString(res.size()) + " records");
+            //   for (int i = 0; i < res.size(); i++) {
+            //     LOG.info(res.get(i));
+            //     results.add(res.get(i));
+            //   }
+            // }
+            // else
+            this.storeHeap.next(results, limit - results.size());
             if (limit > 0 && results.size() == limit) {
               if (this.filter != null && filter.hasFilterRow()) throw new IncompatibleFilterException(
                   "Filter with filterRow(List<KeyValue>) incompatible with scan with limit!");
@@ -2497,34 +2497,37 @@ public class HRegion implements HeapSize { // , Writable{
             // Here we need to fetch additional, non-essential data into row. This
             // values are not needed for filter to work, so we postpone their
             // fetch to (possible) reduce amount of data loads from disk.
-            if (this.joinedHeap != null && this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow))) {
-              KeyValue nextKV = this.joinedHeap.peek();
-              while (true) {
-                if (masks) {
-                  List<KeyValue> res = new ArrayList<KeyValue>();
-                  this.joinedHeap.next(res, limit - results.size());
-                  LOG.info("Joined " + Integer.toString(res.size()) + " records");
-                  for (int i = 0; i < res.size(); i++) {
-                    LOG.info(res.get(i));
-                    results.add(res.get(i));
+            KeyValue nextKV;
+            if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
+              int cmp = Bytes.compareTo(currentRow, nextKV.getRow());
+              // seek only if joined heap is before needed row
+              if (cmp > 0)
+                this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow));
+              if (cmp >= 0) {
+                while (true) {
+                  // if (masks) {
+                  //   List<KeyValue> res = new ArrayList<KeyValue>();
+                  //   this.joinedHeap.next(res, limit - results.size());
+                  //   LOG.info("Joined " + Integer.toString(res.size()) + " records");
+                  //   for (int i = 0; i < res.size(); i++) {
+                  //     LOG.info(res.get(i));
+                  //     results.add(res.get(i));
+                  //   }
+                  // }
+                  // else
+                  this.joinedHeap.next(results, limit - results.size());
+                  if ((nextKV = this.joinedHeap.peek()) == null) {
+                    break;
+                  }
+                  if (!Bytes.equals(currentRow, nextKV.getRow())) {
+                    break;
                   }
                 }
-                else
-                  this.joinedHeap.next(results, limit - results.size());
-                nextKV = this.joinedHeap.peek();
-                if (masks)
-                  LOG.info("After " + nextKV);
-                if (nextKV == null) {
-                  break;
-                }
-                if (!Bytes.equals(currentRow, nextKV.getRow())) {
-                  break;
-                }
+                // As the data obtained from two independed heaps, we need to
+                // ensure that result list is sorted, because Result rely blindly
+                // on that.
+                Collections.sort(results, comparator);
               }
-              // As the data obtained from two independed heaps, we need to
-              // ensure that result list is sorted, because Result rely blindly
-              // on that.
-              Collections.sort(results, comparator);
             }
 
             // Double check to prevent empty rows to appear in result. It could be
