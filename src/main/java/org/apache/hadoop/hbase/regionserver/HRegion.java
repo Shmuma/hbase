@@ -2432,10 +2432,6 @@ public class HRegion implements HeapSize { // , Writable{
     private boolean nextInternal(int limit) throws IOException {
       while (true) {
         byte [] currentRow = peekRow();
-        boolean masks = false;
-        if (this.joinedHeap != null)
-          masks = Bytes.toString(currentRow).startsWith("jp.masks");
-        //          LOG.info("Scanner row peeked: " + Bytes.toString(currentRow));
         if (isStopRow(currentRow)) {
           if (filter != null && filter.hasFilterRow()) {
             filter.filterRow(results);
@@ -2443,23 +2439,12 @@ public class HRegion implements HeapSize { // , Writable{
           if (filter != null && filter.filterRow()) {
             results.clear();
           }
-
           return false;
         } else if (filterRowKey(currentRow)) {
           nextRow(currentRow);
         } else {
           byte [] nextRow;
           do {
-            // if (masks) {
-            //   List<KeyValue> res = new ArrayList<KeyValue>();
-            //   this.storeHeap.next(res, limit - results.size());
-            //   LOG.info("Got " + Integer.toString(res.size()) + " records");
-            //   for (int i = 0; i < res.size(); i++) {
-            //     LOG.info(res.get(i));
-            //     results.add(res.get(i));
-            //   }
-            // }
-            // else
             this.storeHeap.next(results, limit - results.size());
             if (limit > 0 && results.size() == limit) {
               if (this.filter != null && filter.hasFilterRow()) throw new IncompatibleFilterException(
@@ -2501,20 +2486,14 @@ public class HRegion implements HeapSize { // , Writable{
             if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
               int cmp = Bytes.compareTo(currentRow, nextKV.getRow());
               // seek only if joined heap is before needed row
-              if (cmp > 0)
-                this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow));
-              if (cmp >= 0) {
+              if (cmp > 0) {
+                this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow));
+                nextKV = this.joinedHeap.peek();
+                cmp = Bytes.compareTo(currentRow, nextKV.getRow());
+              }
+              // Grab rows only when we 100% sure that we are at right position
+              if (cmp == 0) {
                 while (true) {
-                  // if (masks) {
-                  //   List<KeyValue> res = new ArrayList<KeyValue>();
-                  //   this.joinedHeap.next(res, limit - results.size());
-                  //   LOG.info("Joined " + Integer.toString(res.size()) + " records");
-                  //   for (int i = 0; i < res.size(); i++) {
-                  //     LOG.info(res.get(i));
-                  //     results.add(res.get(i));
-                  //   }
-                  // }
-                  // else
                   this.joinedHeap.next(results, limit - results.size());
                   if ((nextKV = this.joinedHeap.peek()) == null) {
                     break;
