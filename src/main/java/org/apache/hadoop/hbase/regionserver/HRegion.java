@@ -2487,9 +2487,8 @@ public class HRegion implements HeapSize { // , Writable{
               int cmp = Bytes.compareTo(currentRow, nextKV.getRow());
               // seek only if joined heap is before needed row
               if (cmp > 0) {
-                this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow));
-                nextKV = this.joinedHeap.peek();
-                cmp = Bytes.compareTo(currentRow, nextKV.getRow());
+                if (this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow)) && (nextKV = this.joinedHeap.peek()) != null)
+                  cmp = Bytes.compareTo(currentRow, nextKV.getRow());
               }
               // Grab rows only when we 100% sure that we are at right position
               if (cmp == 0) {
