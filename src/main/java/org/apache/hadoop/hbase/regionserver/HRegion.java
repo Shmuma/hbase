@@ -2473,6 +2473,9 @@ public class HRegion implements HeapSize { // , Writable{
             // 2. provide a hook to fast forward the row (used by subclasses)
             nextRow(currentRow);
 
+            // Clear result, just in case.
+            results.clear ();
+
             // This row was totally filtered out, if this is NOT the last row,
             // we should continue on.
 
