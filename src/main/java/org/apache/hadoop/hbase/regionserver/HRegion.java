@@ -2330,6 +2330,9 @@ public class HRegion implements HeapSize { // , Writable{
     private boolean filterClosed = false;
     private long readPt;
 
+    private boolean debug_mode = false;
+    private List<String> debug_messages = new ArrayList<String>();
+
     public HRegionInfo getRegionName() {
       return regionInfo;
     }
@@ -2372,6 +2375,10 @@ public class HRegion implements HeapSize { // , Writable{
       if (!joinedScanners.isEmpty()) {
         this.joinedHeap = new KeyValueHeap(joinedScanners, comparator);
       }
+      if (scan.getCaching () == 166) { // magic number to turn debugging on
+        this.debug_mode = true;
+        this.debug_messages.add ("Debug mode turned on");
+      }
     }
 
     RegionScanner(Scan scan) throws IOException {
@@ -2385,6 +2392,23 @@ public class HRegion implements HeapSize { // , Writable{
       if (filter != null) {
         filter.reset();
       }
+    }
+
+
+    private boolean resultIsInvalid (List<KeyValue> outResult) {
+      boolean res = true;
+      for (KeyValue kv : outResult) {
+        if (kv.matchingColumn (Bytes.toBytes ("crawl"), Bytes.toBytes ("bf")) && !kv.isDelete ()) {
+          int val = Bytes.toInt (kv.getValue ());
+          if (val != 0) {
+            this.debug_messages.add ("crawl:bf has invalid value = " + Integer.toString (val));
+            return true;
+          }
+          else
+            res = false;
+        }
+      }
+      return res;
     }
 
     @Override
@@ -2412,6 +2436,12 @@ public class HRegion implements HeapSize { // , Writable{
         return returnResult;
       } finally {
         closeRegionOperation();
+        if (this.debug_mode && resultIsInvalid (outResults)) {
+          for (String s : this.debug_messages) {
+            LOG.info ("RegionScanner: " + s);
+          }
+        }
+        this.debug_messages.clear ();
       }
     }
 
@@ -2430,9 +2460,15 @@ public class HRegion implements HeapSize { // , Writable{
     }
 
     private boolean nextInternal(int limit) throws IOException {
+      if (this.debug_mode)
+        this.debug_messages.add ("nextInternal, limit = " + Integer.toString (limit));
       while (true) {
         byte [] currentRow = peekRow();
+        if (this.debug_mode)
+          this.debug_messages.add ("currentRow = " + Bytes.toString (currentRow));
         if (isStopRow(currentRow)) {
+          if (this.debug_mode)
+            this.debug_messages.add ("isStopRow triggered");
           if (filter != null && filter.hasFilterRow()) {
             filter.filterRow(results);
           }
@@ -2441,6 +2477,8 @@ public class HRegion implements HeapSize { // , Writable{
           }
           return false;
         } else if (filterRowKey(currentRow)) {
+          if (this.debug_mode)
+            this.debug_messages.add ("filterRowKey triggered");
           nextRow(currentRow);
         } else {
           byte [] nextRow;
@@ -2453,10 +2491,19 @@ public class HRegion implements HeapSize { // , Writable{
             }
           } while (Bytes.equals(currentRow, nextRow = peekRow()));
 
+          if (this.debug_mode) {
+            this.debug_messages.add ("after first loop, results.len = " + Integer.toString (results.size ()));
+            for (KeyValue kv : results)
+              this.debug_messages.add (kv.toString ());
+          }
+
           final boolean stopRow = isStopRow(nextRow);
 
           // save that the row was empty before filters applied to it.
           final boolean isEmptyRow = results.isEmpty();
+
+          if (this.debug_mode)
+            this.debug_messages.add ("stopRow = " + (stopRow ? "true" : "false") + ", isEmptyRow = " + (isEmptyRow ? "true" : "false"));
 
           // now that we have an entire row, lets process with a filters:
 
@@ -2466,6 +2513,8 @@ public class HRegion implements HeapSize { // , Writable{
           }
 
           if (isEmptyRow || filterRow()) {
+            if (this.debug_mode)
+              this.debug_messages.add ("isEmptyRow || filterRow() triggered");
             // this seems like a redundant step - we already consumed the row
             // there're no left overs.
             // the reasons for calling this method are:
@@ -2480,6 +2529,8 @@ public class HRegion implements HeapSize { // , Writable{
             // we should continue on.
 
             if (!stopRow) continue;
+            if (this.debug_mode)
+              this.debug_messages.add ("after stopRow check");
           }
           else {
             // Here we need to fetch additional, non-essential data into row. This
@@ -2488,10 +2539,19 @@ public class HRegion implements HeapSize { // , Writable{
             KeyValue nextKV;
             if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
               int cmp = Bytes.compareTo(currentRow, nextKV.getRow());
+              if (this.debug_mode) {
+                this.debug_messages.add ("joinedHeap peeked row = " + nextKV.toString ());
+                this.debug_messages.add ("cmp (currentRow, nextKV) = " + Integer.toString (cmp));
+              }
               // seek only if joined heap is before needed row
               if (cmp > 0) {
-                if (this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow)) && (nextKV = this.joinedHeap.peek()) != null)
+                if (this.debug_mode)
+                  this.debug_messages.add ("before seek");
+                if (this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow)) && (nextKV = this.joinedHeap.peek()) != null) {
                   cmp = Bytes.compareTo(currentRow, nextKV.getRow());
+                  if (this.debug_mode)
+                    this.debug_messages.add ("seek ok, cmp = " + Integer.toString (cmp) + ", nextKV = " + nextKV.toString ());
+                }
               }
               // Grab rows only when we 100% sure that we are at right position
               if (cmp == 0) {
@@ -2514,6 +2574,8 @@ public class HRegion implements HeapSize { // , Writable{
             // Double check to prevent empty rows to appear in result. It could be
             // the case when SingleValueExcludeFilter used.
             if (results.isEmpty()) {
+              if (this.debug_mode)
+                this.debug_messages.add ("results is empty");
               nextRow(currentRow);
               if (!stopRow) continue;
             }
