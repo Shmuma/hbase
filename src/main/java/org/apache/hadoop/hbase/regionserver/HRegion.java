@@ -2331,7 +2331,7 @@ public class HRegion implements HeapSize { // , Writable{
     private long readPt;
 
     private boolean debug_mode = false;
-    private List<String> debug_messages = new ArrayList<String>();
+    private StringBuffer debug_message = new StringBuffer ();
 
     public HRegionInfo getRegionName() {
       return regionInfo;
@@ -2377,7 +2377,6 @@ public class HRegion implements HeapSize { // , Writable{
       }
       if (scan.getCaching () == 166) { // magic number to turn debugging on
         this.debug_mode = true;
-        this.debug_messages.add ("Debug mode turned on");
       }
     }
 
@@ -2394,22 +2393,6 @@ public class HRegion implements HeapSize { // , Writable{
       }
     }
 
-
-    private boolean resultIsInvalid (List<KeyValue> outResult) {
-      boolean res = true;
-      for (KeyValue kv : outResult) {
-        if (kv.matchingColumn (Bytes.toBytes ("crawl"), Bytes.toBytes ("bf")) && !kv.isDelete ()) {
-          int val = Bytes.toInt (kv.getValue ());
-          if (val != 0) {
-            this.debug_messages.add ("crawl:bf has invalid value = " + Integer.toString (val));
-            return true;
-          }
-          else
-            res = false;
-        }
-      }
-      return res;
-    }
 
     @Override
     public synchronized boolean next(List<KeyValue> outResults, int limit)
@@ -2436,12 +2419,13 @@ public class HRegion implements HeapSize { // , Writable{
         return returnResult;
       } finally {
         closeRegionOperation();
-        if (this.debug_mode && resultIsInvalid (outResults)) {
-          for (String s : this.debug_messages) {
-            LOG.info ("RegionScanner: " + s);
-          }
+        if (this.debug_mode && outResults.size () > 0) {
+          KeyValue log_kv = new KeyValue (outResults.get (0).getRow (), Bytes.toBytes ("debug"),
+                                          Bytes.toBytes ("scan_log"), Bytes.toBytes (new String (this.debug_message)));
+          outResults.add (log_kv);
+          Collections.sort(outResults, comparator);
         }
-        this.debug_messages.clear ();
+        this.debug_message = new StringBuffer ();
       }
     }
 
@@ -2460,15 +2444,13 @@ public class HRegion implements HeapSize { // , Writable{
     }
 
     private boolean nextInternal(int limit) throws IOException {
-      if (this.debug_mode)
-        this.debug_messages.add ("nextInternal, limit = " + Integer.toString (limit));
       while (true) {
         byte [] currentRow = peekRow();
-        if (this.debug_mode)
-          this.debug_messages.add ("currentRow = " + Bytes.toString (currentRow));
+        if (this.debug_mode && results.size () > 0)
+          this.debug_message.append ("currentRow = " + Bytes.toString (currentRow) + "\n");
         if (isStopRow(currentRow)) {
-          if (this.debug_mode)
-            this.debug_messages.add ("isStopRow triggered");
+          if (this.debug_mode && results.size () > 0)
+            this.debug_message.append ("isStopRow triggered" + "\n");
           if (filter != null && filter.hasFilterRow()) {
             filter.filterRow(results);
           }
@@ -2477,8 +2459,8 @@ public class HRegion implements HeapSize { // , Writable{
           }
           return false;
         } else if (filterRowKey(currentRow)) {
-          if (this.debug_mode)
-            this.debug_messages.add ("filterRowKey triggered");
+          if (this.debug_mode && results.size () > 0)
+            this.debug_message.append ("filterRowKey triggered" + "\n");
           nextRow(currentRow);
         } else {
           byte [] nextRow;
@@ -2491,10 +2473,10 @@ public class HRegion implements HeapSize { // , Writable{
             }
           } while (Bytes.equals(currentRow, nextRow = peekRow()));
 
-          if (this.debug_mode) {
-            this.debug_messages.add ("after first loop, results.len = " + Integer.toString (results.size ()));
+          if (this.debug_mode && results.size () > 0) {
+            this.debug_message.append ("after first loop, results.len = " + Integer.toString (results.size ()) + "\n");
             for (KeyValue kv : results)
-              this.debug_messages.add (kv.toString ());
+              this.debug_message.append (kv.toString () + "\n");
           }
 
           final boolean stopRow = isStopRow(nextRow);
@@ -2502,8 +2484,8 @@ public class HRegion implements HeapSize { // , Writable{
           // save that the row was empty before filters applied to it.
           final boolean isEmptyRow = results.isEmpty();
 
-          if (this.debug_mode)
-            this.debug_messages.add ("stopRow = " + (stopRow ? "true" : "false") + ", isEmptyRow = " + (isEmptyRow ? "true" : "false"));
+          if (this.debug_mode && results.size () > 0)
+            this.debug_message.append ("stopRow = " + (stopRow ? "true" : "false") + ", isEmptyRow = " + (isEmptyRow ? "true" : "false") + "\n");
 
           // now that we have an entire row, lets process with a filters:
 
@@ -2513,8 +2495,8 @@ public class HRegion implements HeapSize { // , Writable{
           }
 
           if (isEmptyRow || filterRow()) {
-            if (this.debug_mode)
-              this.debug_messages.add ("isEmptyRow || filterRow() triggered");
+            if (this.debug_mode && results.size () > 0)
+              this.debug_message.append ("isEmptyRow || filterRow() triggered" + "\n");
             // this seems like a redundant step - we already consumed the row
             // there're no left overs.
             // the reasons for calling this method are:
@@ -2527,10 +2509,9 @@ public class HRegion implements HeapSize { // , Writable{
 
             // This row was totally filtered out, if this is NOT the last row,
             // we should continue on.
-
             if (!stopRow) continue;
-            if (this.debug_mode)
-              this.debug_messages.add ("after stopRow check");
+            if (this.debug_mode && results.size () > 0)
+              this.debug_message.append ("after stopRow check" + "\n");
           }
           else {
             // Here we need to fetch additional, non-essential data into row. This
@@ -2539,18 +2520,18 @@ public class HRegion implements HeapSize { // , Writable{
             KeyValue nextKV;
             if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
               int cmp = Bytes.compareTo(currentRow, nextKV.getRow());
-              if (this.debug_mode) {
-                this.debug_messages.add ("joinedHeap peeked row = " + nextKV.toString ());
-                this.debug_messages.add ("cmp (currentRow, nextKV) = " + Integer.toString (cmp));
+              if (this.debug_mode && results.size () > 0) {
+                this.debug_message.append ("joinedHeap peeked row = " + nextKV.toString () + "\n");
+                this.debug_message.append ("cmp (currentRow, nextKV) = " + Integer.toString (cmp) + "\n");
               }
               // seek only if joined heap is before needed row
               if (cmp > 0) {
-                if (this.debug_mode)
-                  this.debug_messages.add ("before seek");
+                if (this.debug_mode && results.size () > 0)
+                  this.debug_message.append ("before seek" + "\n");
                 if (this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow)) && (nextKV = this.joinedHeap.peek()) != null) {
                   cmp = Bytes.compareTo(currentRow, nextKV.getRow());
-                  if (this.debug_mode)
-                    this.debug_messages.add ("seek ok, cmp = " + Integer.toString (cmp) + ", nextKV = " + nextKV.toString ());
+                  if (this.debug_mode && results.size () > 0)
+                    this.debug_message.append ("seek ok, cmp = " + Integer.toString (cmp) + ", nextKV = " + nextKV.toString () + "\n");
                 }
               }
               // Grab rows only when we 100% sure that we are at right position
@@ -2574,8 +2555,8 @@ public class HRegion implements HeapSize { // , Writable{
             // Double check to prevent empty rows to appear in result. It could be
             // the case when SingleValueExcludeFilter used.
             if (results.isEmpty()) {
-              if (this.debug_mode)
-                this.debug_messages.add ("results is empty");
+              if (this.debug_mode && results.size () > 0)
+                this.debug_message.append ("results is empty" + "\n");
               nextRow(currentRow);
               if (!stopRow) continue;
             }
