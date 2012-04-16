@@ -73,6 +73,7 @@ import org.apache.hadoop.hbase.client.Row;
 import org.apache.hadoop.hbase.client.RowLock;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.Filter;
+import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
 import org.apache.hadoop.hbase.filter.IncompatibleFilterException;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.TimeRange;
@@ -2494,7 +2495,15 @@ public class HRegion implements HeapSize { // , Writable{
             filter.filterRow(results);
           }
 
-          if (isEmptyRow || filterRow()) {
+          boolean filter_row_res = filterRow();
+
+          if (this.debug_mode && results.size () > 0 && this.filter != null) {
+            SingleColumnValueFilter scvf = (SingleColumnValueFilter)this.filter;
+            this.debug_message.append ("comparator value size = " + Integer.toString (scvf.getComparator ().getValue ().length) + "\n");
+            this.debug_message.append ("filter_row_res = " + (filter_row_res ? "true" : "false") + "\n");
+          }
+
+          if (isEmptyRow || filter_row_res) {
             if (this.debug_mode && results.size () > 0)
               this.debug_message.append ("isEmptyRow || filterRow() triggered" + "\n");
             // this seems like a redundant step - we already consumed the row
@@ -2517,7 +2526,7 @@ public class HRegion implements HeapSize { // , Writable{
             // Here we need to fetch additional, non-essential data into row. This
             // values are not needed for filter to work, so we postpone their
             // fetch to (possible) reduce amount of data loads from disk.
-            KeyValue nextKV;
+            KeyValue nextKV = null;
             if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
               int cmp = Bytes.compareTo(currentRow, nextKV.getRow());
               if (this.debug_mode && results.size () > 0) {
@@ -2550,6 +2559,13 @@ public class HRegion implements HeapSize { // , Writable{
                 // on that.
                 Collections.sort(results, comparator);
               }
+            }
+            else {
+              if (this.debug_mode && results.size () > 0)
+                if (nextKV == null)
+                  this.debug_message.append ("nextKV == null");
+                else
+                  this.debug_message.append ("nextKV = " + nextKV.toString ());
             }
 
             // Double check to prevent empty rows to appear in result. It could be
