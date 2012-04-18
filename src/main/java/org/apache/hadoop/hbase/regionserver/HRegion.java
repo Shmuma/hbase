@@ -2492,15 +2492,11 @@ public class HRegion implements HeapSize { // , Writable{
               }
               // Grab rows only when we 100% sure that we are at right position
               if (cmp == 0) {
-                while (true) {
+                do {
                   this.joinedHeap.next(results, limit - results.size());
-                  if ((nextKV = this.joinedHeap.peek()) == null) {
-                    break;
-                  }
-                  if (!Bytes.equals(currentRow, nextKV.getRow())) {
-                    break;
-                  }
-                }
+                  nextKV = this.joinedHeap.peek();
+                } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()))
+
                 // As the data obtained from two independed heaps, we need to
                 // ensure that result list is sorted, because Result rely blindly
                 // on that.
