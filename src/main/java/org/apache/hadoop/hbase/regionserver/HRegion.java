@@ -2484,18 +2484,17 @@ public class HRegion implements HeapSize { // , Writable{
             // fetch to (possible) reduce amount of data loads from disk.
             KeyValue nextKV;
             if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
-              int cmp = Bytes.compareTo(currentRow, nextKV.getRow());
-              // seek only if joined heap is before needed row
-              if (cmp > 0) {
-                if (this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow)) && (nextKV = this.joinedHeap.peek()) != null)
-                  cmp = Bytes.compareTo(currentRow, nextKV.getRow());
+              boolean correct_row = true;
+              // do seek only when it's needed
+              if (!Bytes.equals(currentRow, nextKV.getRow())) {
+                correct_row = this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow)) &&
+                  Bytes.equals(currentRow, this.joinedHeap.peek().getRow());
               }
-              // Grab rows only when we 100% sure that we are at right position
-              if (cmp == 0) {
+              if (correct_row) {
                 do {
                   this.joinedHeap.next(results, limit - results.size());
                   nextKV = this.joinedHeap.peek();
-                } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()))
+                } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
 
                 // As the data obtained from two independed heaps, we need to
                 // ensure that result list is sorted, because Result rely blindly
