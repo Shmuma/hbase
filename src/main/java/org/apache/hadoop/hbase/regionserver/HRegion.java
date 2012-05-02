@@ -2439,6 +2439,7 @@ public class HRegion implements HeapSize { // , Writable{
           if (filter != null && filter.filterRow()) {
             results.clear();
           }
+
           return false;
         } else if (filterRowKey(currentRow)) {
           nextRow(currentRow);
