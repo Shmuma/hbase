@@ -2292,6 +2292,44 @@ public class TestHRegion extends HBaseTestCase {
     assertEquals(results.size(), 0);
   }
 
+
+  public void testScanner_JoinedScannersAndLimits() throws IOException {
+    LOG.info("Started joinedScannerWithLimit");
+    byte [] tableName = Bytes.toBytes("testTable");
+    byte [] cf_first = Bytes.toBytes("first");
+    byte [] cf_second = Bytes.toBytes("second");
+
+    initHRegion(tableName, getName(), cf_first, cf_second);
+
+    byte [] col_a = Bytes.toBytes("a");
+    byte [] col_b = Bytes.toBytes("b");
+
+    Put put;
+
+    for (int i = 0; i < 10; i++) {
+      put = new Put(Bytes.toBytes("r" + Integer.toString(i)));
+      put.add(cf_first, col_a, Bytes.toBytes(i));
+      if (i < 5) {
+        put.add(cf_first, col_b, Bytes.toBytes(i));
+        put.add(cf_second, col_a, Bytes.toBytes(i));
+        put.add(cf_second, col_b, Bytes.toBytes(i));
+      }
+      region.put(put);
+    }
+
+    Scan scan = new Scan();
+    Filter filter = new SingleColumnValueFilter(cf_first, col_a, CompareOp.NOT_EQUAL, Bytes.toBytes("bogus"));
+    scan.setFilter(filter);
+    InternalScanner s = region.getScanner(scan);
+
+    List<KeyValue> results = new ArrayList<KeyValue>();
+    while (s.next(results, 3)) {
+      LOG.info(results.toString());
+      results.clear();
+    }
+  }
+
+
   //////////////////////////////////////////////////////////////////////////////
   // Split test
   //////////////////////////////////////////////////////////////////////////////

@@ -2494,6 +2494,10 @@ public class HRegion implements HeapSize { // , Writable{
               if (correct_row) {
                 do {
                   this.joinedHeap.next(results, limit - results.size());
+                  if (limit > 0 && results.size() == limit) {
+                    Collections.sort(results, comparator);
+                    return true;
+                  }
                   nextKV = this.joinedHeap.peek();
                 } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
 
