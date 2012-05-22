@@ -2322,6 +2322,8 @@ public class HRegion implements HeapSize { // , Writable{
     // Package local for testability
     KeyValueHeap storeHeap = null;
     KeyValueHeap joinedHeap = null;
+    // state flag which used when joined heap data gather interrupted due scan limits
+    private boolean joinedHeapHasData = false;
     private final byte [] stopRow;
     private Filter filter;
     private List<KeyValue> results = new ArrayList<KeyValue>();
@@ -2443,6 +2445,19 @@ public class HRegion implements HeapSize { // , Writable{
           return false;
         } else if (filterRowKey(currentRow)) {
           nextRow(currentRow);
+        } else if (joinedHeapHasData) {
+          KeyValue nextKV;
+          do {
+            this.joinedHeap.next(results, limit - results.size());
+            if (limit > 0 && results.size() == limit) {
+              this.joinedHeapHasData = true;
+              return true;
+            }
+            nextKV = this.joinedHeap.peek();
+          } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
+
+          this.joinedHeapHasData = false;
+          return true;
         } else {
           byte [] nextRow;
           do {
@@ -2495,6 +2510,7 @@ public class HRegion implements HeapSize { // , Writable{
                 do {
                   this.joinedHeap.next(results, limit - results.size());
                   if (limit > 0 && results.size() == limit) {
+                    this.joinedHeapHasData = true;
                     Collections.sort(results, comparator);
                     return true;
                   }
@@ -2538,7 +2554,13 @@ public class HRegion implements HeapSize { // , Writable{
     }
 
     private byte[] peekRow() {
-      KeyValue kv = this.storeHeap.peek();
+      KeyValue kv;
+      if (joinedHeapHasData) {
+        kv = this.joinedHeap.peek();
+      }
+      else {
+        kv = this.storeHeap.peek();
+      }
       return kv == null ? null : kv.getRow();
     }
 

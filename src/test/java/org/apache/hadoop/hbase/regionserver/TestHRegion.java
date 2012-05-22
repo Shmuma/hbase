@@ -2294,7 +2294,6 @@ public class TestHRegion extends HBaseTestCase {
 
 
   public void testScanner_JoinedScannersAndLimits() throws IOException {
-    LOG.info("Started joinedScannerWithLimit");
     byte [] tableName = Bytes.toBytes("testTable");
     byte [] cf_first = Bytes.toBytes("first");
     byte [] cf_second = Bytes.toBytes("second");
@@ -2322,10 +2321,50 @@ public class TestHRegion extends HBaseTestCase {
     scan.setFilter(filter);
     InternalScanner s = region.getScanner(scan);
 
+    // Our data looks like this:
+    // r0: first:a, first:b, second:a, second:b
+    // r1: first:a, first:b, second:a, second:b
+    // r2: first:a, first:b, second:a, second:b
+    // r3: first:a, first:b, second:a, second:b
+    // r4: first:a, first:b, second:a, second:b
+    // r5: first:a
+    // r6: first:a
+    // r7: first:a
+    // r8: first:a
+    // r9: first:a
+
+    // But due to next's limit set to 3, we should get this:
+    // r0: first:a, first:b, second:a
+    // r0: second:b
+    // r1: first:a, first:b, second:a
+    // r1: second:b
+    // r2: first:a, first:b, second:a
+    // r2: second:b
+    // r3: first:a, first:b, second:a
+    // r3: second:b
+    // r4: first:a, first:b, second:a
+    // r4: second:b
+    // r5: first:a
+    // r6: first:a
+    // r7: first:a
+    // r8: first:a
+    // r9: first:a
+
     List<KeyValue> results = new ArrayList<KeyValue>();
-    while (s.next(results, 3)) {
-      LOG.info(results.toString());
+    int index = 0;
+    while (true) {
+      boolean more = s.next(results, 3);
+      if ((index >> 1) < 5) {
+        if (index % 2 == 0)
+          assertEquals(results.size(), 3);
+        else
+          assertEquals(results.size(), 1);
+      }
+      else
+        assertEquals(results.size(), 1);
       results.clear();
+      index++;
+      if (!more) break;
     }
   }
 
