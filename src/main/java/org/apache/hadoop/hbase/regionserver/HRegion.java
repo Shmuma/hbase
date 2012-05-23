@@ -2431,6 +2431,28 @@ public class HRegion implements HeapSize { // , Writable{
       return this.filter != null && this.filter.filterAllRemaining();
     }
 
+    /*
+     * Fetches records with this row into result list, until next row or limit (if not -1).
+     * Returns true if limit reached, false ovewise.
+     */
+    private boolean populateResult(KeyValueHeap heap, int limit, byte[] currentRow) throws IOException {
+      KeyValue nextKV = heap.peek();
+
+      if (!Bytes.equals(currentRow, nextKV.getRow())) {
+        return false;
+      }
+
+      do {
+        heap.next(results, limit - results.size());
+        if (limit > 0 && results.size() == limit) {
+          return true;
+        }
+        nextKV = heap.peek();
+      } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
+
+      return false;
+    }
+
     private boolean nextInternal(int limit) throws IOException {
       while (true) {
         byte [] currentRow = peekRow();
@@ -2446,28 +2468,16 @@ public class HRegion implements HeapSize { // , Writable{
         } else if (filterRowKey(currentRow)) {
           nextRow(currentRow);
         } else if (joinedHeapHasData) {
-          KeyValue nextKV;
-          do {
-            this.joinedHeap.next(results, limit - results.size());
-            if (limit > 0 && results.size() == limit) {
-              this.joinedHeapHasData = true;
-              return true;
-            }
-            nextKV = this.joinedHeap.peek();
-          } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
-
-          this.joinedHeapHasData = false;
+          joinedHeapHasData = populateResult(this.joinedHeap, limit, currentRow);
           return true;
         } else {
-          byte [] nextRow;
-          do {
-            this.storeHeap.next(results, limit - results.size());
-            if (limit > 0 && results.size() == limit) {
-              if (this.filter != null && filter.hasFilterRow()) throw new IncompatibleFilterException(
-                  "Filter with filterRow(List<KeyValue>) incompatible with scan with limit!");
-              return true; // we are expecting more yes, but also limited to how many we can return.
-            }
-          } while (Bytes.equals(currentRow, nextRow = peekRow()));
+          if (populateResult(this.storeHeap, limit, currentRow)) {
+            if (this.filter != null && filter.hasFilterRow()) throw new IncompatibleFilterException(
+                "Filter with filterRow(List<KeyValue>) incompatible with scan with limit!");
+            return true; // we are expecting more yes, but also limited to how many we can return.
+          }
+
+          byte [] nextRow = peekRow();
 
           final boolean stopRow = isStopRow(nextRow);
 
@@ -2507,20 +2517,16 @@ public class HRegion implements HeapSize { // , Writable{
                   Bytes.equals(currentRow, this.joinedHeap.peek().getRow());
               }
               if (correct_row) {
-                do {
-                  this.joinedHeap.next(results, limit - results.size());
-                  if (limit > 0 && results.size() == limit) {
-                    this.joinedHeapHasData = true;
-                    Collections.sort(results, comparator);
-                    return true;
-                  }
-                  nextKV = this.joinedHeap.peek();
-                } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
-
+                this.joinedHeapHasData = populateResult(this.joinedHeap, limit, currentRow);
                 // As the data obtained from two independed heaps, we need to
                 // ensure that result list is sorted, because Result rely blindly
                 // on that.
                 Collections.sort(results, comparator);
+
+                // Result list population was interrupted by limits, we need to restart it on next() invocation.
+                if (this.joinedHeapHasData) {
+                  return true;
+                }
               }
             }
 
@@ -2547,20 +2553,19 @@ public class HRegion implements HeapSize { // , Writable{
 
     protected void nextRow(byte [] currentRow) throws IOException {
       while (Bytes.equals(currentRow, peekRow())) {
-        this.storeHeap.next(MOCKED_LIST);
+        if (this.joinedHeapHasData) {
+          this.joinedHeap.next(MOCKED_LIST);
+        }
+        else {
+          this.storeHeap.next(MOCKED_LIST);
+        }
       }
       results.clear();
       resetFilters();
     }
 
     private byte[] peekRow() {
-      KeyValue kv;
-      if (joinedHeapHasData) {
-        kv = this.joinedHeap.peek();
-      }
-      else {
-        kv = this.storeHeap.peek();
-      }
+      KeyValue kv = this.joinedHeapHasData ? this.joinedHeap.peek() : this.storeHeap.peek();
       return kv == null ? null : kv.getRow();
     }
 
