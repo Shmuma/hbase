@@ -1,0 +1,29 @@
+From 081fa49514f0c24bff295cdb97e4156312315d7e Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 10 Nov 2011 01:42:42 -0800
+Subject: [PATCH 039/101] Fix broken jenkins test, broke since submission of distributed split issue
+
+Reason: Bug
+Author: Michael Stack
+Ref: CDH-3791
+---
+ .../hadoop/hbase/master/TestCatalogJanitor.java    |    3 +--
+ 1 files changed, 1 insertions(+), 2 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestCatalogJanitor.java b/src/test/java/org/apache/hadoop/hbase/master/TestCatalogJanitor.java
+index 028425a..fff9652 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestCatalogJanitor.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestCatalogJanitor.java
+@@ -85,8 +85,7 @@ public class TestCatalogJanitor {
+ 
+     @Override
+     public String getServerName() {
+-      // TODO Auto-generated method stub
+-      return null;
++      return "mockserver.example.org,1234,-1L";
+     }
+ 
+     @Override
+-- 
+1.7.0.4
+

@@ -1,0 +1,39 @@
+From cb0163f58eb686a3db417a7896e597670d83727f Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 21 Mar 2012 13:51:03 -0700
+Subject: [PATCH 032/101] HBASE-4406. TestOpenRegionHandler failing after HBASE-4287
+
+Author: Todd Lipcon
+Reason: fix test case failure
+Ref: CDH-3541
+---
+ .../handler/TestOpenRegionHandler.java             |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java b/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
+index bd68834..778080b 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/handler/TestOpenRegionHandler.java
+@@ -32,9 +32,9 @@ import org.apache.hadoop.hbase.executor.RegionTransitionData;
+ import org.apache.hadoop.hbase.executor.EventHandler.EventType;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.regionserver.RegionServerServices;
+-import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.MockRegionServerServices;
+ import org.apache.hadoop.hbase.util.MockServer;
++import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.zookeeper.ZKAssign;
+ import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+@@ -52,7 +52,7 @@ public class TestOpenRegionHandler {
+   private final static HBaseTestingUtility HTU = new HBaseTestingUtility();
+   private static HTableDescriptor TEST_HTD;
+   private HRegionInfo TEST_HRI;
+-  
++
+   private int testIndex = 0;
+ 
+   @BeforeClass public static void before() throws Exception {
+-- 
+1.7.0.4
+

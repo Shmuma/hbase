@@ -255,14 +255,4 @@ public class FilterList implements Filter {
   public KeyValue getNextKeyHint(KeyValue currentKV) {
     return null;
   }
-
-  @Override
-  public boolean isFamilyEssential(byte[] name) {
-    for (Filter filter : filters) {
-      if (filter.isFamilyEssential(name)) {
-        return true;
-      }
-    }
-    return false;
-  }
 }

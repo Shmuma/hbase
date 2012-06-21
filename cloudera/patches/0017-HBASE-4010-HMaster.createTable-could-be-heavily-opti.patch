@@ -1,0 +1,201 @@
+From 26dbbc68b450068f3644998eeb2272c7c5804463 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 21 Mar 2012 13:45:53 -0700
+Subject: [PATCH 017/101] HBASE-4010 HMaster.createTable could be heavily optimized
+
+This patch improves performance of creating tables with prespecified splits by using the bulk put operation. This is the
+0.90 version of the patch.
+
+Reason: Performance
+Author: Zhihong Yu <tedyu@apache.org>
+Ref: CDH-3354
+---
+ .../apache/hadoop/hbase/catalog/MetaEditor.java    |   33 +++++++++++++++--
+ .../org/apache/hadoop/hbase/master/HMaster.java    |   39 ++++++++++++++++----
+ .../apache/hadoop/hbase/regionserver/HRegion.java  |   31 ++++++++++++++--
+ 3 files changed, 88 insertions(+), 15 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/catalog/MetaEditor.java b/src/main/java/org/apache/hadoop/hbase/catalog/MetaEditor.java
+index ef9e80a..e6a55ae 100644
+--- a/src/main/java/org/apache/hadoop/hbase/catalog/MetaEditor.java
++++ b/src/main/java/org/apache/hadoop/hbase/catalog/MetaEditor.java
+@@ -21,6 +21,8 @@ package org.apache.hadoop.hbase.catalog;
+ 
+ import java.io.IOException;
+ import java.net.ConnectException;
++import java.util.ArrayList;
++import java.util.List;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+@@ -43,6 +45,13 @@ import org.apache.hadoop.hbase.util.Writables;
+ public class MetaEditor {
+   private static final Log LOG = LogFactory.getLog(MetaEditor.class);
+ 
++  private static Put makePutFromRegionInfo(HRegionInfo regionInfo) throws IOException {
++    Put put = new Put(regionInfo.getRegionName());
++    put.add(HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER,
++        Writables.getBytes(regionInfo));
++    return put;
++  }
++  
+   /**
+    * Adds a META row for the specified new region.
+    * @param regionInfo region information
+@@ -51,15 +60,31 @@ public class MetaEditor {
+   public static void addRegionToMeta(CatalogTracker catalogTracker,
+       HRegionInfo regionInfo)
+   throws IOException {
+-    Put put = new Put(regionInfo.getRegionName());
+-    put.add(HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER,
+-        Writables.getBytes(regionInfo));
+     catalogTracker.waitForMetaServerConnectionDefault().put(
+-        CatalogTracker.META_REGION, put);
++        CatalogTracker.META_REGION, makePutFromRegionInfo(regionInfo));
+     LOG.info("Added region " + regionInfo.getRegionNameAsString() + " to META");
+   }
+ 
+   /**
++   * Adds a META row for each of the specified new regions.
++   * @param catalogTracker CatalogTracker
++   * @param regionInfos region information list
++   * @throws IOException if problem connecting or updating meta
++   */
++  public static void addRegionsToMeta(CatalogTracker catalogTracker,
++      List<HRegionInfo> regionInfos)
++  throws IOException {
++    List<Put> puts = new ArrayList<Put>();
++    for (HRegionInfo regionInfo : regionInfos) {
++      puts.add(makePutFromRegionInfo(regionInfo));
++      LOG.debug("Added region " + regionInfo.getRegionNameAsString() + " to META");
++    }
++    catalogTracker.waitForMetaServerConnectionDefault().put(
++        CatalogTracker.META_REGION, puts);
++    LOG.info("Added " + puts.size() + " regions to META");
++  }
++
++  /**
+    * Offline parent in meta.
+    * Used when splitting.
+    * @param catalogTracker
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index 5bf18b9..229b505 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -1,5 +1,5 @@
+ /**
+- * Copyright 2010 The Apache Software Foundation
++ * Copyright 2011 The Apache Software Foundation
+  *
+  * Licensed to the Apache Software Foundation (ASF) under one
+  * or more contributor license agreements.  See the NOTICE file
+@@ -75,6 +75,7 @@ import org.apache.hadoop.hbase.master.metrics.MasterMetrics;
+ import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+ import org.apache.hadoop.hbase.monitoring.TaskMonitor;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
++import org.apache.hadoop.hbase.regionserver.wal.HLog;
+ import org.apache.hadoop.hbase.replication.regionserver.Replication;
+ import org.apache.hadoop.hbase.security.User;
+ import org.apache.hadoop.hbase.util.Bytes;
+@@ -845,17 +846,41 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+     if(MetaReader.tableExists(catalogTracker, tableName)) {
+       throw new TableExistsException(tableName);
+     }
+-    for (HRegionInfo newRegion : newRegions) {
+-      // 1. Create HRegion
++    // 1. Set table enabling flag up in zk.
++    try {
++      assignmentManager.getZKTable().setEnabledTable(tableName);
++    } catch (KeeperException e) {
++      throw new IOException("Unable to ensure that the table will be" +
++          " enabled because of a ZooKeeper issue", e);
++    }
++
++    List<HRegionInfo> regionInfos = new ArrayList<HRegionInfo>();
++    final int batchSize = this.conf.getInt("hbase.master.createtable.batchsize", 100);
++    HLog hlog = null;
++    for (int regionIdx = 0; regionIdx < newRegions.length; regionIdx++) {
++      HRegionInfo newRegion = newRegions[regionIdx];
++
++      // 2. Create HRegion
+       HRegion region = HRegion.createHRegion(newRegion,
+-        fileSystemManager.getRootDir(), conf);
++        fileSystemManager.getRootDir(), conf, hlog);
+ 
+-      // 2. Insert into META
+-      MetaEditor.addRegionToMeta(catalogTracker, region.getRegionInfo());
++      if (hlog == null) {
++        hlog = region.getLog();
++      }
++
++      regionInfos.add(region.getRegionInfo());
++      if (regionIdx % batchSize == 0) {
++        // 3. Insert into META
++        MetaEditor.addRegionsToMeta(catalogTracker, regionInfos);
++        regionInfos.clear();
++      }
+ 
+       // 3. Close the new region to flush to disk.  Close log file too.
+       region.close();
+-      region.getLog().closeAndDelete();
++    }
++    hlog.closeAndDelete();
++    if (regionInfos.size() > 0) {
++      MetaEditor.addRegionsToMeta(catalogTracker, regionInfos);
+     }
+ 
+     // 4. Trigger immediate assignment of the regions in round-robin fashion
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index edb2781..eac33ab 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -2670,19 +2670,42 @@ public class HRegion implements HeapSize { // , Writable{
+   public static HRegion createHRegion(final HRegionInfo info, final Path rootDir,
+     final Configuration conf)
+   throws IOException {
++    return createHRegion(info, rootDir, conf, null);
++  }
++
++  /**
++   * Convenience method creating new HRegions. Used by createTable.
++   * The {@link HLog} for the created region needs to be closed explicitly.
++   * Use {@link HRegion#getLog()} to get access.
++   *
++   * @param info Info for region to create.
++   * @param rootDir Root directory for HBase instance
++   * @param conf
++   * @param hlog shared HLog
++   * @return new HRegion
++   *
++   * @throws IOException
++   */
++  public static HRegion createHRegion(final HRegionInfo info, final Path rootDir,
++                                      final Configuration conf,
++                                      final HLog hlog)
++      throws IOException {
+     Path tableDir =
+       HTableDescriptor.getTableDir(rootDir, info.getTableDesc().getName());
+     Path regionDir = HRegion.getRegionDir(tableDir, info.getEncodedName());
+     FileSystem fs = FileSystem.get(conf);
+     fs.mkdirs(regionDir);
++    HLog effectiveHLog = hlog;
++    if (hlog == null) {
++      effectiveHLog = new HLog(fs, new Path(regionDir, HConstants.HREGION_LOGDIR_NAME),
++          new Path(regionDir, HConstants.HREGION_OLDLOGDIR_NAME), conf);
++    }
+     HRegion region = HRegion.newHRegion(tableDir,
+-      new HLog(fs, new Path(regionDir, HConstants.HREGION_LOGDIR_NAME),
+-          new Path(regionDir, HConstants.HREGION_OLDLOGDIR_NAME), conf),
+-      fs, conf, info, null);
++        effectiveHLog, fs, conf, info, null);
+     region.initialize();
+     return region;
+   }
+-
++  
+   /**
+    * Open a Region.
+    * @param info Info for region to be opened.
+-- 
+1.7.0.4
+

@@ -1,0 +1,30 @@
+From 2a0fe5b93c23f8a54ca98d57cce2689e0f2d0a0c Mon Sep 17 00:00:00 2001
+From: Zhihong Yu <tedyu@apache.org>
+Date: Thu, 24 Nov 2011 19:02:46 +0000
+Subject: [PATCH 051/101] HBASE-4855  SplitLogManager hangs on cluster restart due to batch.installed doubly counted
+
+Reason: Bug
+Author: Ramkrishna
+Ref: CDH-3791
+---
+ .../hadoop/hbase/master/SplitLogManager.java       |    4 +++-
+ 1 files changed, 3 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+index 9340f56..e264ff3 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+@@ -732,7 +732,9 @@ public class SplitLogManager extends ZooKeeperListener {
+       }
+       this.batch = batch;
+       if (batch != null) {
+-        batch.installed++;
++        if (this.incarnation == 0) {
++          batch.installed++;
++        }
+       }
+     }
+ 
+-- 
+1.7.0.4
+

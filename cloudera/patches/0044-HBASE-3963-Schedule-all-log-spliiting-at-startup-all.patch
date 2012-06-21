@@ -1,0 +1,291 @@
+From 844d8fed17fbf4f7e42a8c99de91c8b5ae9b124d Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 21 Mar 2012 14:09:54 -0700
+Subject: [PATCH 044/101] HBASE-3963 Schedule all log-spliiting at startup all at once
+
+Reason: Bug
+Author: mingjian
+Ref: CDH-3791
+---
+ .../hadoop/hbase/master/MasterFileSystem.java      |   71 ++++++++++------
+ .../hadoop/hbase/master/SplitLogManager.java       |   92 ++++++++++++++------
+ 2 files changed, 111 insertions(+), 52 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+index 14075fc..663566a 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+@@ -21,6 +21,8 @@ package org.apache.hadoop.hbase.master;
+ 
+ import java.io.IOException;
+ import java.util.Map;
++import java.util.ArrayList;
++import java.util.List;
+ import java.util.concurrent.locks.Lock;
+ import java.util.concurrent.locks.ReentrantLock;
+ 
+@@ -189,61 +191,78 @@ public class MasterFileSystem {
+       LOG.debug("No log files to split, proceeding...");
+       return;
+     }
++    List<String> serverNames = new ArrayList<String>();
+     for (FileStatus status : logFolders) {
+       String serverName = status.getPath().getName();
+       if (onlineServers.get(serverName) == null) {
+         LOG.info("Log folder " + status.getPath() + " doesn't belong " +
+           "to a known region server, splitting");
+-        splitLog(serverName);
++        serverNames.add(serverName);
+       } else {
+         LOG.info("Log folder " + status.getPath() +
+           " belongs to an existing region server");
+       }
+-    }
++    }  
++    splitLog(serverNames);
+   }
+ 
+   public void splitLog(final String serverName) {
++    List<String> serverNames = new ArrayList<String>();
++    serverNames.add(serverName);
++    splitLog(serverNames);
++  }
++  
++  public void splitLog(final List<String> serverNames) {
+     long splitTime = 0, splitLogSize = 0;
+-    Path logDir = new Path(this.rootdir, HLog.getHLogDirectoryName(serverName));
++    List<Path> logDirs = new ArrayList<Path>();
++    for(String serverName: serverNames){
++      Path logDir = new Path(this.rootdir, HLog.getHLogDirectoryName(serverName));
++      logDirs.add(logDir);
++    }
++      
+     if (distributedLogSplitting) {
+       splitTime = EnvironmentEdgeManager.currentTimeMillis();
+       try {
+         try {
+-          splitLogSize = splitLogManager.splitLogDistributed(logDir);
++          splitLogSize = splitLogManager.splitLogDistributed(logDirs);
+         } catch (OrphanHLogAfterSplitException e) {
+           LOG.warn("Retrying distributed splitting for " +
+-              serverName + "because of:", e);
+-          splitLogManager.splitLogDistributed(logDir);
++            serverNames + "because of:", e);
++            splitLogManager.splitLogDistributed(logDirs);
+         }
+       } catch (IOException e) {
+-        LOG.error("Failed distributed splitting " + serverName, e);
++        LOG.error("Failed distributed splitting " + serverNames, e);
+       }
+       splitTime = EnvironmentEdgeManager.currentTimeMillis() - splitTime;
+     } else {
+-      // splitLogLock ensures that dead region servers' logs are processed
+-      // one at a time
+-      this.splitLogLock.lock();
+-
+-      try {
+-        HLogSplitter splitter = HLogSplitter.createLogSplitter(
++      for(Path logDir: logDirs){
++        // splitLogLock ensures that dead region servers' logs are processed
++        // one at a time
++        this.splitLogLock.lock();
++        try {              
++          HLogSplitter splitter = HLogSplitter.createLogSplitter(
+             conf, rootdir, logDir, oldLogDir, this.fs);
+-        try {
+-          splitter.splitLog();
+-        } catch (OrphanHLogAfterSplitException e) {
+-          LOG.warn("Retrying splitting because of:", e);
+-          // An HLogSplitter instance can only be used once.  Get new instance.
+-          splitter = HLogSplitter.createLogSplitter(conf, rootdir, logDir,
++          try {
++            // If FS is in safe mode, just wait till out of it.
++            FSUtils.waitOnSafeMode(conf, conf.getInt(HConstants.THREAD_WAKE_FREQUENCY, 1000));
++            splitter.splitLog();
++          } catch (OrphanHLogAfterSplitException e) {
++            LOG.warn("Retrying splitting because of:", e);
++            //An HLogSplitter instance can only be used once.  Get new instance.
++            splitter = HLogSplitter.createLogSplitter(conf, rootdir, logDir,
+               oldLogDir, this.fs);
+-          splitter.splitLog();
++            splitter.splitLog();
++          }
++          splitTime = splitter.getTime();
++          splitLogSize = splitter.getSize();
++        } catch (IOException e) {
++          LOG.error("Failed splitting " + logDir.toString(), e);
++        } finally {
++          this.splitLogLock.unlock();
+         }
+-        splitTime = splitter.getTime();
+-        splitLogSize = splitter.getSize();
+-      } catch (IOException e) {
+-        LOG.error("Failed splitting " + logDir.toString(), e);
+-      } finally {
+-        this.splitLogLock.unlock();
+       }
+     }
++
+     if (this.metrics != null) {
+       this.metrics.addSplit(splitTime, splitLogSize);
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+index 04c4780..c2eae8e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+@@ -20,7 +20,9 @@
+ package org.apache.hadoop.hbase.master;
+ 
+ import static org.apache.hadoop.hbase.zookeeper.ZKSplitLog.Counters.*;
++
+ import java.io.IOException;
++import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.ConcurrentHashMap;
+@@ -35,12 +37,15 @@ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.hbase.Chore;
+ import org.apache.hadoop.hbase.Stoppable;
+ import org.apache.hadoop.hbase.master.SplitLogManager.TaskFinisher.Status;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
++import org.apache.hadoop.hbase.monitoring.TaskMonitor;
+ import org.apache.hadoop.hbase.regionserver.SplitLogWorker;
+ import org.apache.hadoop.hbase.regionserver.wal.HLogSplitter;
+ import org.apache.hadoop.hbase.regionserver.wal.OrphanHLogAfterSplitException;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+ import org.apache.hadoop.hbase.util.Threads;
+ import org.apache.hadoop.hbase.zookeeper.ZKSplitLog;
++import org.apache.hadoop.hbase.zookeeper.ZKSplitLog.TaskState;
+ import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperListener;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+@@ -51,7 +56,6 @@ import org.apache.zookeeper.KeeperException;
+ import org.apache.zookeeper.KeeperException.NoNodeException;
+ import org.apache.zookeeper.ZooDefs.Ids;
+ import org.apache.zookeeper.data.Stat;
+-import org.apache.hadoop.hbase.zookeeper.ZKSplitLog.TaskState;
+ 
+ /**
+  * Distributes the task of log splitting to the available region servers.
+@@ -164,6 +168,40 @@ public class SplitLogManager extends ZooKeeperListener {
+     }
+   }
+ 
++  private FileStatus[] getFileList(List<Path> logDirs) throws IOException {
++    List<FileStatus> fileStatus = new ArrayList<FileStatus>();
++    for (Path hLogDir : logDirs) {
++      this.fs = hLogDir.getFileSystem(conf);
++      if (!fs.exists(hLogDir)) {
++        LOG.warn(hLogDir + " doesn't exist. Nothing to do!");
++        continue;
++      }
++      FileStatus[] logfiles = fs.listStatus(hLogDir); // TODO filter filenames?
++      if (logfiles == null || logfiles.length == 0) {
++        LOG.info(hLogDir + " is empty dir, no logs to split");
++      } else {
++        for (FileStatus status : logfiles)
++          fileStatus.add(status);
++      }
++    }
++    if (fileStatus.isEmpty())
++      return null;
++    FileStatus[] a = new FileStatus[fileStatus.size()];
++    return fileStatus.toArray(a);
++  }
++
++  /**
++   * @param logDir
++   *            one region sever hlog dir path in .logs
++   * @throws IOException
++   *             if there was an error while splitting any log file
++   * @return cumulative size of the logfiles split
++   */
++  public long splitLogDistributed(final Path logDir) throws IOException {
++    List<Path> logDirs = new ArrayList<Path>();
++    logDirs.add(logDir);
++    return splitLogDistributed(logDirs);
++  }
+   /**
+    * The caller will block until all the log files of the given region server
+    * have been processed - successfully split or an error is encountered - by an
+@@ -176,19 +214,16 @@ public class SplitLogManager extends ZooKeeperListener {
+    *          if there was an error while splitting any log file
+    * @return cumulative size of the logfiles split
+    */
+-  public long splitLogDistributed(final Path logDir) throws IOException {
+-    this.fs = logDir.getFileSystem(conf);
+-    if (!fs.exists(logDir)) {
+-      LOG.warn(logDir + " doesn't exist. Nothing to do!");
++  public long splitLogDistributed(final List<Path> logDirs) throws IOException {
++    MonitoredTask status = TaskMonitor.get().createStatus(
++          "Doing distributed log split in " + logDirs);
++    FileStatus[] logfiles = getFileList(logDirs);
++    if(logfiles == null)
+       return 0;
+-    }
+-    FileStatus[] logfiles = fs.listStatus(logDir); // TODO filter filenames?
+-    if (logfiles == null || logfiles.length == 0) {
+-      LOG.info(logDir + " is empty dir, no logs to split");
+-      return 0;
+-    }
++    status.setStatus("Checking directory contents...");
++    LOG.debug("Scheduling batch of logs to split");
+     tot_mgr_log_split_batch_start.incrementAndGet();
+-    LOG.info("started splitting logs in " + logDir);
++    LOG.info("started splitting logs in " + logDirs);
+     long t = EnvironmentEdgeManager.currentTimeMillis();
+     long totalSize = 0;
+     TaskBatch batch = new TaskBatch();
+@@ -208,24 +243,29 @@ public class SplitLogManager extends ZooKeeperListener {
+     if (batch.done != batch.installed) {
+       stopTrackingTasks(batch);
+       tot_mgr_log_split_batch_err.incrementAndGet();
+-      LOG.warn("error while splitting logs in " + logDir +
++      LOG.warn("error while splitting logs in " + logDirs +
+       " installed = " + batch.installed + " but only " + batch.done + " done");
+       throw new IOException("error or interrupt while splitting logs in "
+-          + logDir + " Task = " + batch);
++          + logDirs + " Task = " + batch);
+     }
+-    if (anyNewLogFiles(logDir, logfiles)) {
+-      tot_mgr_new_unexpected_hlogs.incrementAndGet();
+-      LOG.warn("new hlogs were produced while logs in " + logDir +
++    for(Path logDir: logDirs){
++      if (anyNewLogFiles(logDir, logfiles)) {
++        tot_mgr_new_unexpected_hlogs.incrementAndGet();
++        LOG.warn("new hlogs were produced while logs in " + logDir +
+           " were being split");
+-      throw new OrphanHLogAfterSplitException();
+-    }
+-    tot_mgr_log_split_batch_success.incrementAndGet();
+-    if (!fs.delete(logDir, true)) {
+-      throw new IOException("Unable to delete src dir: " + logDir);
++        throw new OrphanHLogAfterSplitException();
++      }
++      tot_mgr_log_split_batch_success.incrementAndGet();
++      status.setStatus("Cleaning up log directory...");
++      if (!fs.delete(logDir, true)) {
++        throw new IOException("Unable to delete src dir: " + logDir);
++      }
+     }
+-    LOG.info("finished splitting (more than or equal to) " + totalSize +
+-        " bytes in " + batch.installed + " log files in " + logDir + " in " +
+-        (EnvironmentEdgeManager.currentTimeMillis() - t) + "ms");
++    String msg = "finished splitting (more than or equal to) " + totalSize +
++        " bytes in " + batch.installed + " log files in " + logDirs + " in " +
++        (EnvironmentEdgeManager.currentTimeMillis() - t) + "ms";
++    status.markComplete(msg);
++    LOG.info(msg);
+     return totalSize;
+   }
+ 
+@@ -943,4 +983,4 @@ public class SplitLogManager extends ZooKeeperListener {
+      */
+     public Status finish(String workerName, String taskname);
+   }
+-}
+\ No newline at end of file
++}
+-- 
+1.7.0.4
+

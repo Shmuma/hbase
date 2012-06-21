@@ -42,6 +42,7 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -56,8 +57,8 @@ import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
-import org.apache.hadoop.hbase.util.IncrementingEnvironmentEdge;
 import org.apache.hadoop.hbase.util.ManualEnvironmentEdge;
+import org.apache.hadoop.util.Progressable;
 import org.mockito.Mockito;
 
 import com.google.common.base.Joiner;
@@ -524,6 +525,22 @@ public class TestStore extends TestCase {
       return new FaultyOutputStream(super.create(p), faultPos);
     }
 
+    @Override
+    public FSDataOutputStream create(Path f, FsPermission permission,
+        boolean overwrite, int bufferSize, short replication, long blockSize,
+        Progressable progress) throws IOException {
+      return new FaultyOutputStream(super.create(f, permission,
+          overwrite, bufferSize, replication, blockSize, progress), faultPos);
+    }
+
+    @Override
+    public FSDataOutputStream createNonRecursive(Path f, boolean overwrite,
+        int bufferSize, short replication, long blockSize, Progressable progress)
+    throws IOException {
+      // Fake it.  Call create instead.  The default implementation throws an IOE
+      // that this is not supported.
+      return create(f, overwrite, bufferSize, replication, blockSize, progress);
+    }
   }
 
   static class FaultyOutputStream extends FSDataOutputStream {

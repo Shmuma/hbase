@@ -47,6 +47,7 @@ import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.hfile.Compression;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileScanner;
+import org.apache.hadoop.hbase.io.hfile.InvalidHFileException;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
@@ -106,6 +107,8 @@ public class Store implements HeapSize {
   final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
   private final String storeNameStr;
   private final boolean inMemory;
+  private final int compactionKVMax;
+  private final boolean verifyBulkLoads;
 
   /*
    * List of store files inside this store. This is an immutable list that
@@ -201,6 +204,10 @@ public class Store implements HeapSize {
     this.minCompactSize = conf.getLong("hbase.hstore.compaction.min.size",
         this.region.memstoreFlushSize);
     this.compactRatio = conf.getFloat("hbase.hstore.compaction.ratio", 1.2F);
+    this.compactionKVMax = conf.getInt("hbase.hstore.compaction.kv.max", 10);
+
+    this.verifyBulkLoads = conf.getBoolean("hbase.hstore.bulkload.verify",
+        false);
 
     if (Store.closeCheckInterval == 0) {
       Store.closeCheckInterval = conf.getInt(
@@ -318,9 +325,11 @@ public class Store implements HeapSize {
     return this.storefiles;
   }
 
-  public void bulkLoadHFile(String srcPathStr) throws IOException {
-    Path srcPath = new Path(srcPathStr);
-
+  /**
+   * This throws a WrongRegionException if the HFile does not fit in this
+   * region, or an InvalidHFileException if the HFile is not valid.
+   */
+  void assertBulkLoadHFileOk(Path srcPath) throws IOException {
     HFile.Reader reader  = null;
     try {
       LOG.info("Validating hfile at " + srcPath + " for inclusion in "
@@ -344,12 +353,49 @@ public class Store implements HeapSize {
       HRegionInfo hri = region.getRegionInfo();
       if (!hri.containsRange(firstKey, lastKey)) {
         throw new WrongRegionException(
-            "Bulk load file " + srcPathStr + " does not fit inside region "
+            "Bulk load file " + srcPath.toString() + " does not fit inside region "
             + this.region);
+      }
+
+      if (verifyBulkLoads) {
+        KeyValue prevKV = null;
+        HFileScanner scanner = reader.getScanner(false, false);
+        scanner.seekTo();
+        do {
+          KeyValue kv = scanner.getKeyValue();
+          if (prevKV != null) {
+            if (Bytes.compareTo(prevKV.getBuffer(), prevKV.getRowOffset(),
+                prevKV.getRowLength(), kv.getBuffer(), kv.getRowOffset(),
+                kv.getRowLength()) > 0) {
+              throw new InvalidHFileException("Previous row is greater than"
+                  + " current row: path=" + srcPath + " previous="
+                  + Bytes.toStringBinary(prevKV.getKey()) + " current="
+                  + Bytes.toStringBinary(kv.getKey()));
+            }
+            if (Bytes.compareTo(prevKV.getBuffer(), prevKV.getFamilyOffset(),
+                prevKV.getFamilyLength(), kv.getBuffer(), kv.getFamilyOffset(),
+                kv.getFamilyLength()) != 0) {
+              throw new InvalidHFileException("Previous key had different"
+                  + " family compared to current key: path=" + srcPath
+                  + " previous=" + Bytes.toStringBinary(prevKV.getFamily())
+                  + " current=" + Bytes.toStringBinary(kv.getFamily()));
+            }
+          }
+          prevKV = kv;
+        } while (scanner.next());
       }
     } finally {
       if (reader != null) reader.close();
     }
+  }
+
+  /**
+   * This method should only be called from HRegion.  It is assumed that the 
+   * ranges of values in the HFile fit within the stores assigned region. 
+   * (assertBulkLoadHFileOk checks this)
+   */
+  void bulkLoadHFile(String srcPathStr) throws IOException {
+    Path srcPath = new Path(srcPathStr);
 
     // Move the file if it's on another filesystem
     FileSystem srcFs = srcPath.getFileSystem(conf);
@@ -656,90 +702,68 @@ public class Store implements HeapSize {
        */
       int countOfFiles = filesToCompact.size();
       long [] fileSizes = new long[countOfFiles];
-
-      for (int i = 0; i < countOfFiles; i++) {
-          StoreFile file = filesToCompact.get(i);
-          StoreFile.Reader r = file.getReader();
-          if (r == null) {
-              LOG.error("StoreFile " + file + " has a null Reader");
-              return null;
-          }
-          fileSizes[i] = r.length ();
-          LOG.debug("compact: fileSizes[" + i + "] = " + fileSizes[i] + " [cf=" + this.storeNameStr +"]");
+      long [] sumSize = new long[countOfFiles];
+      for (int i = countOfFiles-1; i >= 0; --i) {
+        StoreFile file = filesToCompact.get(i);
+        Path path = file.getPath();
+        if (path == null) {
+          LOG.error("Path is null for " + file);
+          return null;
+        }
+        StoreFile.Reader r = file.getReader();
+        if (r == null) {
+          LOG.error("StoreFile " + file + " has a null Reader");
+          return null;
+        }
+        fileSizes[i] = file.getReader().length();
+        // calculate the sum of fileSizes[i,i+maxFilesToCompact-1) for algo
+        int tooFar = i + this.maxFilesToCompact - 1;
+        sumSize[i] = fileSizes[i]
+                   + ((i+1    < countOfFiles) ? sumSize[i+1]      : 0)
+                   - ((tooFar < countOfFiles) ? fileSizes[tooFar] : 0);
       }
 
       long totalSize = 0;
       if (!majorcompaction && !references) {
         // we're doing a minor compaction, let's see what files are applicable
+        int start = 0;
         double r = this.compactRatio;
 
-        // Search for optimal compact bounds. We look for maximum chain of files
-        // less than minCompactSize (which, in fact stand for maxCompactSize).
-        int start, len, best_start, best_len;
-
-        start = best_start = -1;
-        len = best_len = 0;
-
-        for (int i = 0; i < countOfFiles; i++) {
-            if (fileSizes[i] < minCompactSize) {
-                LOG.debug ("File " + i + " is ok, start = " + start + ", len = " + len);
-                // ok to include in chain
-                if (start == -1) {
-                    // start of new chain
-                    start = i;
-                    len = 1;
-                }
-                else            // chain exists, increase it
-                    len++;
-            }
-            else {
-                LOG.debug ("File " + i + " is too large, start = " + start + ", len = " + len);
-                if (start != -1) {
-                    // Chain finished. Check that it exceeds best found.
-                    if (best_start == -1 || best_len < len) {
-                        best_start = start;
-                        best_len = len;
-                    }
-                }
-                // start fresh chain
-                start = -1;
-                len = 0;
-            }
+        /* Start at the oldest file and stop when you find the first file that
+         * meets compaction criteria:
+         *   (1) a recently-flushed, small file (i.e. <= minCompactSize)
+         *      OR
+         *   (2) within the compactRatio of sum(newer_files)
+         * Given normal skew, any newer files will also meet this criteria
+         *
+         * Additional Note:
+         * If fileSizes.size() >> maxFilesToCompact, we will recurse on
+         * compact().  Consider the oldest files first to avoid a
+         * situation where we always compact [end-threshold,end).  Then, the
+         * last file becomes an aggregate of the previous compactions.
+         */
+        while(countOfFiles - start >= this.compactionThreshold &&
+              fileSizes[start] >
+                Math.max(minCompactSize, (long)(sumSize[start+1] * r))) {
+          ++start;
         }
+        int end = Math.min(countOfFiles, start + this.maxFilesToCompact);
+        totalSize = fileSizes[start]
+                  + ((start+1 < countOfFiles) ? sumSize[start+1] : 0);
 
-        if (best_start == -1 || best_len < len) {
-            best_start = start;
-            best_len = len;
+        // if we don't have enough files to compact, just wait
+        if (end - start < this.compactionThreshold) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Skipped compaction of " + this.storeNameStr
+              + " because only " + (end - start) + " file(s) of size "
+              + StringUtils.humanReadableInt(totalSize)
+              + " meet compaction criteria.");
+          }
+          return checkSplit(forceSplit);
         }
-
-        LOG.debug ("Best compaction chain: start = " + best_start + ", len = " + best_len);
-
-        // check for search result
-        if (best_start == -1 || best_len < this.compactionThreshold) {
-            if (best_start == -1)
-                LOG.debug ("Skipped compaction of " + this.storeNameStr + " because of all files are exceeds limit");
-            else
-                LOG.debug ("Skipped compaction of " + this.storeNameStr + " because of chain is too short (found " +
-                           best_len + ", need " + this.compactionThreshold + "))");
-            return checkSplit (forceSplit);
-        }
-
-        // check for max files to compact
-        if (best_len > this.maxFilesToCompact) {
-            LOG.debug ("Found chain length (" + best_len + ") exceeds maximum (" + this.maxFilesToCompact + "). Crop chain.");
-            best_len = this.maxFilesToCompact;
-        }
-
-        // chain seems ok, calculate it's size
-        start = best_start;
-        int end = start + best_len;
-
-        for (int i = start; i < end; i++)
-            totalSize += fileSizes[i];
 
         if (0 == start && end == countOfFiles) {
           // we decided all the files were candidates! major compact
-          LOG.info("compact: upgrading to major compaction" + " [cf=" + this.storeNameStr +"], start = " + start + ", end = " + end);
           majorcompaction = true;
         } else {
           filesToCompact = new ArrayList<StoreFile>(filesToCompact.subList(start,
@@ -962,7 +986,8 @@ public class Store implements HeapSize {
         // since scanner.next() can return 'false' but still be delivering data,
         // we have to use a do/while loop.
         ArrayList<KeyValue> kvs = new ArrayList<KeyValue>();
-        while (scanner.next(kvs)) {
+        // Limit to "hbase.hstore.compaction.kv.max" (default 10) to avoid OOME
+        while (scanner.next(kvs,this.compactionKVMax)) {
           if (writer == null && !kvs.isEmpty()) {
             writer = createWriterInTmp(maxKeyCount,
               this.compactionCompression);
@@ -983,7 +1008,7 @@ public class Store implements HeapSize {
                     throw new InterruptedIOException(
                         "Aborting compaction of store " + this +
                         " in region " + this.region +
-                        " because user requested stop.");
+                        " because it was interrupted.");
                   }
                 }
               }
@@ -1575,7 +1600,7 @@ public class Store implements HeapSize {
   public static final long FIXED_OVERHEAD = ClassSize.align(
       ClassSize.OBJECT + (15 * ClassSize.REFERENCE) +
       (6 * Bytes.SIZEOF_LONG) + (1 * Bytes.SIZEOF_DOUBLE) +
-      (4 * Bytes.SIZEOF_INT) + (Bytes.SIZEOF_BOOLEAN * 2));
+      (5 * Bytes.SIZEOF_INT) + (Bytes.SIZEOF_BOOLEAN * 2));
 
   public static final long DEEP_OVERHEAD = ClassSize.align(FIXED_OVERHEAD +
       ClassSize.OBJECT + ClassSize.REENTRANT_LOCK +

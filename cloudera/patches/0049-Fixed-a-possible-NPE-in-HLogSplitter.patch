@@ -1,0 +1,31 @@
+From 0e6970c83b3bf42364fa8552301d9e83a2765e20 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Mon, 14 Nov 2011 16:37:34 -0800
+Subject: [PATCH 049/101] Fixed a possible NPE in HLogSplitter
+
+Reason: Bug
+Author: Michael Stack
+Ref: CDH-3791
+---
+ .../hbase/regionserver/wal/HLogSplitter.java       |    5 ++++-
+ 1 files changed, 4 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+index 0029730..10c5d58 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+@@ -391,7 +391,10 @@ public class HLogSplitter {
+         if (wap == null) {
+           wap = createWAP(region, entry, rootDir, tmpname, fs, conf);
+           if (wap == null) {
+-            logWriters.put(region, BAD_WRITER);
++        	  // ignore edits from this region. It doesn't ezist anymore.
++        	  // It was probably already split.
++        	  logWriters.put(region, BAD_WRITER);
++        	  continue;
+           } else {
+             logWriters.put(region, wap);
+           }
+-- 
+1.7.0.4
+

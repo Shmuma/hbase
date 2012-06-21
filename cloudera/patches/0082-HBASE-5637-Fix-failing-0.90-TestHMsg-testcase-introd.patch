@@ -1,0 +1,46 @@
+From e925e528584dffc4ed40cdcf7016c1dec3d76370 Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jmhsieh@apache.org>
+Date: Mon, 26 Mar 2012 17:46:45 +0000
+Subject: [PATCH 082/101] HBASE-5637 Fix failing 0.90 TestHMsg testcase introduced by HBASE-5563
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1305474 13f79535-47bb-0310-9956-ffa450edef68
+
+Reason: bug introduced by hbck backports
+Author: Jonathan Hsieh
+Ref: CDH-4040
+---
+ .../java/org/apache/hadoop/hbase/TestHMsg.java     |    5 +++--
+ 1 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/TestHMsg.java b/src/test/java/org/apache/hadoop/hbase/TestHMsg.java
+index b55956f..1612fac 100644
+--- a/src/test/java/org/apache/hadoop/hbase/TestHMsg.java
++++ b/src/test/java/org/apache/hadoop/hbase/TestHMsg.java
+@@ -30,13 +30,14 @@ import org.apache.hadoop.hbase.util.Writables;
+ 
+ public class TestHMsg extends TestCase {
+   public void testList() {
++    final long regionId = 0L; 
+     List<HMsg> msgs = new ArrayList<HMsg>();
+     HMsg hmsg = null;
+     final int size = 10;
+     for (int i = 0; i < size; i++) {
+       byte [] b = Bytes.toBytes(i);
+       hmsg = new HMsg(HMsg.Type.STOP_REGIONSERVER,
+-        new HRegionInfo(new HTableDescriptor(Bytes.toBytes("test")), b, b));
++        new HRegionInfo(new HTableDescriptor(Bytes.toBytes("test")), b, b, false, regionId));
+       msgs.add(hmsg);
+     }
+     assertEquals(size, msgs.size());
+@@ -51,7 +52,7 @@ public class TestHMsg extends TestCase {
+     // Assert that two HMsgs are same if same content.
+     byte [] b = Bytes.toBytes(1);
+     hmsg = new HMsg(HMsg.Type.STOP_REGIONSERVER,
+-     new HRegionInfo(new HTableDescriptor(Bytes.toBytes("test")), b, b));
++     new HRegionInfo(new HTableDescriptor(Bytes.toBytes("test")), b, b, false, regionId));
+     assertNotSame(-1, msgs.indexOf(hmsg));
+   }
+ 
+-- 
+1.7.0.4
+

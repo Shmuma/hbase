@@ -1,0 +1,243 @@
+From 34bbdb1eb71f90cbecfe1794656045804a990e9d Mon Sep 17 00:00:00 2001
+From: Zhihong Yu <tedyu@apache.org>
+Date: Mon, 28 Nov 2011 20:50:26 +0000
+Subject: [PATCH 053/101] HBASE-4869  Backport to 0.92: HBASE-4797 [availability] Skip recovered.edits
+                files with edits older than what region currently has (Jimmy Xiang)
+
+Reason: Enhancement
+Author: Jimmy Xiang
+Ref: CDH-3791
+---
+ .../apache/hadoop/hbase/regionserver/HRegion.java  |   20 +++
+ .../hadoop/hbase/regionserver/TestHRegion.java     |  132 ++++++++++++++++++--
+ 2 files changed, 143 insertions(+), 9 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index eac33ab..4bbadef 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -1905,12 +1905,32 @@ public class HRegion implements HeapSize { // , Writable{
+     long seqid = minSeqId;
+     NavigableSet<Path> files = HLog.getSplitEditFilesSorted(this.fs, regiondir);
+     if (files == null || files.isEmpty()) return seqid;
++    boolean checkSafeToSkip = true;
+     for (Path edits: files) {
+       if (edits == null || !this.fs.exists(edits)) {
+         LOG.warn("Null or non-existent edits file: " + edits);
+         continue;
+       }
+       if (isZeroLengthThenDelete(this.fs, edits)) continue;
++
++      if (checkSafeToSkip) {
++        Path higher = files.higher(edits);
++        long maxSeqId = Long.MAX_VALUE;
++        if (higher != null) {
++          // Edit file name pattern, HLog.EDITFILES_NAME_PATTERN: "-?[0-9]+"
++          String fileName = higher.getName();
++          maxSeqId = Math.abs(Long.parseLong(fileName));
++        }
++        if (maxSeqId <= minSeqId) {
++          String msg = "Maximum possible sequenceid for this log is " + maxSeqId
++              + ", skipped the whole file, path=" + edits;
++          LOG.debug(msg);
++          continue;
++        } else {
++          checkSafeToSkip = false;
++        }
++      }
++
+       try {
+         seqid = replayRecoveredEdits(edits, seqid, reporter);
+       } catch (IOException e) {
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java
+index 84befef..1e23b2f 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java
+@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicReference;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.hbase.DoNotRetryIOException;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+@@ -59,10 +61,13 @@ import org.apache.hadoop.hbase.filter.Filter;
+ import org.apache.hadoop.hbase.filter.FilterList;
+ import org.apache.hadoop.hbase.filter.PrefixFilter;
+ import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
++import org.apache.hadoop.hbase.monitoring.TaskMonitor;
+ import org.apache.hadoop.hbase.regionserver.HRegion.RegionScanner;
+ import org.apache.hadoop.hbase.regionserver.wal.HLog;
++import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
++import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+ import org.apache.hadoop.hbase.util.Bytes;
+-import org.apache.hadoop.hbase.util.EnvironmentEdge;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
+ import org.apache.hadoop.hbase.util.IncrementingEnvironmentEdge;
+@@ -2731,6 +2736,115 @@ public class TestHRegion extends HBaseTestCase {
+   }
+ 
+ 
++  public void testSkipRecoveredEditsReplay() throws Exception {
++    String method = "testSkipRecoveredEditsReplay";
++    byte[] tableName = Bytes.toBytes(method);
++    byte[] family = Bytes.toBytes("family");
++    Configuration conf = HBaseConfiguration.create();
++    initHRegion(tableName, method, conf, family);
++    Path regiondir = region.getRegionDir();
++    FileSystem fs = region.getFilesystem();
++    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
++
++    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
++
++    long maxSeqId = 1050;
++    long minSeqId = 1000;
++
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
++      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
++
++      long time = System.nanoTime();
++      WALEdit edit = new WALEdit();
++      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
++          time, KeyValue.Type.Put, Bytes.toBytes(i)));
++      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
++          i, time), edit));
++
++      writer.close();
++    }
++    MonitoredTask status = TaskMonitor.get().createStatus(method);
++    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId-1, null, status);
++    assertEquals(maxSeqId, seqId);
++    Get get = new Get(row);
++    Result result = region.get(get, null);
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
++      assertEquals(1, kvs.size());
++      assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
++    }
++  }
++
++  public void testSkipRecoveredEditsReplaySomeIgnored() throws Exception {
++    String method = "testSkipRecoveredEditsReplaySomeIgnored";
++    byte[] tableName = Bytes.toBytes(method);
++    byte[] family = Bytes.toBytes("family");
++    initHRegion(tableName, method, HBaseConfiguration.create(), family);
++    Path regiondir = region.getRegionDir();
++    FileSystem fs = region.getFilesystem();
++    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
++
++    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
++
++    long maxSeqId = 1050;
++    long minSeqId = 1000;
++
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
++      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
++
++      long time = System.nanoTime();
++      WALEdit edit = new WALEdit();
++      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
++          time, KeyValue.Type.Put, Bytes.toBytes(i)));
++      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
++          i, time), edit));
++
++      writer.close();
++    }
++    long recoverSeqId = 1030;
++    MonitoredTask status = TaskMonitor.get().createStatus(method);
++    long seqId = region.replayRecoveredEditsIfAny(regiondir, recoverSeqId-1, null, status);
++    assertEquals(maxSeqId, seqId);
++    Get get = new Get(row);
++    Result result = region.get(get, null);
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
++      if (i < recoverSeqId) {
++        assertEquals(0, kvs.size());
++      } else {
++        assertEquals(1, kvs.size());
++        assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
++      }
++    }
++  }
++
++  public void testSkipRecoveredEditsReplayAllIgnored() throws Exception {
++    String method = "testSkipRecoveredEditsReplayAllIgnored";
++    byte[] tableName = Bytes.toBytes(method);
++    byte[] family = Bytes.toBytes("family");
++    initHRegion(tableName, method, HBaseConfiguration.create(), family);
++    Path regiondir = region.getRegionDir();
++    FileSystem fs = region.getFilesystem();
++
++    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
++    for (int i = 1000; i < 1050; i += 10) {
++      Path recoveredEdits = new Path(
++          recoveredEditsDir, String.format("%019d", i));
++      FSDataOutputStream dos=  fs.create(recoveredEdits);
++      dos.writeInt(i);
++      dos.close();
++    }
++    long minSeqId = 2000;
++    Path recoveredEdits = new Path(
++        recoveredEditsDir, String.format("%019d", minSeqId-1));
++    FSDataOutputStream dos=  fs.create(recoveredEdits);
++    dos.close();
++    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId, null, null);
++    assertEquals(minSeqId, seqId);
++  }
++
+   public void testIndexesScanWithOneDeletedRow() throws IOException {
+     byte[] tableName = Bytes.toBytes("testIndexesScanWithOneDeletedRow");
+     byte[] family = Bytes.toBytes("family");
+@@ -2787,7 +2901,7 @@ public class TestHRegion extends HBaseTestCase {
+     HColumnDescriptor hcd = new HColumnDescriptor(fam1, Integer.MAX_VALUE,
+         HColumnDescriptor.DEFAULT_COMPRESSION, false, true,
+         HColumnDescriptor.DEFAULT_TTL, "rowcol");
+-    
++
+     HTableDescriptor htd = new HTableDescriptor(tableName);
+     htd.addFamily(hcd);
+     HRegionInfo info = new HRegionInfo(htd, null, null, false);
+@@ -2809,7 +2923,7 @@ public class TestHRegion extends HBaseTestCase {
+       }
+       region.flushcache();
+     }
+-    //before compaction 
++    //before compaction
+     Store store = region.getStore(fam1);
+     List<StoreFile> storeFiles = store.getStorefiles();
+     for (StoreFile storefile : storeFiles) {
+@@ -2819,10 +2933,10 @@ public class TestHRegion extends HBaseTestCase {
+       assertEquals(num_unique_rows*duplicate_multiplier, reader.getEntries());
+       assertEquals(num_unique_rows, reader.getFilterEntries());
+     }
+-    
+-    region.compactStores(true); 
+-    
+-    //after compaction 
++
++    region.compactStores(true);
++
++    //after compaction
+     storeFiles = store.getStorefiles();
+     for (StoreFile storefile : storeFiles) {
+       StoreFile.Reader reader = storefile.getReader();
+@@ -2831,9 +2945,9 @@ public class TestHRegion extends HBaseTestCase {
+       assertEquals(num_unique_rows*duplicate_multiplier*num_storefiles,
+           reader.getEntries());
+       assertEquals(num_unique_rows, reader.getFilterEntries());
+-    }  
++    }
+   }
+-  
++
+   public void testAllColumnsWithBloomFilter() throws IOException {
+     byte [] TABLE = Bytes.toBytes("testAllColumnsWithBloomFilter");
+     byte [] FAMILY = Bytes.toBytes("family");
+-- 
+1.7.0.4
+

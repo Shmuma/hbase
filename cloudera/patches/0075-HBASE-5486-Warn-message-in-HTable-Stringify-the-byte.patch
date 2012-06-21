@@ -1,0 +1,49 @@
+From a605182d6356b0b4d69ee07d59793b03dd83ca5a Mon Sep 17 00:00:00 2001
+From: Michael Stack <stack@apache.org>
+Date: Fri, 2 Mar 2012 21:16:03 +0000
+Subject: [PATCH 075/101] HBASE-5486 Warn message in HTable: Stringify the byte[]
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1296478 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../java/org/apache/hadoop/hbase/HConstants.java   |    8 ++++++--
+ .../org/apache/hadoop/hbase/client/HTable.java     |    4 ++--
+ 2 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/HConstants.java b/src/main/java/org/apache/hadoop/hbase/HConstants.java
+index 3ec29de..ee0686d 100644
+--- a/src/main/java/org/apache/hadoop/hbase/HConstants.java
++++ b/src/main/java/org/apache/hadoop/hbase/HConstants.java
+@@ -208,9 +208,13 @@ public final class HConstants {
+   /** The catalog family */
+   public static final byte [] CATALOG_FAMILY = Bytes.toBytes(CATALOG_FAMILY_STR);
+ 
++  /** The RegionInfo qualifier as a string */
++  public static final String REGIONINFO_QUALIFIER_STR = "regioninfo";
++  
+   /** The regioninfo column qualifier */
+-  public static final byte [] REGIONINFO_QUALIFIER = Bytes.toBytes("regioninfo");
+-
++  public static final byte [] REGIONINFO_QUALIFIER = 
++	  Bytes.toBytes(REGIONINFO_QUALIFIER_STR);
++  
+   /** The server column qualifier */
+   public static final byte [] SERVER_QUALIFIER = Bytes.toBytes("server");
+ 
+diff --git a/src/main/java/org/apache/hadoop/hbase/client/HTable.java b/src/main/java/org/apache/hadoop/hbase/client/HTable.java
+index 1d96cbb..f9003c1 100644
+--- a/src/main/java/org/apache/hadoop/hbase/client/HTable.java
++++ b/src/main/java/org/apache/hadoop/hbase/client/HTable.java
+@@ -393,8 +393,8 @@ public class HTable implements HTableInterface, Closeable {
+         byte [] bytes = rowResult.getValue(HConstants.CATALOG_FAMILY,
+           HConstants.REGIONINFO_QUALIFIER);
+         if (bytes == null) {
+-          LOG.warn("Null " + HConstants.REGIONINFO_QUALIFIER + " cell in " +
+-            rowResult);
++          LOG.warn("Null " + HConstants.REGIONINFO_QUALIFIER_STR +
++        		  " cell in " + rowResult);
+           return true;
+         }
+         HRegionInfo info = Writables.getHRegionInfo(bytes);
+-- 
+1.7.0.4
+

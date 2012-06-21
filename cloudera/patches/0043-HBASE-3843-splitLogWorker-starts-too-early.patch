@@ -1,0 +1,43 @@
+From ca8b45e27273bdf31a0739af37b383f124503138 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 10 Nov 2011 02:15:40 -0800
+Subject: [PATCH 043/101] HBASE-3843 splitLogWorker starts too early
+
+Reason: Bug
+Author: Prakash Khemani
+Ref: CDH-3791
+---
+ .../hadoop/hbase/regionserver/HRegionServer.java   |   10 +++++-----
+ 1 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+index 74c277c..17a393e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+@@ -506,11 +506,6 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+     this.catalogTracker = new CatalogTracker(this.zooKeeper, this.conf,
+       this, this.conf.getInt("hbase.regionserver.catalog.timeout", Integer.MAX_VALUE));
+     catalogTracker.start();
+-
+-    // Create the log splitting worker and start it
+-    this.splitLogWorker = new SplitLogWorker(this.zooKeeper,
+-        this.getConfiguration(), this.getServerName());
+-    splitLogWorker.start();
+   }
+ 
+   /**
+@@ -1328,6 +1323,11 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+     // Start Server.  This service is like leases in that it internally runs
+     // a thread.
+     this.server.start();
++
++    // Create the log splitting worker and start it
++    this.splitLogWorker = new SplitLogWorker(this.zooKeeper,
++        this.getConfiguration(), this.getServerName().toString());
++    splitLogWorker.start();
+   }
+ 
+   /*
+-- 
+1.7.0.4
+

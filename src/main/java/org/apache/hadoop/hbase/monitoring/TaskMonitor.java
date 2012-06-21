@@ -73,7 +73,9 @@ public class TaskMonitor {
         new PassthroughInvocationHandler<MonitoredTask>(stat));
 
     TaskAndWeakRefPair pair = new TaskAndWeakRefPair(stat, proxy);
-    tasks.add(pair);
+    synchronized (this) {
+      tasks.add(pair);
+    }
     return proxy;
   }
   
@@ -125,7 +127,7 @@ public class TaskMonitor {
   public void dumpAsText(PrintWriter out) {
     long now = System.currentTimeMillis();
     
-    List<MonitoredTask> tasks = TaskMonitor.get().getTasks();
+    List<MonitoredTask> tasks = getTasks();
     for (MonitoredTask task : tasks) {
       out.println("Task: " + task.getDescription());
       out.println("Status: " + task.getState() + ":" + task.getStatus());

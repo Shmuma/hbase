@@ -140,7 +140,6 @@ public class FSUtils {
   /**
    * Check whether dfs is in safemode. 
    * @param conf 
-   * @return true if dfs is in safemode.
    * @throws IOException
    */
   public static void checkDfsSafeMode(final Configuration conf) 
@@ -620,33 +619,37 @@ public class FSUtils {
   }
 
   /**
-   * Heuristic to determine whether is safe or not to open a file for append
-   * Looks both for dfs.support.append and use reflection to search
-   * for SequenceFile.Writer.syncFs() or FSDataOutputStream.hflush()
-   * @param conf
-   * @return True if append support
+   * Heuristic to determine whether is safe or not to open a file for sync
+   * Uses reflection to search for SequenceFile.Writer.syncFs()
+   * @return True if sync is supported
    */
-  public static boolean isAppendSupported(final Configuration conf) {
-    boolean append = conf.getBoolean("dfs.support.append", false);
-    if (append) {
-      try {
-        // TODO: The implementation that comes back when we do a createWriter
-        // may not be using SequenceFile so the below is not a definitive test.
-        // Will do for now (hdfs-200).
-        SequenceFile.Writer.class.getMethod("syncFs", new Class<?> []{});
-        append = true;
-      } catch (SecurityException e) {
-      } catch (NoSuchMethodException e) {
-        append = false;
-      }
-    } else {
-      try {
-        FSDataOutputStream.class.getMethod("hflush", new Class<?> []{});
-      } catch (NoSuchMethodException e) {
-        append = false;
-      }
+  public static boolean isSyncSupported() {
+    boolean sync = true;
+    try {
+      // TODO: The implementation that comes back when we do a createWriter
+      // may not be using SequenceFile so the below is not a definitive test.
+      // Will do for now (hdfs-200).
+      SequenceFile.Writer.class.getMethod("syncFs", new Class<?> []{});
+    } catch (SecurityException e) {
+    } catch (NoSuchMethodException e) {
+      sync = false;
     }
-    return append;
+    return sync;
+  }
+
+  /**
+   * Heuristic to determine whether is safe or not to open a file for hflush
+   * Uses reflection to search for FSDataOutputStream.hflush()
+   * @return True if hflush is supported
+   */
+  public static boolean isHflushSupported() {
+    boolean hflush = true;
+    try {
+      FSDataOutputStream.class.getMethod("hflush", new Class<?> []{});
+    } catch (NoSuchMethodException e) {
+      hflush = false;
+    }
+    return hflush;
   }
 
   /**
@@ -667,10 +670,10 @@ public class FSUtils {
    * @param append True if append supported
    * @throws IOException
    */
-  public static void recoverFileLease(final FileSystem fs, final Path p, Configuration conf)
+  public static void recoverFileLease(final FileSystem fs, final Path p)
   throws IOException{
-    if (!isAppendSupported(conf)) {
-      LOG.warn("Running on HDFS without append enabled may result in data loss");
+    if (!isSyncSupported() && !isHflushSupported()) {
+      LOG.warn("Running on HDFS without sync or hflush enabled may result in data loss");
       return;
     }
     // lease recovery not needed for local file system case.

@@ -1,0 +1,83 @@
+From e0fe902b4b65828666fcd8e3010df617d0e9728a Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 10 Nov 2011 09:04:21 -0800
+Subject: [PATCH 047/101] HBASE-4685 TestDistributedLogSplitting.testOrphanLogCreation failing because of ArithmeticException: / by zero.
+
+Reason: Bug
+Author: Michael Stack
+Ref: CDH-3791
+---
+ .../hbase/master/TestDistributedLogSplitting.java  |   35 ++++++++-----------
+ 1 files changed, 15 insertions(+), 20 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+index 6f718f1..e1be89d 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+@@ -23,7 +23,6 @@ import static org.apache.hadoop.hbase.zookeeper.ZKSplitLog.Counters.*;
+ 
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertTrue;
+-import static org.junit.Assert.fail;
+ 
+ import java.io.IOException;
+ import java.util.Iterator;
+@@ -257,7 +256,6 @@ public class TestDistributedLogSplitting {
+ 
+     installTable(new ZooKeeperWatcher(conf, "table-creation", null),
+         "table", "family", 40);
+-    byte[] table = Bytes.toBytes("table");
+     makeHLog(hrs.getWAL(), hrs.getOnlineRegions(), "table",
+         NUM_LOG_LINES, 100);
+ 
+@@ -360,20 +358,22 @@ public class TestDistributedLogSplitting {
+     int n = hris.size();
+     int[] counts = new int[n];
+     int j = 0;
+-    for (int i = 0; i < num_edits; i += 1) {
+-      WALEdit e = new WALEdit();
+-      byte [] row = Bytes.toBytes("r" + Integer.toString(i));
+-      byte [] family = Bytes.toBytes("f");
+-      byte [] qualifier = Bytes.toBytes("c" + Integer.toString(i));
+-      e.add(new KeyValue(row, family, qualifier,
+-          System.currentTimeMillis(), value));
+-      // LOG.info("Region " + i + ": " + e);
+-      j++;
+-      log.append(hris.get(j % n), table, e, System.currentTimeMillis());
+-      counts[j % n] += 1;
+-      // if ((i % 8096) == 0) {
++    if (n > 0) {
++      for (int i = 0; i < num_edits; i += 1) {
++        WALEdit e = new WALEdit();
++        byte [] row = Bytes.toBytes("r" + Integer.toString(i));
++        byte [] family = Bytes.toBytes("f");
++        byte [] qualifier = Bytes.toBytes("c" + Integer.toString(i));
++        e.add(new KeyValue(row, family, qualifier,
++            System.currentTimeMillis(), value));
++        // LOG.info("Region " + i + ": " + e);
++        j++;
++        log.append(hris.get(j % n), table, e, System.currentTimeMillis());
++        counts[j % n] += 1;
++        // if ((i % 8096) == 0) {
+         // log.sync();
+-      //  }
++        //  }
++      }
+     }
+     log.sync();
+     log.close();
+@@ -400,11 +400,6 @@ public class TestDistributedLogSplitting {
+     master.assignmentManager.waitUntilNoRegionsInTransition(60000);
+   }
+ 
+-  private void blockUntilRIT(ZooKeeperWatcher zkw)
+-  throws KeeperException, InterruptedException {
+-    ZKAssign.blockUntilRIT(zkw);
+-  }
+-
+   private void putData(HRegion region, byte[] startRow, int numRows, byte [] qf,
+       byte [] ...families)
+   throws IOException {
+-- 
+1.7.0.4
+

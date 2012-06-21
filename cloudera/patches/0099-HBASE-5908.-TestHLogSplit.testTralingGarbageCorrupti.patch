@@ -1,0 +1,44 @@
+From 33228bf4fe4b87d4b55a637c2a4d851539a3b258 Mon Sep 17 00:00:00 2001
+From: Gregory Chanan <gchanan@cloudera.com>
+Date: Mon, 30 Apr 2012 21:36:37 -0700
+Subject: [PATCH 099/101] HBASE-5908. TestHLogSplit.testTralingGarbageCorruptionFileSkipErrorsPasses should not use append to corrupt the HLog. Contributed by Gregory Chanan.
+
+Reason: Bug
+Author: Gregory Chanan
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1332492 13f79535-47bb-0310-9956-ffa450edef68
+
+Conflicts:
+
+	CHANGES.txt
+---
+ .../hbase/regionserver/wal/TestHLogSplit.java      |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
+index a92c7f4..c30af2a 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
+@@ -116,8 +116,6 @@ public class TestHLogSplit {
+   @BeforeClass
+   public static void setUpBeforeClass() throws Exception {
+     TEST_UTIL.getConfiguration().
+-            setBoolean("dfs.support.append", true);
+-    TEST_UTIL.getConfiguration().
+             setStrings("hbase.rootdir", hbaseDir.toString());
+     TEST_UTIL.getConfiguration().
+             setClass("hbase.regionserver.hlog.writer.impl",
+@@ -1225,7 +1223,9 @@ public class TestHLogSplit {
+ 
+     switch (corruption) {
+       case APPEND_GARBAGE:
+-        out = fs.append(path);
++        fs.delete(path, false);
++        out = fs.create(path);
++        out.write(corrupted_bytes);
+         out.write("-----".getBytes());
+         closeOrFlush(close, out);
+         break;
+-- 
+1.7.0.4
+

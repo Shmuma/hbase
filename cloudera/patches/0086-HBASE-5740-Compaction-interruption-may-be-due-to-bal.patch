@@ -1,0 +1,42 @@
+From df4f7131a89a9b0cfb0d1d80c63c58bcfbe2ded8 Mon Sep 17 00:00:00 2001
+From: Michael Stack <stack@apache.org>
+Date: Mon, 9 Apr 2012 22:58:19 +0000
+Subject: [PATCH 086/101] HBASE-5740 Compaction interruption may be due to balacing
+
+Reason: Bug
+Author: Michael Stack, Jimmy Xiang
+Ref: CDH-4963
+---
+ .../apache/hadoop/hbase/regionserver/HRegion.java  |    2 +-
+ .../apache/hadoop/hbase/regionserver/Store.java    |    2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index c8463f0..d179499 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -825,7 +825,7 @@ public class HRegion implements HeapSize { // , Writable{
+           }
+           completed = true;
+         } catch (InterruptedIOException iioe) {
+-          LOG.info("compaction interrupted by user: ", iioe);
++          LOG.info("compaction interrupted: ", iioe);
+         } finally {
+           long now = EnvironmentEdgeManager.currentTimeMillis();
+           LOG.info(((completed) ? "completed" : "aborted")
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java b/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
+index ab7457d..d011d63 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
+@@ -1008,7 +1008,7 @@ public class Store implements HeapSize {
+                     throw new InterruptedIOException(
+                         "Aborting compaction of store " + this +
+                         " in region " + this.region +
+-                        " because user requested stop.");
++                        " because it was interrupted.");
+                   }
+                 }
+               }
+-- 
+1.7.0.4
+

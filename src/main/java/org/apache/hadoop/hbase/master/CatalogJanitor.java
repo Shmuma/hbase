@@ -102,26 +102,7 @@ class CatalogJanitor extends Chore {
     // Keep Map of found split parents.  There are candidates for cleanup.
     // Use a comparator that has split parents come before its daughters.
     final Map<HRegionInfo, Result> splitParents =
-      new TreeMap<HRegionInfo, Result>(new Comparator<HRegionInfo> () {
-        @Override
-        public int compare(HRegionInfo left, HRegionInfo right) {
-          // This comparator differs from the one HRegionInfo in that it sorts
-          // parent before daughters.
-          if (left == null) return -1;
-          if (right == null) return 1;
-          // Same table name.
-          int result = Bytes.compareTo(left.getTableDesc().getName(),
-            right.getTableDesc().getName());
-          if (result != 0) return result;
-          // Compare start keys.
-          result = Bytes.compareTo(left.getStartKey(), right.getStartKey());
-          if (result != 0) return result;
-          // Compare end keys.
-          result = Bytes.compareTo(left.getEndKey(), right.getEndKey());
-          if (result != 0) return -result; // Flip the result so parent comes first.
-          return result;
-        }
-      });
+      new TreeMap<HRegionInfo, Result>(new SplitParentFirstComparator());
     // This visitor collects split parents and counts rows in the .META. table
     MetaReader.Visitor visitor = new MetaReader.Visitor() {
       @Override
@@ -148,6 +129,31 @@ class CatalogJanitor extends Chore {
     } else if (LOG.isDebugEnabled()) {
       LOG.debug("Scanned " + count.get() + " catalog row(s) and gc'd " + cleaned +
       " unreferenced parent region(s)");
+    }
+  }
+
+  /**
+   * Compare HRegionInfos in a way that has split parents sort BEFORE their
+   * daughters.
+   */
+  static class SplitParentFirstComparator implements Comparator<HRegionInfo> {
+    @Override
+    public int compare(HRegionInfo left, HRegionInfo right) {
+      // This comparator differs from the one HRegionInfo in that it sorts
+      // parent before daughters.
+      if (left == null) return -1;
+      if (right == null) return 1;
+      // Same table name.
+      int result = Bytes.compareTo(left.getTableDesc().getName(),
+        right.getTableDesc().getName());
+      if (result != 0) return result;
+      // Compare start keys.
+      result = Bytes.compareTo(left.getStartKey(), right.getStartKey());
+      if (result != 0) return result;
+      // Compare end keys.
+      result = Bytes.compareTo(left.getEndKey(), right.getEndKey());
+      if (result != 0) return -result; // Flip the result so parent comes first.
+      return result;
     }
   }
 
@@ -192,7 +198,9 @@ class CatalogJanitor extends Chore {
     if (hasNoReferences(a) && hasNoReferences(b)) {
       LOG.debug("Deleting region " + parent.getRegionNameAsString() +
         " because daughter splits no longer hold references");
+	  // wipe out daughter references from parent region
       removeDaughtersFromParent(parent);
+
       // This latter regionOffline should not be necessary but is done for now
       // until we let go of regionserver to master heartbeats.  See HBASE-3368.
       if (this.services.getAssignmentManager() != null) {
@@ -235,8 +243,7 @@ class CatalogJanitor extends Chore {
   }
 
   /**
-   * Remove mention of daughter from parent row.
-   * parent row.
+   * Remove mention of daughters from parent row.
    * @param parent
    * @throws IOException
    */

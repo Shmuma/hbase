@@ -71,9 +71,9 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
  */
 public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable, KeyValue> {
   static Log LOG = LogFactory.getLog(HFileOutputFormat.class);
-  static final String COMPRESSION_CONF_KEY = "hbase.hfileoutputformat.families.compression";
   TimeRangeTracker trt = new TimeRangeTracker();
 
+  static final String COMPRESSION_CONF_KEY = "hbase.hfileoutputformat.families.compression";
   public RecordWriter<ImmutableBytesWritable, KeyValue> getRecordWriter(final TaskAttemptContext context)
   throws IOException, InterruptedException {
     // Get the path of the temporary output file

@@ -1,0 +1,102 @@
+From 5ebdbfd89575d7d84d356df1db4fd59adb3d1aa9 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 10 Nov 2011 07:45:37 -0800
+Subject: [PATCH 045/101] HBASE-3889  NPE in Distributed Log Splitting
+
+Reason: Bug
+Author: Anirudh Todi
+Ref: CDH-3791
+---
+ .../hadoop/hbase/regionserver/SplitLogWorker.java  |   10 +++++-
+ .../hbase/regionserver/wal/TestHLogSplit.java      |   32 ++++++++++++++++++-
+ 2 files changed, 38 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java b/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java
+index e9d0f0a..a476cee 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java
+@@ -136,6 +136,7 @@ public class SplitLogWorker extends ZooKeeperListener implements Runnable {
+ 
+   @Override
+   public void run() {
++   try {
+     LOG.info("SplitLogWorker " + this.serverName + " starting");
+     this.watcher.registerListener(this);
+     int res;
+@@ -162,8 +163,13 @@ public class SplitLogWorker extends ZooKeeperListener implements Runnable {
+     }
+ 
+     taskLoop();
+-
+-    LOG.info("SplitLogWorker " + this.serverName + " exiting");
++   } catch (Throwable t) {
++	   // only a logical error can cause here. Printing it out 
++	   // to make debugging easier
++	   LOG.error("unexpected error ", t);
++   } finally {
++	   LOG.info("SplitLogWorker " + this.serverName + " exiting");
++   }
+   }
+ 
+   /**
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
+index fad9eb0..f333faa 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
+@@ -157,7 +157,8 @@ public class TestHLogSplit {
+    * @throws IOException
+    * @see https://issues.apache.org/jira/browse/HBASE-3020
+    */
+-  @Test public void testRecoveredEditsPathForMeta() throws IOException {
++  @Test 
++  public void testRecoveredEditsPathForMeta() throws IOException {
+     FileSystem fs = FileSystem.get(TEST_UTIL.getConfiguration());
+     byte [] encoded = HRegionInfo.FIRST_META_REGIONINFO.getEncodedNameAsBytes();
+     Path tdir = new Path(hbaseDir, Bytes.toString(HConstants.META_TABLE_NAME));
+@@ -1010,7 +1011,35 @@ public class TestHLogSplit {
+ 
+     assertEquals(true, logsAreEqual(originalLog, splitLog));
+   }
++  
++  @Test
++  public void testSplitLogFileDeletedRegionDir()
++  throws IOException {
++	LOG.info("testSplitLogFileDeletedRegionDir");
++	final String REGION = "region__1";
++    regions.removeAll(regions);
++    regions.add(REGION);
++
++
++    generateHLogs(1, 10, -1);
++    FileStatus logfile = fs.listStatus(hlogDir)[0];
++    fs.initialize(fs.getUri(), conf);
++    
++    Path regiondir = new Path(tabledir, REGION);
++    LOG.info("Region directory is" + regiondir);
++    fs.delete(regiondir, true);
++    
++    HLogSplitter.splitLogFileToTemp(hbaseDir, "tmpdir", logfile, fs,
++        conf, reporter);
++    HLogSplitter.moveRecoveredEditsFromTemp("tmpdir", hbaseDir, oldLogDir,
++        logfile.getPath().toString(), conf);
++    
++    assertTrue(!fs.exists(regiondir));
++    assertTrue(true);
++  }
+ 
++  
++  
+   @Test
+   public void testSplitLogFileEmpty() throws IOException {
+     LOG.info("testSplitLogFileEmpty");
+@@ -1068,7 +1097,6 @@ public class TestHLogSplit {
+     assertEquals(1, fs.listStatus(corruptDir).length);
+   }
+ 
+-
+   private void flushToConsole(String s) {
+     System.out.println(s);
+     System.out.flush();
+-- 
+1.7.0.4
+

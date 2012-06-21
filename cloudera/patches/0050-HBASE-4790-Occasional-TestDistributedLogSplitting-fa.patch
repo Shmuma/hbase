@@ -1,0 +1,46 @@
+From 50d4569ec42a34f4bac54cf02906a0397586b649 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Mon, 14 Nov 2011 22:51:07 -0800
+Subject: [PATCH 050/101] HBASE-4790  Occasional TestDistributedLogSplitting failure (Jinchao)
+
+Reason: Enhancement
+Authot: Jinchao Gao
+Ref: CDH-3791
+---
+ .../hbase/master/TestDistributedLogSplitting.java  |   16 +++++++++++-----
+ 1 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+index e1be89d..23aa337 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+@@ -201,15 +201,21 @@ public class TestDistributedLogSplitting {
+     FileSystem fs = master.getMasterFileSystem().getFileSystem();
+ 
+     List<RegionServerThread> rsts = cluster.getLiveRegionServerThreads();
+-    HRegionServer hrs = rsts.get(0).getRegionServer();
++    
+     Path rootdir = FSUtils.getRootDir(conf);
+-    final Path logDir = new Path(rootdir,
+-        HLog.getHLogDirectoryName(hrs.getServerName()));
+-
+     installTable(new ZooKeeperWatcher(conf, "table-creation", null),
+         "table", "family", 40);
+     byte[] table = Bytes.toBytes("table");
+-    List<HRegionInfo> regions = hrs.getOnlineRegions();
++    List<HRegionInfo> regions = null;
++    HRegionServer hrs = null;
++    for (int i = 0; i < NUM_RS; i++) {
++      hrs = rsts.get(i).getRegionServer();
++      regions = hrs.getOnlineRegions();
++      if (regions.size() != 0) break;
++    }
++    final Path logDir = new Path(rootdir, HLog.getHLogDirectoryName(hrs
++        .getServerName().toString()));
++    
+     LOG.info("#regions = " + regions.size());
+     Iterator<HRegionInfo> it = regions.iterator();
+     while (it.hasNext()) {
+-- 
+1.7.0.4
+

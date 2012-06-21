@@ -1,0 +1,392 @@
+From e03436b9633ad19a5359a3c8e1c32fb4d98fc33b Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Thu, 15 Dec 2011 12:24:54 -0800
+Subject: [PATCH 058/101] HBASE-5006 Move hbase 0.92RC1 on to hadoop 1.0.0RC2
+
+Although the title doesn't explicitly say it, this backport fixes tests broken when HBASE-2312 and
+HADOOP-6840 introduced createNonRecursive call.
+
+Reason: Bug
+Author: Michael Stack
+Ref: CDH-3816
+---
+ .../apache/hadoop/hbase/regionserver/wal/HLog.java |    2 +-
+ .../hadoop/hbase/regionserver/TestHRegion.java     |  221 ++++++++++----------
+ .../hadoop/hbase/regionserver/TestStore.java       |   19 ++-
+ .../hbase/replication/TestReplicationSource.java   |   22 ++-
+ 4 files changed, 145 insertions(+), 119 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+index de44e96..90828db 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+@@ -673,7 +673,7 @@ public class HLog implements Syncable {
+       writer.init(fs, path, conf);
+       return writer;
+     } catch (Exception e) {
+-      IOException ie = new IOException("cannot get log writer");
++      IOException ie = new IOException("cannot get log writer", e);
+       ie.initCause(e);
+       throw ie;
+     }
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java
+index 1e23b2f..4728d4e 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegion.java
+@@ -125,6 +125,118 @@ public class TestHRegion extends HBaseTestCase {
+   // /tmp/testtable
+   //////////////////////////////////////////////////////////////////////////////
+ 
++
++  public void testSkipRecoveredEditsReplay() throws Exception {
++    String method = "testSkipRecoveredEditsReplay";
++    byte[] tableName = Bytes.toBytes(method);
++    byte[] family = Bytes.toBytes("family");
++    Configuration conf = HBaseConfiguration.create();
++    initHRegion(tableName, method, conf, family);
++    Path regiondir = region.getRegionDir();
++    FileSystem fs = region.getFilesystem();
++    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
++
++    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
++
++    long maxSeqId = 1050;
++    long minSeqId = 1000;
++
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
++      fs.create(recoveredEdits);
++      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
++
++      long time = System.nanoTime();
++      WALEdit edit = new WALEdit();
++      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
++          time, KeyValue.Type.Put, Bytes.toBytes(i)));
++      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
++          i, time), edit));
++
++      writer.close();
++    }
++    MonitoredTask status = TaskMonitor.get().createStatus(method);
++    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId-1, null, status);
++    assertEquals(maxSeqId, seqId);
++    Get get = new Get(row);
++    Result result = region.get(get, null);
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
++      assertEquals(1, kvs.size());
++      assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
++    }
++  }
++
++  public void testSkipRecoveredEditsReplaySomeIgnored() throws Exception {
++    String method = "testSkipRecoveredEditsReplaySomeIgnored";
++    byte[] tableName = Bytes.toBytes(method);
++    byte[] family = Bytes.toBytes("family");
++    initHRegion(tableName, method, HBaseConfiguration.create(), family);
++    Path regiondir = region.getRegionDir();
++    FileSystem fs = region.getFilesystem();
++    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
++
++    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
++
++    long maxSeqId = 1050;
++    long minSeqId = 1000;
++
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
++      fs.create(recoveredEdits);
++      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
++
++      long time = System.nanoTime();
++      WALEdit edit = new WALEdit();
++      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
++          time, KeyValue.Type.Put, Bytes.toBytes(i)));
++      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
++          i, time), edit));
++
++      writer.close();
++    }
++    long recoverSeqId = 1030;
++    MonitoredTask status = TaskMonitor.get().createStatus(method);
++    long seqId = region.replayRecoveredEditsIfAny(regiondir, recoverSeqId-1, null, status);
++    assertEquals(maxSeqId, seqId);
++    Get get = new Get(row);
++    Result result = region.get(get, null);
++    for (long i = minSeqId; i <= maxSeqId; i += 10) {
++      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
++      if (i < recoverSeqId) {
++        assertEquals(0, kvs.size());
++      } else {
++        assertEquals(1, kvs.size());
++        assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
++      }
++    }
++  }
++
++  public void testSkipRecoveredEditsReplayAllIgnored() throws Exception {
++    String method = "testSkipRecoveredEditsReplayAllIgnored";
++    byte[] tableName = Bytes.toBytes(method);
++    byte[] family = Bytes.toBytes("family");
++    initHRegion(tableName, method, HBaseConfiguration.create(), family);
++    Path regiondir = region.getRegionDir();
++    FileSystem fs = region.getFilesystem();
++
++    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
++    for (int i = 1000; i < 1050; i += 10) {
++      Path recoveredEdits = new Path(
++          recoveredEditsDir, String.format("%019d", i));
++      FSDataOutputStream dos=  fs.create(recoveredEdits);
++      dos.writeInt(i);
++      dos.close();
++    }
++    long minSeqId = 2000;
++    Path recoveredEdits = new Path(
++        recoveredEditsDir, String.format("%019d", minSeqId-1));
++    FSDataOutputStream dos=  fs.create(recoveredEdits);
++    dos.close();
++    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId, null, null);
++    assertEquals(minSeqId, seqId);
++  }
++
+   public void testGetWhileRegionClose() throws IOException {
+     Configuration hc = initSplit();
+     int numRows = 100;
+@@ -2736,115 +2848,6 @@ public class TestHRegion extends HBaseTestCase {
+   }
+ 
+ 
+-  public void testSkipRecoveredEditsReplay() throws Exception {
+-    String method = "testSkipRecoveredEditsReplay";
+-    byte[] tableName = Bytes.toBytes(method);
+-    byte[] family = Bytes.toBytes("family");
+-    Configuration conf = HBaseConfiguration.create();
+-    initHRegion(tableName, method, conf, family);
+-    Path regiondir = region.getRegionDir();
+-    FileSystem fs = region.getFilesystem();
+-    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
+-
+-    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
+-
+-    long maxSeqId = 1050;
+-    long minSeqId = 1000;
+-
+-    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+-      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
+-      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
+-
+-      long time = System.nanoTime();
+-      WALEdit edit = new WALEdit();
+-      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
+-          time, KeyValue.Type.Put, Bytes.toBytes(i)));
+-      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
+-          i, time), edit));
+-
+-      writer.close();
+-    }
+-    MonitoredTask status = TaskMonitor.get().createStatus(method);
+-    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId-1, null, status);
+-    assertEquals(maxSeqId, seqId);
+-    Get get = new Get(row);
+-    Result result = region.get(get, null);
+-    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+-      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
+-      assertEquals(1, kvs.size());
+-      assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
+-    }
+-  }
+-
+-  public void testSkipRecoveredEditsReplaySomeIgnored() throws Exception {
+-    String method = "testSkipRecoveredEditsReplaySomeIgnored";
+-    byte[] tableName = Bytes.toBytes(method);
+-    byte[] family = Bytes.toBytes("family");
+-    initHRegion(tableName, method, HBaseConfiguration.create(), family);
+-    Path regiondir = region.getRegionDir();
+-    FileSystem fs = region.getFilesystem();
+-    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
+-
+-    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
+-
+-    long maxSeqId = 1050;
+-    long minSeqId = 1000;
+-
+-    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+-      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
+-      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
+-
+-      long time = System.nanoTime();
+-      WALEdit edit = new WALEdit();
+-      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
+-          time, KeyValue.Type.Put, Bytes.toBytes(i)));
+-      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
+-          i, time), edit));
+-
+-      writer.close();
+-    }
+-    long recoverSeqId = 1030;
+-    MonitoredTask status = TaskMonitor.get().createStatus(method);
+-    long seqId = region.replayRecoveredEditsIfAny(regiondir, recoverSeqId-1, null, status);
+-    assertEquals(maxSeqId, seqId);
+-    Get get = new Get(row);
+-    Result result = region.get(get, null);
+-    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+-      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
+-      if (i < recoverSeqId) {
+-        assertEquals(0, kvs.size());
+-      } else {
+-        assertEquals(1, kvs.size());
+-        assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
+-      }
+-    }
+-  }
+-
+-  public void testSkipRecoveredEditsReplayAllIgnored() throws Exception {
+-    String method = "testSkipRecoveredEditsReplayAllIgnored";
+-    byte[] tableName = Bytes.toBytes(method);
+-    byte[] family = Bytes.toBytes("family");
+-    initHRegion(tableName, method, HBaseConfiguration.create(), family);
+-    Path regiondir = region.getRegionDir();
+-    FileSystem fs = region.getFilesystem();
+-
+-    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
+-    for (int i = 1000; i < 1050; i += 10) {
+-      Path recoveredEdits = new Path(
+-          recoveredEditsDir, String.format("%019d", i));
+-      FSDataOutputStream dos=  fs.create(recoveredEdits);
+-      dos.writeInt(i);
+-      dos.close();
+-    }
+-    long minSeqId = 2000;
+-    Path recoveredEdits = new Path(
+-        recoveredEditsDir, String.format("%019d", minSeqId-1));
+-    FSDataOutputStream dos=  fs.create(recoveredEdits);
+-    dos.close();
+-    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId, null, null);
+-    assertEquals(minSeqId, seqId);
+-  }
+-
+   public void testIndexesScanWithOneDeletedRow() throws IOException {
+     byte[] tableName = Bytes.toBytes("testIndexesScanWithOneDeletedRow");
+     byte[] family = Bytes.toBytes("family");
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java
+index 585da2f..450057e 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java
+@@ -42,6 +42,7 @@ import org.apache.hadoop.fs.FileUtil;
+ import org.apache.hadoop.fs.FilterFileSystem;
+ import org.apache.hadoop.fs.LocalFileSystem;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+ import org.apache.hadoop.hbase.HBaseTestingUtility;
+ import org.apache.hadoop.hbase.HColumnDescriptor;
+@@ -56,8 +57,8 @@ import org.apache.hadoop.hbase.security.User;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
+-import org.apache.hadoop.hbase.util.IncrementingEnvironmentEdge;
+ import org.apache.hadoop.hbase.util.ManualEnvironmentEdge;
++import org.apache.hadoop.util.Progressable;
+ import org.mockito.Mockito;
+ 
+ import com.google.common.base.Joiner;
+@@ -524,6 +525,22 @@ public class TestStore extends TestCase {
+       return new FaultyOutputStream(super.create(p), faultPos);
+     }
+ 
++    @Override
++    public FSDataOutputStream create(Path f, FsPermission permission,
++        boolean overwrite, int bufferSize, short replication, long blockSize,
++        Progressable progress) throws IOException {
++      return new FaultyOutputStream(super.create(f, permission,
++          overwrite, bufferSize, replication, blockSize, progress), faultPos);
++    }
++
++    @Override
++    public FSDataOutputStream createNonRecursive(Path f, boolean overwrite,
++        int bufferSize, short replication, long blockSize, Progressable progress)
++    throws IOException {
++      // Fake it.  Call create instead.  The default implementation throws an IOE
++      // that this is not supported.
++      return create(f, overwrite, bufferSize, replication, blockSize, progress);
++    }
+   }
+ 
+   static class FaultyOutputStream extends FSDataOutputStream {
+diff --git a/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationSource.java b/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationSource.java
+index f019c93..ef0cc19 100644
+--- a/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationSource.java
++++ b/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationSource.java
+@@ -19,6 +19,9 @@
+  */
+ package org.apache.hadoop.hbase.replication;
+ 
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+@@ -33,7 +36,6 @@ import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
+ import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.junit.BeforeClass;
+-import org.junit.Ignore;
+ import org.junit.Test;
+ 
+ import static org.junit.Assert.assertNotNull;
+@@ -45,7 +47,7 @@ public class TestReplicationSource {
+       LogFactory.getLog(TestReplicationSource.class);
+   private final static HBaseTestingUtility TEST_UTIL =
+       new HBaseTestingUtility();
+-  private static FileSystem fs;
++  private static FileSystem FS;
+   private static Path oldLogDir;
+   private static Path logDir;
+   private static Configuration conf = HBaseConfiguration.create();
+@@ -56,11 +58,13 @@ public class TestReplicationSource {
+   @BeforeClass
+   public static void setUpBeforeClass() throws Exception {
+     TEST_UTIL.startMiniDFSCluster(1);
+-    fs = TEST_UTIL.getDFSCluster().getFileSystem();
+-    oldLogDir = new Path(fs.getHomeDirectory(),
++    FS = TEST_UTIL.getDFSCluster().getFileSystem();
++    oldLogDir = new Path(FS.getHomeDirectory(),
+         HConstants.HREGION_OLDLOGDIR_NAME);
+-    logDir = new Path(fs.getHomeDirectory(),
++    if (FS.exists(oldLogDir)) FS.delete(oldLogDir, true);
++    logDir = new Path(FS.getHomeDirectory(),
+         HConstants.HREGION_LOGDIR_NAME);
++    if (FS.exists(logDir)) FS.delete(logDir, true);
+   }
+ 
+   /**
+@@ -72,7 +76,9 @@ public class TestReplicationSource {
+   @Test
+   public void testLogMoving() throws Exception{
+     Path logPath = new Path(logDir, "log");
+-    HLog.Writer writer = HLog.createWriter(fs, logPath, conf);
++    if (!FS.exists(logDir)) FS.mkdirs(logDir);
++    if (!FS.exists(oldLogDir)) FS.mkdirs(oldLogDir);
++    HLog.Writer writer = HLog.createWriter(FS, logPath, conf);
+     for(int i = 0; i < 3; i++) {
+       byte[] b = Bytes.toBytes(Integer.toString(i));
+       KeyValue kv = new KeyValue(b,b,b);
+@@ -84,12 +90,12 @@ public class TestReplicationSource {
+     }
+     writer.close();
+ 
+-    HLog.Reader reader = HLog.getReader(fs, logPath, conf);
++    HLog.Reader reader = HLog.getReader(FS, logPath, conf);
+     HLog.Entry entry = reader.next();
+     assertNotNull(entry);
+ 
+     Path oldLogPath = new Path(oldLogDir, "log");
+-    fs.rename(logPath, oldLogPath);
++    FS.rename(logPath, oldLogPath);
+ 
+     entry = reader.next();
+     assertNotNull(entry);
+-- 
+1.7.0.4
+

@@ -1,0 +1,40 @@
+From 7d1e6dfc8ea5008cd5b896c713efc9a0c076d9c6 Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jmhsieh@apache.org>
+Date: Fri, 13 Apr 2012 06:44:53 +0000
+Subject: [PATCH 093/101] HBASE-5488 OfflineMetaRepair doesn't support hadoop 0.20's fs.default.name property (gaojinchao)
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1325628 13f79535-47bb-0310-9956-ffa450edef68
+
+Reason: Bug
+Author: Gaojinchao
+Ref: CDH-5570
+---
+ .../hadoop/hbase/util/hbck/OfflineMetaRepair.java  |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/util/hbck/OfflineMetaRepair.java b/src/main/java/org/apache/hadoop/hbase/util/hbck/OfflineMetaRepair.java
+index acf3f93..4789ddf 100644
+--- a/src/main/java/org/apache/hadoop/hbase/util/hbck/OfflineMetaRepair.java
++++ b/src/main/java/org/apache/hadoop/hbase/util/hbck/OfflineMetaRepair.java
+@@ -60,7 +60,10 @@ public class OfflineMetaRepair {
+ 
+     // create a fsck object
+     Configuration conf = HBaseConfiguration.create();
++    // Cover both bases, the old way of setting default fs and the new.
++    // We're supposed to run on 0.20 and 0.21 anyways.
+     conf.set("fs.defaultFS", conf.get(HConstants.HBASE_DIR));
++    conf.set("fs.default.name", conf.get(HConstants.HBASE_DIR));
+     HBaseFsck fsck = new HBaseFsck(conf);
+ 
+     // Process command-line args.
+@@ -74,6 +77,7 @@ public class OfflineMetaRepair {
+         String path = args[i];
+         conf.set(HConstants.HBASE_DIR, path);
+         conf.set("fs.defaultFS", conf.get(HConstants.HBASE_DIR));
++        conf.set("fs.default.name", conf.get(HConstants.HBASE_DIR));
+       } else {
+         String str = "Unknown command line option : " + cmd;
+         LOG.info(str);
+-- 
+1.7.0.4
+

@@ -1,0 +1,29 @@
+From bc5f693f0efd0da86f4b72f07d4477564f74dc69 Mon Sep 17 00:00:00 2001
+From: Himanshu <himanshu@cloudera.com>
+Date: Fri, 4 May 2012 09:04:10 -0600
+Subject: [PATCH 101/101] Revert CDH-4880 hbase shell: status 'detailed' errors
+ The changes done in the above JIRA are reverted because its corresponding patch, which was a backport of HBASE-3704, is also reverted.
+
+Reason: Backward Compatibility
+Author: Himanshu Vashishtha
+Ref: CDH-4880
+---
+ src/main/ruby/hbase/admin.rb |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/ruby/hbase/admin.rb b/src/main/ruby/hbase/admin.rb
+index 4ab2bde..9151de9 100644
+--- a/src/main/ruby/hbase/admin.rb
++++ b/src/main/ruby/hbase/admin.rb
+@@ -320,7 +320,7 @@ module Hbase
+             [ server.getServerAddress().getHostname(),  \
+               server.getServerAddress().getPort(), server.getStartCode() ])
+           puts("        %s" % [ server.getLoad().toString() ])
+-          for name, region in server.getLoad().getRegionsLoad()
++          for region in server.getLoad().getRegionsLoad()
+             puts("        %s" % [ region.getNameAsString() ])
+             puts("            %s" % [ region.toString() ])
+           end
+-- 
+1.7.0.4
+

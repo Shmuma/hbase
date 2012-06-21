@@ -1,0 +1,48 @@
+From 9573a361dcddba14f2ff1728dfff2c67c667cb75 Mon Sep 17 00:00:00 2001
+From: Himanshu <himanshu@cloudera.com>
+Date: Mon, 30 Apr 2012 17:55:50 -0600
+Subject: [PATCH 098/101] CDH-5523 -ROOT- region goes offline during HBase rolling upgrade
+ This is undoing the backport of HBase-5490 from cdh3u4 which is breaking the rolling restart between cdh3u3 and cdh3u4.
+ Upstream is ok with this patch as they don't have HBase-4287 in 0.90.4 branch, and hence they are ok with the enum state at the bottom.
+
+Bottom line is that the ordinality of M_ZK_REGION_OFFLINE should be same between the minor versions.
+---
+ .../apache/hadoop/hbase/executor/EventHandler.java |   13 +++++++------
+ 1 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java b/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java
+index 90db682..5452ebb 100644
+--- a/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/executor/EventHandler.java
+@@ -108,6 +108,11 @@ public abstract class EventHandler implements Runnable, Comparable<Runnable> {
+     RS_ZK_REGION_OPENING      (3),   // RS is in process of opening a region
+     RS_ZK_REGION_OPENED       (4),   // RS has finished opening a region
+ 
++    // Moving above to keep in sync with cdh3u3, to avoid rolling restart issues.
++    // The integer passed in the constructor is not getting used while
++    // serialization; its the ordinal of the enum that matters.
++    RS_ZK_REGION_FAILED_OPEN(73), // RS failed to open a region 
++
+     // Messages originating from Master to RS
+     M_RS_OPEN_REGION          (20),  // Master asking RS to open a region
+     M_RS_OPEN_ROOT            (21),  // Master asking RS to open root
+@@ -131,14 +136,10 @@ public abstract class EventHandler implements Runnable, Comparable<Runnable> {
+ 
+     // Master controlled events to be executed on the master
+     M_SERVER_SHUTDOWN         (70),  // Master is processing shutdown of a RS
+-    M_META_SERVER_SHUTDOWN(72), // Master is processing shutdown of RS hosting a
++    M_META_SERVER_SHUTDOWN(72); // Master is processing shutdown of RS hosting a
+                                 // meta region (-ROOT- or .META.).
+     
+-    // Moving to the last to avoid rolling restart issues
+-    // The integer passed in the constructor is not getting used while
+-    // serialization.
+-    RS_ZK_REGION_FAILED_OPEN(73); // RS failed to open a region
+-
++ 
+     /**
+      * Constructor
+      */
+-- 
+1.7.0.4
+

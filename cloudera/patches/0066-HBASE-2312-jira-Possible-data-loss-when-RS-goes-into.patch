@@ -1,0 +1,28 @@
+From 8443bbb54af4e0d07608087a1f56b2cf50df600d Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 28 Dec 2011 19:05:01 -0800
+Subject: [PATCH 066/101] HBASE-2312 [jira] Possible data loss when RS goes into GC pause while rolling HLog, backport error fixed.
+
+    Reason: Bug
+    Author: Nicolas Spiegelberg
+    Ref: CDH-4011
+---
+ .../hadoop/hbase/master/MasterFileSystem.java      |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+index 7a7c94b..b484a72 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+@@ -192,7 +192,7 @@ public class MasterFileSystem {
+           if (sn.endsWith(HLog.SPLITTING_EXT)) {
+             sn = sn.substring(0, sn.length() - HLog.SPLITTING_EXT.length());
+           }
+-          String serverName = status.getPath().getName();
++          String serverName = sn;
+           if (!onlineServers.keySet().contains(serverName)) {
+             LOG.info("Log folder " + status.getPath() + " doesn't belong "
+                 + "to a known region server, splitting");
+-- 
+1.7.0.4
+

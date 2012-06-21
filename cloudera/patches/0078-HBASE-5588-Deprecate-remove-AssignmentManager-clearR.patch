@@ -1,0 +1,74 @@
+From dfda62d85f0738f3b28c9dd12fde4ccc01341f7c Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jmhsieh@apache.org>
+Date: Sat, 17 Mar 2012 07:28:13 +0000
+Subject: [PATCH 078/101] HBASE-5588 Deprecate/remove AssignmentManager#clearRegionFromTransition
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1301880 13f79535-47bb-0310-9956-ffa450edef68
+
+Reason: hbck prerequisite
+Author: Jonathan Hsieh
+Ref: CDH-4040
+---
+ .../hadoop/hbase/master/AssignmentManager.java     |    9 +++++----
+ .../org/apache/hadoop/hbase/master/HMaster.java    |    4 ++--
+ 2 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index 0f3275c..eb6f949 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -123,7 +123,7 @@ public class AssignmentManager extends ZooKeeperListener {
+    * Server to regions assignment map.
+    * Contains the set of regions currently assigned to a given server.
+    * This Map and {@link #regions} are tied.  Always update this in tandem
+-   * with the other under a lock on {@link #regions}
++   * with the other under a lock on {@link #regions}.
+    * @see #regions
+    */
+   private final NavigableMap<HServerInfo, Set<HRegionInfo>> servers =
+@@ -133,7 +133,7 @@ public class AssignmentManager extends ZooKeeperListener {
+    * Region to server assignment map.
+    * Contains the server a given region is currently assigned to.
+    * This Map and {@link #servers} are tied.  Always update this in tandem
+-   * with the other under a lock on {@link #regions}
++   * with the other under a lock on {@link #regions}.
+    * @see #servers
+    */
+   private final SortedMap<HRegionInfo,HServerInfo> regions =
+@@ -1853,8 +1853,9 @@ public class AssignmentManager extends ZooKeeperListener {
+   /**
+    * Clears the specified region from being in transition.
+    * <p>
+-   * Used only by HBCK tool.
+-   * @param hri
++   * @param hri Region to remove.
++   * @deprecated This is a dupe of {@link #regionOffline(HRegionInfo)}.
++   *   Please use that method instead.
+    */
+   public void clearRegionFromTransition(HRegionInfo hri) {
+     synchronized (this.regionsInTransition) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index c132826..bdf0baa 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -1028,7 +1028,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+ 
+   public void clearFromTransition(HRegionInfo hri) {
+     if (this.assignmentManager.isRegionInTransition(hri) != null) {
+-      this.assignmentManager.clearRegionFromTransition(hri);
++      this.assignmentManager.regionOffline(hri);
+     }
+   }
+   /**
+@@ -1151,7 +1151,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+     if (pair == null) throw new UnknownRegionException(Bytes.toStringBinary(regionName));
+     HRegionInfo hri = pair.getFirst();
+     if (force) {
+-      this.assignmentManager.clearRegionFromTransition(hri);
++      this.assignmentManager.regionOffline(hri);
+       assignRegion(hri);
+     } else {
+       this.assignmentManager.unassign(hri, force);
+-- 
+1.7.0.4
+

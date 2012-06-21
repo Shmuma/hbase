@@ -1,0 +1,27 @@
+From d0d53b6ef2a499625f6c9508f417162a038c063c Mon Sep 17 00:00:00 2001
+From: Zhihong Yu <tedyu@apache.org>
+Date: Tue, 15 Nov 2011 17:13:33 +0000
+Subject: [PATCH 052/101] HBASE-4790  Occasional TestDistributedLogSplitting failure (Jinchao)
+
+Reason: Enhancement
+Author: Jinchao
+Ref: CDH-3791
+---
+ .../hbase/master/TestDistributedLogSplitting.java  |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+index 23aa337..ea77ade 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+@@ -203,6 +203,7 @@ public class TestDistributedLogSplitting {
+     List<RegionServerThread> rsts = cluster.getLiveRegionServerThreads();
+     
+     Path rootdir = FSUtils.getRootDir(conf);
++
+     installTable(new ZooKeeperWatcher(conf, "table-creation", null),
+         "table", "family", 40);
+     byte[] table = Bytes.toBytes("table");
+-- 
+1.7.0.4
+

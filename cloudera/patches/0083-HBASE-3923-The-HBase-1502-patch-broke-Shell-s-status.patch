@@ -1,0 +1,29 @@
+From e252984e2ead899ab10c75ed8835258b5d974458 Mon Sep 17 00:00:00 2001
+From: Himanshu <himanshu@cloudera.com>
+Date: Thu, 5 Apr 2012 21:58:10 -0600
+Subject: [PATCH 083/101] HBASE-3923 The HBase-1502 patch  broke Shell's status 'simple' and 'detailed' commands
+
+Reason: Bug
+Author: Lars H
+Ref: CDH-4880
+Files modified:   src/main/ruby/hbase/admin.rb
+---
+ src/main/ruby/hbase/admin.rb |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/ruby/hbase/admin.rb b/src/main/ruby/hbase/admin.rb
+index 9151de9..4ab2bde 100644
+--- a/src/main/ruby/hbase/admin.rb
++++ b/src/main/ruby/hbase/admin.rb
+@@ -320,7 +320,7 @@ module Hbase
+             [ server.getServerAddress().getHostname(),  \
+               server.getServerAddress().getPort(), server.getStartCode() ])
+           puts("        %s" % [ server.getLoad().toString() ])
+-          for region in server.getLoad().getRegionsLoad()
++          for name, region in server.getLoad().getRegionsLoad()
+             puts("        %s" % [ region.getNameAsString() ])
+             puts("            %s" % [ region.toString() ])
+           end
+-- 
+1.7.0.4
+

@@ -14,12 +14,12 @@
           and 10 in terms of indexes, etc, held by the RegionServer.</p></li></ul></div><p>Its probably best to stick to the default, perhaps going smaller
       for hot tables (or manually split hot regions to spread the load over
       the cluster), or go with a 1GB region size if your cell sizes tend to be
-      largish (100k and up).</p></div><div class="section" title="12.3.2.&nbsp;Region Splits"><div class="titlepage"><div><div><h3 class="title"><a name="d0e3182"></a>12.3.2.&nbsp;Region Splits</h3></div></div></div><p>Splits run unaided on the RegionServer; i.e. the Master does not
+      largish (100k and up).</p></div><div class="section" title="12.3.2.&nbsp;Region Splits"><div class="titlepage"><div><div><h3 class="title"><a name="d246e3222"></a>12.3.2.&nbsp;Region Splits</h3></div></div></div><p>Splits run unaided on the RegionServer; i.e. the Master does not
         participate. The RegionServer splits a region, offlines the split
         region and then adds the daughter regions to META, opens daughters on
         the parent's hosting RegionServer and then reports the split to the
         Master. See <a class="xref" href="important_configurations.html#disable.splitting" title="3.4.2.6.&nbsp;Managed Splitting">Section&nbsp;3.4.2.6, &#8220;Managed Splitting&#8221;</a> for how to manually manage
-        splits (and for why you might do this)</p></div><div class="section" title="12.3.3.&nbsp;Region Load Balancer"><div class="titlepage"><div><div><h3 class="title"><a name="d0e3189"></a>12.3.3.&nbsp;Region Load Balancer</h3></div></div></div><p>
+        splits (and for why you might do this)</p></div><div class="section" title="12.3.3.&nbsp;Region Load Balancer"><div class="titlepage"><div><div><h3 class="title"><a name="d246e3229"></a>12.3.3.&nbsp;Region Load Balancer</h3></div></div></div><p>
         Periodically, and when there are not any regions in transition,
         a load balancer will run and move regions around to balance cluster load.
         The period at which it runs can be configured.
@@ -27,7 +27,7 @@
           </p><div class="section" title="12.3.4.1.&nbsp;MemStore"><div class="titlepage"><div><div><h4 class="title"><a name="store.memstore"></a>12.3.4.1.&nbsp;MemStore</h4></div></div></div><p>The MemStore holds in-memory modifications to the Store.  Modifications are KeyValues.
        When asked to flush, current memstore is moved to snapshot and is cleared. 
        HBase continues to serve edits out of new memstore and backing snapshot until flusher reports in that the 
-       flush succeeded. At this point the snapshot is let go.</p></div><div class="section" title="12.3.4.2.&nbsp;StoreFile (HFile)"><div class="titlepage"><div><div><h4 class="title"><a name="hfile"></a>12.3.4.2.&nbsp;StoreFile (HFile)</h4></div></div></div><div class="section" title="12.3.4.2.1.&nbsp;HFile Format"><div class="titlepage"><div><div><h5 class="title"><a name="d0e3207"></a>12.3.4.2.1.&nbsp;HFile Format</h5></div></div></div><p>The <span class="emphasis"><em>hfile</em></span> file format is based on
+       flush succeeded. At this point the snapshot is let go.</p></div><div class="section" title="12.3.4.2.&nbsp;StoreFile (HFile)"><div class="titlepage"><div><div><h4 class="title"><a name="hfile"></a>12.3.4.2.&nbsp;StoreFile (HFile)</h4></div></div></div><div class="section" title="12.3.4.2.1.&nbsp;HFile Format"><div class="titlepage"><div><div><h5 class="title"><a name="d246e3247"></a>12.3.4.2.1.&nbsp;HFile Format</h5></div></div></div><p>The <span class="emphasis"><em>hfile</em></span> file format is based on
               the SSTable file described in the <a class="link" href="http://labs.google.com/papers/bigtable.html" target="_top">BigTable [2006]</a> paper and on
               Hadoop's <a class="link" href="http://hadoop.apache.org/common/docs/current/api/org/apache/hadoop/io/file/tfile/TFile.html" target="_top">tfile</a>
               (The unit test suite and the compression harness were taken directly from tfile). 

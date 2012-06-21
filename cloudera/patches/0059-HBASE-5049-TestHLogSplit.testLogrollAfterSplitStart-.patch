@@ -1,0 +1,30 @@
+From 0965ec135ddc49a3cbe2818f0ad6a5bb3eb4c5f4 Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Thu, 15 Dec 2011 15:06:46 -0800
+Subject: [PATCH 059/101] HBASE-5049 TestHLogSplit.testLogrollAfterSplitStart not working due to HBASE-5006
+
+Reason: Bug
+Author: Jimmy Xiang
+Ref: CDH-3816
+---
+ .../apache/hadoop/hbase/regionserver/wal/HLog.java |    4 +---
+ 1 files changed, 1 insertions(+), 3 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+index 90828db..09ddd18 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+@@ -673,9 +673,7 @@ public class HLog implements Syncable {
+       writer.init(fs, path, conf);
+       return writer;
+     } catch (Exception e) {
+-      IOException ie = new IOException("cannot get log writer", e);
+-      ie.initCause(e);
+-      throw ie;
++      throw new IOException("cannot get log writer", e);
+     }
+   }
+ 
+-- 
+1.7.0.4
+

@@ -1,0 +1,654 @@
+From 9cecc21320e525615b1e25e6577b04956db4c020 Mon Sep 17 00:00:00 2001
+From: David S. Wang <dsw@cloudera.com>
+Date: Mon, 30 Apr 2012 11:01:09 -0700
+Subject: [PATCH 089/101] HBASE-5904 is_enabled from shell returns differently from pre- and post- HBASE-5155
+ Revert HBASE-5155 to avoid incompatible change.
+
+Reason: Bug
+Author: David S. Wang
+Ref: CDH-5520
+---
+ .../hadoop/hbase/master/AssignmentManager.java     |   85 ++--------------
+ .../org/apache/hadoop/hbase/master/HMaster.java    |   14 +---
+ .../hbase/master/handler/DeleteTableHandler.java   |    4 +-
+ .../master/handler/ServerShutdownHandler.java      |   26 +----
+ .../org/apache/hadoop/hbase/zookeeper/ZKTable.java |  105 ++++----------------
+ .../org/apache/hadoop/hbase/client/TestAdmin.java  |    9 +--
+ .../org/apache/hadoop/hbase/master/TestMaster.java |    4 +-
+ .../hadoop/hbase/master/TestMasterFailover.java    |    7 +-
+ .../TestMasterRestartAfterDisablingTable.java      |    7 +-
+ .../apache/hadoop/hbase/zookeeper/TestZKTable.java |   16 +---
+ 10 files changed, 41 insertions(+), 236 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index 2cd40ce..f65c7a1 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -897,14 +897,10 @@ public class AssignmentManager extends ZooKeeperListener {
+     String tableName = region.getTableDesc().getNameAsString();
+     boolean disabled = this.zkTable.isDisabledTable(tableName);
+     if (disabled || this.zkTable.isDisablingTable(tableName)) {
+-      LOG.info("Table " + tableName + (disabled ? " disabled;" : " disabling;")
+-          + " skipping assign of " + region.getRegionNameAsString());
++      LOG.info("Table " + tableName + (disabled? " disabled;": " disabling;") +
++        " skipping assign of " + region.getRegionNameAsString());
+       offlineDisabledRegion(region);
+       return;
+-    } else if (!this.zkTable.isEnabledTable(tableName)) {
+-      // enable the table here. the assign may be called using
+-      // HMaster.assignRegion()
+-      setEnabledTable(tableName);
+     }
+     if (this.serverManager.isClusterShutdown()) {
+       LOG.info("Cluster shutdown is set; skipping assign of " +
+@@ -978,7 +974,6 @@ public class AssignmentManager extends ZooKeeperListener {
+     } catch (InterruptedException e) {
+       throw new RuntimeException(e);
+     }
+-    
+     LOG.debug("Bulk assigning done for " + destination.getServerName());
+   }
+ 
+@@ -1003,18 +998,6 @@ public class AssignmentManager extends ZooKeeperListener {
+     }
+   }
+   
+-  protected void setEnabledTable(String tableName) {
+-    try {
+-      this.zkTable.setEnabledTable(tableName);
+-    } catch (KeeperException e) {
+-      // here we can abort as it is the start up flow
+-      String errorMsg = "Unable to ensure that the table " + tableName
+-          + "will be" + " enabled because of a ZooKeeper issue";
+-      LOG.error(errorMsg);
+-      this.master.abort(errorMsg, e);
+-    }
+-  }
+-
+   /**
+    * Callback handler for create unassigned znodes used during bulk assign.
+    */
+@@ -1462,23 +1445,9 @@ public class AssignmentManager extends ZooKeeperListener {
+     // Use fixed count thread pool assigning.
+     BulkAssigner ba = new StartupBulkAssigner(this.master, bulkPlan, this);
+     ba.bulkAssign();
+-    // As the above bulkAssign is a sync call setEnabledTable can be done here
+-    ArrayList<HRegionInfo> regionsList = new ArrayList<HRegionInfo>(allRegions
+-        .keySet());
+-    for (HRegionInfo regionInfo : regionsList) {
+-      setEnabledTable(regionInfo);
+-    }
+     LOG.info("Bulk assigning done");
+   }
+ 
+-  private void setEnabledTable(HRegionInfo regionInfo) {
+-    String tableName = regionInfo.getTableDesc().getNameAsString();
+-    boolean isTableEnabled = this.zkTable.isEnabledTable(tableName);
+-    if (!isTableEnabled) {
+-      setEnabledTable(tableName);
+-    }
+-  }
+-
+   /**
+    * Run bulk assign on startup.  Does one RCP per regionserver passing a
+    * batch of reginons using {@link SingleServerBulkAssigner}.
+@@ -1669,28 +1638,22 @@ public class AssignmentManager extends ZooKeeperListener {
+     Set<String> disablingTables = new HashSet<String>(1);
+     // Iterate regions in META
+     for (Result result : results) {
+-      boolean disabled = false;
+-      boolean disabling = false;
+       Pair<HRegionInfo,HServerInfo> region =
+         MetaReader.metaRowToRegionPairWithInfo(result);
+       if (region == null) continue;
+       HServerInfo regionLocation = region.getSecond();
+       HRegionInfo regionInfo = region.getFirst();
+-      String tableName = regionInfo.getTableDesc().getNameAsString();
+-      
++      String disablingTableName = regionInfo.getTableDesc().getNameAsString();
+       if (regionLocation == null) {
+         // Region not being served, add to region map with no assignment
+         // If this needs to be assigned out, it will also be in ZK as RIT
+         // add if the table is not in disabled state
+         if (false == checkIfRegionBelongsToDisabled(regionInfo)) {
+           this.regions.put(regionInfo, null);
+-        } else {
+-          disabled = true;
+         }
+-        disabling = addToDisablingTables(disablingTables, regionInfo, tableName);
+-        // need to enable the table if not disabled or disabling
+-        // this will be used in rolling restarts
+-        enableTableIfNotDisabledOrDisabling(disabled, disabling, tableName);
++        if (checkIfRegionBelongsToDisabling(regionInfo)) {
++          disablingTables.add(disablingTableName);
++        }
+       } else if (!serverManager.isServerOnline(regionLocation.getServerName())) {
+         // Region is located on a server that isn't online
+         List<Pair<HRegionInfo,Result>> offlineRegions =
+@@ -1700,24 +1663,16 @@ public class AssignmentManager extends ZooKeeperListener {
+           offlineServers.put(regionLocation.getServerName(), offlineRegions);
+         }
+         offlineRegions.add(new Pair<HRegionInfo,Result>(regionInfo, result));
+-        disabled = checkIfRegionBelongsToDisabled(regionInfo);
+-        disabling = addToDisablingTables(disablingTables, regionInfo, tableName);
+-        // need to enable the table if not disabled or disabling
+-        // this will be used in rolling restarts
+-        enableTableIfNotDisabledOrDisabling(disabled, disabling, tableName);
+       } else {
+         // Region is being served and on an active server
+         // add only if region not in disabled table
+         if (false == checkIfRegionBelongsToDisabled(regionInfo)) {
+           regions.put(regionInfo, regionLocation);
+           addToServers(regionLocation, regionInfo);
+-        } else {
+-          disabled = true;
+         }
+-        disabling = addToDisablingTables(disablingTables, regionInfo, tableName);
+-        // need to enable the table if not disabled or disabling
+-        // this will be used in rolling restarts
+-        enableTableIfNotDisabledOrDisabling(disabled, disabling, tableName);
++        if (checkIfRegionBelongsToDisabling(regionInfo)) {
++          disablingTables.add(disablingTableName);
++        }
+       }
+     }
+     // Recover the tables that were not fully moved to DISABLED state.
+@@ -1738,22 +1693,6 @@ public class AssignmentManager extends ZooKeeperListener {
+     }
+     return offlineServers;
+   }
+-
+-  private boolean addToDisablingTables(Set<String> disablingTables,
+-      HRegionInfo regionInfo, String tableName) {
+-    if (checkIfRegionBelongsToDisabling(regionInfo)) {
+-      disablingTables.add(tableName);
+-      return true;
+-    }
+-    return false;
+-  }
+-
+-  private void enableTableIfNotDisabledOrDisabling(boolean disabled,
+-      boolean disabling, String tableName) {
+-    if (!disabled && !disabling && !getZKTable().isEnabledTable(tableName)) {
+-      setEnabledTable(tableName);
+-    }
+-  }
+   
+   private boolean checkIfRegionBelongsToDisabled(HRegionInfo regionInfo) {
+     String tableName = regionInfo.getTableDesc().getNameAsString();
+@@ -2309,12 +2248,6 @@ public class AssignmentManager extends ZooKeeperListener {
+     } catch (InterruptedException e) {
+       throw new IOException("InterruptedException bulk assigning", e);
+     }
+-    // If the sync is true, we create the table node here.
+-    // if the sync is false we still create the table node but cannot
+-    // be sure if all the regions are assigned.
+-    for (HRegionInfo regionInfo : regions) {
+-      setEnabledTable(regionInfo);
+-    }
+     LOG.info("Bulk assigning done");
+   }
+ 
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index 39b719c..85b2b63 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -464,9 +464,6 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+       this.assignmentManager.waitForAssignment(HRegionInfo.ROOT_REGIONINFO);
+       assigned++;
+     }
+-    // Enable the ROOT table if on process fail over the RS containing ROOT
+-    // was active.
+-    enableCatalogTables(Bytes.toString(HConstants.ROOT_TABLE_NAME));
+     LOG.info("-ROOT- assigned=" + assigned + ", rit=" + rit +
+       ", location=" + catalogTracker.getRootLocation());
+ 
+@@ -482,21 +479,12 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+       this.assignmentManager.waitForAssignment(HRegionInfo.FIRST_META_REGIONINFO);
+       assigned++;
+     }
+-    // Enable the META table if on process fail over the RS containing META
+-    // was active.
+-    enableCatalogTables(Bytes.toString(HConstants.META_TABLE_NAME));
+     LOG.info(".META. assigned=" + assigned + ", rit=" + rit +
+       ", location=" + catalogTracker.getMetaLocation());
+     status.setStatus("META and ROOT assigned.");
+     return assigned;
+   }
+ 
+-  private void enableCatalogTables(String catalogTableName) {
+-    if (!this.assignmentManager.getZKTable().isEnabledTable(catalogTableName)) {
+-      this.assignmentManager.setEnabledTable(catalogTableName);
+-    }
+-  }
+-
+   void fixupDaughters() throws IOException {
+     final Map<HRegionInfo, Result> offlineSplitParents =
+       new HashMap<HRegionInfo, Result>();
+@@ -917,7 +905,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+       this.assignmentManager.bulkAssignUserRegions(newRegions, servers, sync);
+     }
+ 
+-    // 5. If sync, wait for assignment of regions
++    // 6. If sync, wait for assignment of regions
+     if (sync) {
+       LOG.debug("Waiting for " + newRegions.length + " region(s) to be assigned");
+       for (HRegionInfo regionInfo : newRegions) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/handler/DeleteTableHandler.java b/src/main/java/org/apache/hadoop/hbase/master/handler/DeleteTableHandler.java
+index 3338991..5a8bb20 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/handler/DeleteTableHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/handler/DeleteTableHandler.java
+@@ -73,6 +73,6 @@ public class DeleteTableHandler extends TableEventHandler {
+ 
+     // If entry for this table in zk, and up in AssignmentManager, remove it.
+     // Call to undisableTable does this. TODO: Make a more formal purge table.
+-    am.getZKTable().setDeletedTable(Bytes.toString(tableName));
++    am.getZKTable().setEnabledTable(Bytes.toString(tableName));
+   }
+-}
++}
+\ No newline at end of file
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java b/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
+index e6d721c..74da69c 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
+@@ -284,29 +284,13 @@ public class ServerShutdownHandler extends EventHandler {
+   public static boolean processDeadRegion(HRegionInfo hri, Result result,
+       AssignmentManager assignmentManager, CatalogTracker catalogTracker)
+   throws IOException {
+-	  // check if table is present in cache
+-    String tableName = hri.getTableDesc().getNameAsString();
+-    boolean tablePresent = assignmentManager.getZKTable().isTablePresent(
+-        tableName);
+-    if (!tablePresent) {
+-      LOG.info("The table " + tableName
+-          + " was deleted.  Hence not proceeding.");
+-      return false;
+-    }
+     // If table is not disabled but the region is offlined,
+-    boolean disabled = assignmentManager.getZKTable()
+-        .isDisabledTable(tableName);
+-    if (disabled) {
+-      LOG.info("The table " + tableName
+-          + " was disabled.  Hence not proceeding.");
+-      return false;
+-    }
++    boolean disabled = assignmentManager.getZKTable().isDisabledTable(
++        hri.getTableDesc().getNameAsString());
++    if (disabled) return false;
+     if (hri.isOffline() && hri.isSplit()) {
+-      LOG.debug("Offlined and split region " + hri.getRegionNameAsString()
+-          + "; checking daughter presence");
+-      if (MetaReader.getRegion(catalogTracker, hri.getRegionName()) == null) {
+-        return false;
+-      }
++      LOG.debug("Offlined and split region " + hri.getRegionNameAsString() +
++        "; checking daughter presence");
+       fixupDaughters(result, assignmentManager, catalogTracker);
+       return false;
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKTable.java b/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKTable.java
+index 8c11ca1..f079d02 100644
+--- a/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKTable.java
++++ b/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKTable.java
+@@ -182,29 +182,11 @@ public class ZKTable {
+       this.cache.put(tableName, state);
+     }
+   }
+-  /**
+-   * Check if the table is in DISABLED state.
+-   * This check does not involve zookeeper 
+-   * 
+-   * @param tableName
+-   * @return true if table is DISABLED
+-   */
++
+   public boolean isDisabledTable(final String tableName) {
+     return isTableState(tableName, TableState.DISABLED);
+   }
+-  
+-  /**
+-   * check if table is present .
+-   * 
+-   * @param tableName
+-   * @return True if the table is present
+-   */
+-  public boolean isTablePresent(final String tableName) {
+-    synchronized (this.cache) {
+-      TableState state = this.cache.get(tableName);
+-      return !(state == null);
+-    }
+-  }
++
+   /**
+    * Go to zookeeper and see if state of table is {@link TableState#DISABLED}.
+    * This method does not use cache as {@link #isDisabledTable(String)} does.
+@@ -220,45 +202,26 @@ public class ZKTable {
+     TableState state = getTableState(zkw, tableName);
+     return isTableState(TableState.DISABLED, state);
+   }
+-  
+-  /**
+-   * Check if the table is in DISABLING state.
+-   * This check does not involve zookeeper 
+-   * 
+-   * @param tableName
+-   * @return true if table is DISABLING
+-   */
++
+   public boolean isDisablingTable(final String tableName) {
+     return isTableState(tableName, TableState.DISABLING);
+   }
+-  
+-  /**
+-   * Check if the table is in ENABLING state.
+-   * This check does not involve zookeeper 
+-   * 
+-   * @param tableName
+-   * @return true if table is ENABLING
+-   */
++
+   public boolean isEnablingTable(final String tableName) {
+     return isTableState(tableName, TableState.ENABLING);
+   }
+-  
+-  /**
+-   * Check if the table is in ENABLED state.
+-   * This check does not involve zookeeper 
+-   * 
+-   * @param tableName
+-   * @return true if table is ENABLED
+-   */
++
+   public boolean isEnabledTable(String tableName) {
+-    return isTableState(tableName, TableState.ENABLED);
++    synchronized (this.cache) {
++      // No entry in cache means enabled table.
++      return !this.cache.containsKey(tableName);
++    }
+   }
+ 
+   /**
+    * Go to zookeeper and see if state of table is {@link TableState#ENABLED}.
+    * This method does not use cache as {@link #isEnabledTable(String)} does.
+    * This method is for clients other than {@link AssignmentManager}
+-   * 
+    * @param zkw
+    * @param tableName
+    * @return True if table is enabled.
+@@ -267,22 +230,15 @@ public class ZKTable {
+   public static boolean isEnabledTable(final ZooKeeperWatcher zkw,
+       final String tableName)
+   throws KeeperException {
+-    return getTableState(zkw, tableName) == TableState.ENABLED;
++    return getTableState(zkw, tableName) == null;
+   }
+ 
+-  /**
+-   * Check if table is in DISABLING state or DISABLED state.
+-   * This check does not involve zookeeper.
+-   * 
+-   * @param tableName
+-   * @return true if table is in DISABLING or DISABLED state
+-   */
+   public boolean isDisablingOrDisabledTable(final String tableName) {
+     synchronized (this.cache) {
+       return isDisablingTable(tableName) || isDisabledTable(tableName);
+     }
+   }
+-  
++
+   /**
+    * Go to zookeeper and see if state of table is {@link TableState#DISABLING}
+    * of {@link TableState#DISABLED}.
+@@ -300,26 +256,13 @@ public class ZKTable {
+     return isTableState(TableState.DISABLING, state) ||
+       isTableState(TableState.DISABLED, state);
+   }
+-  
+-  /**
+-   * Check if the table is in ENABLED or DISABLING state.
+-   * This check does not involve zookeeper
+-   * @param tableName
+-   * @return true if the table is in ENABLED or DISABLING state
+-   */
++
+   public boolean isEnabledOrDisablingTable(final String tableName) {
+     synchronized (this.cache) {
+       return isEnabledTable(tableName) || isDisablingTable(tableName);
+     }
+   }
+-  
+-  /**
+-   * Check if the table is in DISABLED or ENABLING state.
+-   * This check does not involve zookeeper
+-   * 
+-   * @param tableName
+-   * @return true if the table is in DISABLED or ENABLING state
+-   */
++
+   public boolean isDisabledOrEnablingTable(final String tableName) {
+     synchronized (this.cache) {
+       return isDisabledTable(tableName) || isEnablingTable(tableName);
+@@ -332,7 +275,6 @@ public class ZKTable {
+       return isTableState(currentState, state);
+     }
+   }
+-  
+ 
+   private static boolean isTableState(final TableState expectedState,
+       final TableState currentState) {
+@@ -340,32 +282,23 @@ public class ZKTable {
+   }
+ 
+   /**
+-   * Deletes the table in zookeeper.  Fails silently if the
++   * Enables the table in zookeeper.  Fails silently if the
+    * table is not currently disabled in zookeeper.  Sets no watches.
+    * @param tableName
+    * @throws KeeperException unexpected zookeeper exception
+    */
+-  public void setDeletedTable(final String tableName)
++  public void setEnabledTable(final String tableName)
+   throws KeeperException {
+     synchronized (this.cache) {
+       if (this.cache.remove(tableName) == null) {
+-        LOG.warn("Moving table " + tableName + " state to deleted but was " +
+-          "already deleted");
++        LOG.warn("Moving table " + tableName + " state to enabled but was " +
++          "already enabled");
+       }
+       ZKUtil.deleteNodeFailSilent(this.watcher,
+         ZKUtil.joinZNode(this.watcher.tableZNode, tableName));
+     }
+   }
+-  /**
+-   * Sets the ENABLED state in the cache and deletes the zookeeper node. Fails
+-   * silently if the node is not in enabled in zookeeper
+-   * 
+-   * @param tableName
+-   * @throws KeeperException
+-   */
+-  public void setEnabledTable(final String tableName) throws KeeperException {
+-    setTableState(tableName, TableState.ENABLED);
+-  }
++
+   /**
+    * Gets a list of all the tables set as disabled in zookeeper.
+    * @return Set of disabled tables, empty Set if none
+@@ -415,4 +348,4 @@ public class ZKTable {
+     }
+     return disabledTables;
+   }
+-}
++}
+\ No newline at end of file
+diff --git a/src/test/java/org/apache/hadoop/hbase/client/TestAdmin.java b/src/test/java/org/apache/hadoop/hbase/client/TestAdmin.java
+index f81bdf8..62f9311 100644
+--- a/src/test/java/org/apache/hadoop/hbase/client/TestAdmin.java
++++ b/src/test/java/org/apache/hadoop/hbase/client/TestAdmin.java
+@@ -137,9 +137,6 @@ public class TestAdmin {
+     ht.get(get);
+ 
+     this.admin.disableTable(table);
+-    assertTrue("Table must be disabled.", TEST_UTIL.getHbaseCluster()
+-        .getMaster().getAssignmentManager().getZKTable().isDisabledTable(
+-            Bytes.toString(table)));
+ 
+     // Test that table is disabled
+     get = new Get(row);
+@@ -154,9 +151,7 @@ public class TestAdmin {
+     }
+     assertTrue(ok);
+     this.admin.enableTable(table);
+-    assertTrue("Table must be enabled.", TEST_UTIL.getHbaseCluster()
+-        .getMaster().getAssignmentManager().getZKTable().isEnabledTable(
+-            Bytes.toString(table)));
++
+     // Test that table is enabled
+     try {
+       ht.get(get);
+@@ -994,8 +989,6 @@ public class TestAdmin {
+ 
+     htd.addFamily(hcd);
+     admin.createTable(htd, null);
+-    assertTrue("Table state must be ENABLED", HTable.isTableEnabled(config,
+-        Bytes.toString(TABLENAME)));
+     return admin;
+   }
+   @Test
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMaster.java b/src/test/java/org/apache/hadoop/hbase/master/TestMaster.java
+index 752c1ca..c4ea83f 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestMaster.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMaster.java
+@@ -72,8 +72,6 @@ public class TestMaster {
+     HBaseAdmin admin = TEST_UTIL.getHBaseAdmin();
+ 
+     TEST_UTIL.createTable(TABLENAME, FAMILYNAME);
+-    assertTrue(m.assignmentManager.getZKTable().isEnabledTable
+-        (Bytes.toString(TABLENAME)));
+     TEST_UTIL.loadTable(new HTable(TEST_UTIL.getConfiguration(), TABLENAME),
+       FAMILYNAME);
+ 
+@@ -147,4 +145,4 @@ public class TestMaster {
+     public void beforeProcess(EventHandler event) {
+     }
+   }
+-}
++}
+\ No newline at end of file
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java b/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java
+index abc5cb3..a92d6b8 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java
+@@ -636,8 +636,7 @@ public class TestMasterFailover {
+         Bytes.toBytes("iii"), Bytes.toBytes("jjj")
+     };
+ 
+-    String enabledTableName = "enabledTable";
+-    byte [] enabledTable = Bytes.toBytes(enabledTableName);
++    byte [] enabledTable = Bytes.toBytes("enabledTable");
+     HTableDescriptor htdEnabled = new HTableDescriptor(enabledTable);
+     htdEnabled.addFamily(new HColumnDescriptor(FAMILY));
+     List<HRegionInfo> enabledRegions = TEST_UTIL.createMultiRegionsInMeta(
+@@ -683,8 +682,6 @@ public class TestMasterFailover {
+       master.assignRegion(hri);
+     }
+ 
+-    assertTrue(" Table must be enabled.", master.getAssignmentManager()
+-        .getZKTable().isEnabledTable(enabledTableName));
+     // we also need regions assigned out on the dead server
+     List<HRegionInfo> enabledAndOnDeadRegions = new ArrayList<HRegionInfo>();
+     enabledAndOnDeadRegions.add(enabledRegions.remove(0));
+@@ -729,8 +726,6 @@ public class TestMasterFailover {
+     // Disable the disabledTable in ZK
+     ZKTable zktable = new ZKTable(zkw);
+     zktable.setDisabledTable(Bytes.toString(disabledTable));
+-    assertTrue(" The enabled table should be identified on master fail over.",
+-        zktable.isEnabledTable(enabledTableName));
+ 
+     /*
+      * ZK = CLOSING
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMasterRestartAfterDisablingTable.java b/src/test/java/org/apache/hadoop/hbase/master/TestMasterRestartAfterDisablingTable.java
+index fecfabc..66e5217 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestMasterRestartAfterDisablingTable.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMasterRestartAfterDisablingTable.java
+@@ -20,7 +20,6 @@
+ package org.apache.hadoop.hbase.master;
+ 
+ import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.assertTrue;
+ 
+ import java.io.IOException;
+ import java.util.List;
+@@ -96,9 +95,7 @@ public class TestMasterRestartAfterDisablingTable {
+         "stopping the active master so that the backup can become active");
+     cluster.hbaseCluster.waitOnMaster(activeMaster);
+     cluster.waitForActiveAndReadyMaster();
+-    assertTrue("The table should not be in enabled state", cluster.getMaster()
+-        .getAssignmentManager().getZKTable().isDisablingOrDisabledTable(
+-            "tableRestart"));
++
+     log("Enabling table\n");
+     TEST_UTIL.getHBaseAdmin().enableTable(table);
+     log("Waiting for no more RIT\n");
+@@ -108,8 +105,6 @@ public class TestMasterRestartAfterDisablingTable {
+     assertEquals(
+         "The assigned regions were not onlined after master switch except for the catalog tables.",
+         6, regions.size());
+-    assertTrue("The table should be in enabled state", cluster.getMaster()
+-        .getAssignmentManager().getZKTable().isEnabledTable("tableRestart"));
+   }
+ 
+   private void log(String msg) {
+diff --git a/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKTable.java b/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKTable.java
+index b58934a..32095ea 100644
+--- a/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKTable.java
++++ b/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKTable.java
+@@ -62,42 +62,28 @@ public class TestZKTable {
+     ZooKeeperWatcher zkw = new ZooKeeperWatcher(TEST_UTIL.getConfiguration(),
+       name, abortable);
+     ZKTable zkt = new ZKTable(zkw);
+-    assertFalse(zkt.isEnabledTable(name));
++    assertTrue(zkt.isEnabledTable(name));
+     assertFalse(zkt.isDisablingTable(name));
+     assertFalse(zkt.isDisabledTable(name));
+     assertFalse(zkt.isEnablingTable(name));
+     assertFalse(zkt.isDisablingOrDisabledTable(name));
+     assertFalse(zkt.isDisabledOrEnablingTable(name));
+-    assertFalse(zkt.isTablePresent(name));
+     zkt.setDisablingTable(name);
+     assertTrue(zkt.isDisablingTable(name));
+     assertTrue(zkt.isDisablingOrDisabledTable(name));
+     assertFalse(zkt.getDisabledTables().contains(name));
+-    assertTrue(zkt.isTablePresent(name));
+     zkt.setDisabledTable(name);
+     assertTrue(zkt.isDisabledTable(name));
+     assertTrue(zkt.isDisablingOrDisabledTable(name));
+     assertFalse(zkt.isDisablingTable(name));
+     assertTrue(zkt.getDisabledTables().contains(name));
+-    assertTrue(zkt.isTablePresent(name));
+     zkt.setEnablingTable(name);
+     assertTrue(zkt.isEnablingTable(name));
+     assertTrue(zkt.isDisabledOrEnablingTable(name));
+     assertFalse(zkt.isDisabledTable(name));
+     assertFalse(zkt.getDisabledTables().contains(name));
+-    assertTrue(zkt.isTablePresent(name));
+     zkt.setEnabledTable(name);
+     assertTrue(zkt.isEnabledTable(name));
+     assertFalse(zkt.isEnablingTable(name));
+-    assertTrue(zkt.isTablePresent(name));
+-    zkt.setDeletedTable(name);
+-    assertFalse(zkt.isEnabledTable(name));
+-    assertFalse(zkt.isDisablingTable(name));
+-    assertFalse(zkt.isDisabledTable(name));
+-    assertFalse(zkt.isEnablingTable(name));
+-    assertFalse(zkt.isDisablingOrDisabledTable(name));
+-    assertFalse(zkt.isDisabledOrEnablingTable(name));
+-    assertFalse(zkt.isTablePresent(name));
+-    
+   }
+ }
+-- 
+1.7.0.4
+

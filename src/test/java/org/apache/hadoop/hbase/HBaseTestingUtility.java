@@ -61,6 +61,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.util.Writables;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
+import org.apache.hadoop.hbase.zookeeper.ZKAssign;
 import org.apache.hadoop.hbase.zookeeper.ZKConfig;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.hdfs.DFSClient;
@@ -68,7 +69,9 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.mapred.MiniMRCluster;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.KeeperException.NodeExistsException;
 
 /**
  * Facility for testing HBase. Replacement for
@@ -878,7 +881,7 @@ public class HBaseTestingUtility {
       HTableDescriptor desc = info.getTableDesc();
       if (Bytes.compareTo(desc.getName(), tableName) == 0) {
         LOG.info("getMetaTableRows: row -> " +
-            Bytes.toStringBinary(result.getRow()));
+            Bytes.toStringBinary(result.getRow()) + info);
         rows.add(result.getRow());
       }
     }
@@ -1294,5 +1297,37 @@ public class HBaseTestingUtility {
     s.put(store.getFamily().getName(), columns);
 
     return getFromStoreFile(store,get);
+  }
+  
+  /**
+   * Creates an znode with OPENED state.
+   * @param TEST_UTIL
+   * @param region
+   * @param regionServer
+   * @return
+   * @throws IOException
+   * @throws ZooKeeperConnectionException
+   * @throws KeeperException
+   * @throws NodeExistsException
+   */
+  public static ZooKeeperWatcher createAndForceNodeToOpenedState(
+      HBaseTestingUtility TEST_UTIL, HRegion region,
+      String serverName) throws IOException,
+      ZooKeeperConnectionException, KeeperException, NodeExistsException {
+    // Create a ZKW to use in the test
+    ZooKeeperWatcher zkw = new ZooKeeperWatcher(TEST_UTIL.getConfiguration(),
+        "unittest", new Abortable() {
+          @Override
+          public void abort(String why, Throwable e) {
+            throw new RuntimeException("Fatal ZK error, why=" + why, e);
+          }
+        });
+
+    ZKAssign.createNodeOffline(zkw, region.getRegionInfo(), serverName);
+    int version = ZKAssign.transitionNodeOpening(zkw, region
+        .getRegionInfo(), serverName);
+    ZKAssign.transitionNodeOpened(zkw, region.getRegionInfo(), serverName,
+        version);
+    return zkw;
   }
 }

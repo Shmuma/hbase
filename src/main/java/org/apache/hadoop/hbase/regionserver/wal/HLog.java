@@ -29,11 +29,11 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
-import java.util.Arrays;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -41,7 +41,6 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
@@ -50,6 +49,7 @@ import java.util.regex.Pattern;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -111,6 +111,10 @@ public class HLog implements Syncable {
   public static final byte [] METAFAMILY = Bytes.toBytes("METAFAMILY");
   static final byte [] METAROW = Bytes.toBytes("METAROW");
 
+  /** File Extension used while splitting an HLog into regions (HBASE-2312) */
+  public static final String SPLITTING_EXT = "-splitting";
+  public static final boolean SPLIT_SKIP_ERRORS_DEFAULT = false;
+
   /*
    * Name of directory that holds recovered edits written by the wal log
    * splitting code, one per region
@@ -118,6 +122,7 @@ public class HLog implements Syncable {
   private static final String RECOVERED_EDITS_DIR = "recovered.edits";
   private static final Pattern EDITFILES_NAME_PATTERN =
     Pattern.compile("-?[0-9]+");
+  static final String RECOVERED_LOG_TMPFILE_SUFFIX = ".temp";
   
   private final FileSystem fs;
   private final Path dir;
@@ -129,7 +134,7 @@ public class HLog implements Syncable {
   private final long blocksize;
   private final String prefix;
   private final Path oldLogDir;
-  private boolean logRollRequested;
+  private boolean logRollRunning;
 
 
   private static Class<? extends Writer> logWriterClass;
@@ -139,13 +144,12 @@ public class HLog implements Syncable {
     HLog.logReaderClass = null;
   }
 
-  private OutputStream hdfs_out;     // OutputStream associated with the current SequenceFile.writer
-  private int initialReplication;    // initial replication factor of SequenceFile.writer
+  // Minimum tolerable replicas, if the actual value is lower than it, 
+  // rollWriter will be triggered
+  private int minTolerableReplication; 
+  private FSDataOutputStream hdfs_out;     // OutputStream associated with the current SequenceFile.writer
   private Method getNumCurrentReplicas; // refers to DFSOutputStream.getNumCurrentReplicas
   final static Object [] NO_ARGS = new Object []{};
-
-  // used to indirectly tell syncFs to force the sync
-  private boolean forceSync = false;
 
   public interface Reader {
     void init(FileSystem fs, Path path, Configuration c) throws IOException;
@@ -189,9 +193,21 @@ public class HLog implements Syncable {
   // The timestamp (in ms) when the log file was created.
   private volatile long filenum = -1;
 
-  //number of transactions in the current Hlog.
+  // number of transactions in the current Hlog.
   private final AtomicInteger numEntries = new AtomicInteger(0);
+  // last deferred-flush WAL edit sequence number
+  private long lastDeferredSeq;
 
+  // If live datanode count is lower than the default replicas value,
+  // RollWriter will be triggered in each sync(So the RollWriter will be
+  // triggered one by one in a short time). Using it as a workaround to slow
+  // down the roll frequency triggered by checkLowReplication().
+  private volatile int consecutiveLogRolls = 0;
+  private final int lowReplicationRollLimit;
+  // If consecutiveLogRolls is larger than lowReplicationRollLimit,
+  // then disable the rolling in checkLowReplication().
+  // Enable it if the replications recover.
+  private volatile boolean lowReplicationRollEnabled = true;
   // If > than this size, roll the log. This is typically 0.95 times the size
   // of the default Hdfs block size.
   private final long logrollsize;
@@ -218,6 +234,11 @@ public class HLog implements Syncable {
    * Thread that handles optional sync'ing
    */
   private final LogSyncer logSyncerThread;
+
+  /** Number of log close errors tolerated before we abort */
+  private final int closeErrorsTolerated;
+
+  private final AtomicInteger closeErrorCount = new AtomicInteger();
 
   /**
    * Pattern used to validate a HLog file name
@@ -358,7 +379,15 @@ public class HLog implements Syncable {
       }
     }
     this.maxLogs = conf.getInt("hbase.regionserver.maxlogs", 32);
+    this.minTolerableReplication = conf.getInt(
+        "hbase.regionserver.hlog.tolerable.lowreplication",
+        this.fs.getDefaultReplication());
+    this.lowReplicationRollLimit = conf.getInt(
+        "hbase.regionserver.hlog.lowreplication.rolllimit", 5);
     this.enabled = conf.getBoolean("hbase.regionserver.hlog.enabled", true);
+    this.closeErrorsTolerated = conf.getInt(
+        "hbase.regionserver.logroll.errors.tolerated", 0);
+
     LOG.info("HLog configuration: blocksize=" +
       StringUtils.byteDesc(this.blocksize) +
       ", rollsize=" + StringUtils.byteDesc(this.logrollsize) +
@@ -371,34 +400,44 @@ public class HLog implements Syncable {
     rollWriter();
 
     // handle the reflection necessary to call getNumCurrentReplicas()
-    this.getNumCurrentReplicas = null;
-    Exception exception = null;
-    if (this.hdfs_out != null) {
-      try {
-        this.getNumCurrentReplicas = this.hdfs_out.getClass().
-          getMethod("getNumCurrentReplicas", new Class<?> []{});
-        this.getNumCurrentReplicas.setAccessible(true);
-      } catch (NoSuchMethodException e) {
-        // Thrown if getNumCurrentReplicas() function isn't available
-        exception = e;
-      } catch (SecurityException e) {
-        // Thrown if we can't get access to getNumCurrentReplicas()
-        exception = e;
-        this.getNumCurrentReplicas = null; // could happen on setAccessible()
-      }
-    }
-    if (this.getNumCurrentReplicas != null) {
-      LOG.info("Using getNumCurrentReplicas--HDFS-826");
-    } else {
-      LOG.info("getNumCurrentReplicas--HDFS-826 not available; hdfs_out=" +
-        this.hdfs_out + ", exception=" + exception.getMessage());
-    }
+    this.getNumCurrentReplicas = getGetNumCurrentReplicas(this.hdfs_out);
 
     logSyncerThread = new LogSyncer(this.optionalFlushInterval);
     Threads.setDaemonThreadRunning(logSyncerThread,
         Thread.currentThread().getName() + ".logSyncer");
   }
 
+  /**
+   * Find the 'getNumCurrentReplicas' on the passed <code>os</code> stream.
+   * @return Method or null.
+   */
+  private Method getGetNumCurrentReplicas(final FSDataOutputStream os) {
+    Method m = null;
+    Exception exception = null;
+    if (os != null) {
+      try {
+        m = os.getWrappedStream().getClass().
+          getMethod("getNumCurrentReplicas", new Class<?> []{});
+        m.setAccessible(true);
+      } catch (NoSuchMethodException e) {
+        // Thrown if getNumCurrentReplicas() function isn't available
+        exception = e;
+      } catch (SecurityException e) {
+        // Thrown if we can't get access to getNumCurrentReplicas()
+        exception = e;
+        m = null; // could happen on setAccessible()
+      }
+    }
+    if (m != null) {
+      LOG.info("Using getNumCurrentReplicas--HDFS-826");
+    } else {
+      LOG.info("getNumCurrentReplicas--HDFS-826 not available; hdfs_out=" +
+        os + ", exception=" + exception.getMessage());
+    }
+    return m;
+  }
+
+  
   public void registerWALActionsListener (final WALObserver listener) {
     this.listeners.add(listener);
   }
@@ -438,9 +477,15 @@ public class HLog implements Syncable {
     return logSeqNum.get();
   }
 
+  /**
+   * Method used internal to this class and for tests only.
+   * @return The wrapped stream our writer is using; its not the
+   * writer's 'out' FSDatoOutputStream but the stream that this 'out' wraps
+   * (In hdfs its an instance of DFSDataOutputStream).
+   */
   // usage: see TestLogRolling.java
   OutputStream getOutputStream() {
-    return this.hdfs_out;
+    return this.hdfs_out.getWrappedStream();
   }
 
   /**
@@ -464,14 +509,43 @@ public class HLog implements Syncable {
    * @throws IOException
    */
   public byte [][] rollWriter() throws FailedLogCloseException, IOException {
+    return rollWriter(false);
+  }
+
+  /**
+   * Roll the log writer. That is, start writing log messages to a new file.
+   *
+   * Because a log cannot be rolled during a cache flush, and a cache flush
+   * spans two method calls, a special lock needs to be obtained so that a cache
+   * flush cannot start when the log is being rolled and the log cannot be
+   * rolled during a cache flush.
+   *
+   * <p>Note that this method cannot be synchronized because it is possible that
+   * startCacheFlush runs, obtaining the cacheFlushLock, then this method could
+   * start which would obtain the lock on this but block on obtaining the
+   * cacheFlushLock and then completeCacheFlush could be called which would wait
+   * for the lock on this and consequently never release the cacheFlushLock
+   *
+   * @param force If true, force creation of a new writer even if no entries
+   * have been written to the current writer
+   * @return If lots of logs, flush the returned regions so next time through
+   * we can clean logs. Returns null if nothing to flush.  Names are actual
+   * region names as returned by {@link HRegionInfo#getEncodedName()}
+   * @throws org.apache.hadoop.hbase.regionserver.wal.FailedLogCloseException
+   * @throws IOException
+   */
+  public byte [][] rollWriter(boolean force)
+      throws FailedLogCloseException, IOException {
     // Return if nothing to flush.
-    if (this.writer != null && this.numEntries.get() <= 0) {
+    if (!force && this.writer != null && this.numEntries.get() <= 0) {
       return null;
     }
     byte [][] regionsToFlush = null;
     this.cacheFlushLock.lock();
+    this.logRollRunning = true;
     try {
       if (closed) {
+        LOG.debug("HLog closed.  Skipping rolling of writer");
         return regionsToFlush;
       }
       // Do all the preparation outside of the updateLock to block
@@ -479,15 +553,17 @@ public class HLog implements Syncable {
       long currentFilenum = this.filenum;
       this.filenum = System.currentTimeMillis();
       Path newPath = computeFilename();
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Enabling new writer for "+FSUtils.getPath(newPath));
+      }
       HLog.Writer nextWriter = this.createWriterInstance(fs, newPath, conf);
-      int nextInitialReplication = fs.getFileStatus(newPath).getReplication();
       // Can we get at the dfsclient outputstream?  If an instance of
       // SFLW, it'll have done the necessary reflection to get at the
       // protected field name.
-      OutputStream nextHdfsOut = null;
+      FSDataOutputStream nextHdfsOut = null;
       if (nextWriter instanceof SequenceFileLogWriter) {
         nextHdfsOut =
-          ((SequenceFileLogWriter)nextWriter).getDFSCOutputStream();
+          ((SequenceFileLogWriter)nextWriter).getWriterFSDataOutputStream();
       }
       // Tell our listeners that a new log was created
       if (!this.listeners.isEmpty()) {
@@ -500,7 +576,6 @@ public class HLog implements Syncable {
         // Clean up current writer.
         Path oldFile = cleanupCurrentWriter(currentFilenum);
         this.writer = nextWriter;
-        this.initialReplication = nextInitialReplication;
         this.hdfs_out = nextHdfsOut;
 
         LOG.info((oldFile != null?
@@ -510,7 +585,6 @@ public class HLog implements Syncable {
             this.fs.getFileStatus(oldFile).getLen() + ". ": "") +
           "New hlog " + FSUtils.getPath(newPath));
         this.numEntries.set(0);
-        this.logRollRequested = false;
       }
       // Can we delete any of the old log files?
       if (this.outputfiles.size() > 0) {
@@ -528,6 +602,7 @@ public class HLog implements Syncable {
         }
       }
     } finally {
+      this.logRollRunning = false;
       this.cacheFlushLock.unlock();
     }
     return regionsToFlush;
@@ -598,12 +673,24 @@ public class HLog implements Syncable {
       writer.init(fs, path, conf);
       return writer;
     } catch (Exception e) {
-      IOException ie = new IOException("cannot get log writer");
-      ie.initCause(e);
-      throw ie;
+      throw new IOException("cannot get log writer", e);
     }
   }
 
+  private byte[] getSnapshotName(byte[] encodedRegionName) {
+    byte snp[] = new byte[encodedRegionName.length + 3];
+    // an encoded region name has only hex digits. s, n or p are not hex
+    // and therefore snapshot-names will never collide with
+    // encoded-region-names
+    snp[0] = 's';
+    snp[1] = 'n';
+    snp[2] = 'p';
+    for (int i = 0; i < encodedRegionName.length; i++) {
+      snp[i + 3] = encodedRegionName[i];
+    }
+    return snp;
+  }
+  
   /*
    * Clean up old commit logs.
    * @return If lots of logs, flush the returned region so next time through
@@ -707,21 +794,31 @@ public class HLog implements Syncable {
    * @return Path to current writer or null if none.
    * @throws IOException
    */
-  private Path cleanupCurrentWriter(final long currentfilenum)
-  throws IOException {
+  Path cleanupCurrentWriter(final long currentfilenum) throws IOException {
     Path oldFile = null;
     if (this.writer != null) {
       // Close the current writer, get a new one.
       try {
         this.writer.close();
+        closeErrorCount.set(0);
+        this.writer = null;
       } catch (IOException e) {
-        // Failed close of log file.  Means we're losing edits.  For now,
-        // shut ourselves down to minimize loss.  Alternative is to try and
-        // keep going.  See HBASE-930.
-        FailedLogCloseException flce =
-          new FailedLogCloseException("#" + currentfilenum);
-        flce.initCause(e);
-        throw e;
+        LOG.error("Failed close of HLog writer", e);
+        int errors = closeErrorCount.incrementAndGet();
+        if (errors <= closeErrorsTolerated && lastDeferredSeq == 0) {
+          LOG.warn("Riding over HLog close failure! error count="+errors);
+        } else {
+          if (lastDeferredSeq > 0) {
+            LOG.error("Aborting due to unflushed edits in HLog");
+          }
+          // Failed close of log file.  Means we're losing edits.  For now,
+          // shut ourselves down to minimize loss.  Alternative is to try and
+          // keep going.  See HBASE-930.
+          FailedLogCloseException flce =
+            new FailedLogCloseException("#" + currentfilenum);
+          flce.initCause(e);
+          throw flce;
+        }
       }
       if (currentfilenum >= 0) {
         oldFile = computeFilename(currentfilenum);
@@ -792,6 +889,7 @@ public class HLog implements Syncable {
   public void close() throws IOException {
     try {
       logSyncerThread.interrupt();
+      logSyncerThread.close();
       // Make sure we synced everything
       logSyncerThread.join(this.optionalFlushInterval*2);
     } catch (InterruptedException e) {
@@ -811,7 +909,9 @@ public class HLog implements Syncable {
         if (LOG.isDebugEnabled()) {
           LOG.debug("closing hlog writer in " + this.dir.toString());
         }
-        this.writer.close();
+        if (this.writer != null) {
+          this.writer.close();
+        }
       }
     } finally {
       cacheFlushLock.unlock();
@@ -870,6 +970,9 @@ public class HLog implements Syncable {
         Long.valueOf(seqNum));
       doWrite(regionInfo, logKey, logEdit);
       this.numEntries.incrementAndGet();
+      if (regionInfo.getTableDesc().isDeferredLogFlush()) {
+        lastDeferredSeq = seqNum;
+      }
     }
 
     // Sync if catalog region, and if not then check if that table supports
@@ -925,6 +1028,9 @@ public class HLog implements Syncable {
       HLogKey logKey = makeKey(hriKey, tableName, seqNum, now);
       doWrite(info, logKey, edits);
       this.numEntries.incrementAndGet();
+      if (info.getTableDesc().isDeferredLogFlush()) {
+        lastDeferredSeq = seqNum;
+      }
     }
     // Sync if catalog region, and if not then check if that table supports
     // deferred log flushing
@@ -943,6 +1049,7 @@ public class HLog implements Syncable {
 
     private final long optionalFlushInterval;
 
+    private boolean closeLogSyncer = false;
     LogSyncer(long optionalFlushInterval) {
       this.optionalFlushInterval = optionalFlushInterval;
     }
@@ -952,37 +1059,57 @@ public class HLog implements Syncable {
       try {
         // awaiting with a timeout doesn't always
         // throw exceptions on interrupt
-        while(!this.isInterrupted()) {
+        while(!this.isInterrupted() && !closeLogSyncer) {
 
-          Thread.sleep(this.optionalFlushInterval);
-          sync();
+          try {
+            Thread.sleep(this.optionalFlushInterval);
+            sync();
+          } catch (IOException e) {
+            LOG.error("Error while syncing, requesting close of hlog ", e);
+            requestLogRoll();
+          }
         }
-      } catch (IOException e) {
-        LOG.error("Error while syncing, requesting close of hlog ", e);
-        requestLogRoll();
       } catch (InterruptedException e) {
         LOG.debug(getName() + " interrupted while waiting for sync requests");
       } finally {
         LOG.info(getName() + " exiting");
       }
     }
+    
+    void close() {
+      closeLogSyncer = true;
+    }
   }
 
   @Override
   public void sync() throws IOException {
+    long currentDeferredSeq;
     synchronized (this.updateLock) {
       if (this.closed) {
         return;
       }
+      currentDeferredSeq = lastDeferredSeq;
     }
     try {
       long now = System.currentTimeMillis();
       // Done in parallel for all writer threads, thanks to HDFS-895
-      this.writer.sync();
+      boolean syncSuccessful = true;
+      try {
+        this.writer.sync();
+      } catch(IOException io) {
+        syncSuccessful = false;
+      }
       synchronized (this.updateLock) {
+        if (!syncSuccessful) {
+          // HBASE-4387, retry with updateLock held
+          this.writer.sync();
+        }
+        if (currentDeferredSeq == lastDeferredSeq) {
+          lastDeferredSeq = 0;  // reset
+        }
         syncTime += System.currentTimeMillis() - now;
         syncOps++;
-        if (!logRollRequested) {
+        if (!logRollRunning) {
           checkLowReplication();
           if (this.writer.getLength() > this.logrollsize) {
             requestLogRoll();
@@ -991,25 +1118,50 @@ public class HLog implements Syncable {
       }
 
     } catch (IOException e) {
-      LOG.fatal("Could not append. Requesting close of hlog", e);
+      LOG.fatal("Could not sync. Requesting close of hlog", e);
       requestLogRoll();
       throw e;
     }
   }
 
   private void checkLowReplication() {
-    // if the number of replicas in HDFS has fallen below the initial
+    // if the number of replicas in HDFS has fallen below the configured
     // value, then roll logs.
     try {
       int numCurrentReplicas = getLogReplication();
-      if (numCurrentReplicas != 0 &&
-          numCurrentReplicas < this.initialReplication) {
-        LOG.warn("HDFS pipeline error detected. " +
-            "Found " + numCurrentReplicas + " replicas but expecting " +
-            this.initialReplication + " replicas. " +
-            " Requesting close of hlog.");
-        requestLogRoll();
-        logRollRequested = true;
+      if (numCurrentReplicas != 0
+          && numCurrentReplicas < this.minTolerableReplication) {
+        if (this.lowReplicationRollEnabled) {
+          if (this.consecutiveLogRolls < this.lowReplicationRollLimit) {
+            LOG.warn("HDFS pipeline error detected. " + "Found "
+                + numCurrentReplicas + " replicas but expecting no less than "
+                + this.minTolerableReplication + " replicas. "
+                + " Requesting close of hlog.");
+            requestLogRoll();
+            // If rollWriter is requested, increase consecutiveLogRolls. Once it
+            // is larger than lowReplicationRollLimit, disable the
+            // LowReplication-Roller
+            this.consecutiveLogRolls++;
+          } else {
+            LOG.warn("Too many consecutive RollWriter requests, it's a sign of "
+                + "the total number of live datanodes is lower than the tolerable replicas.");
+            this.consecutiveLogRolls = 0;
+            this.lowReplicationRollEnabled = false;
+          }
+        }
+      } else if (numCurrentReplicas >= this.minTolerableReplication) {
+        if (!this.lowReplicationRollEnabled) {
+          // The new writer's log replicas is always the default value.
+          // So we should not enable LowReplication-Roller. If numEntries
+          // is lower than or equals 1, we consider it as a new writer.
+          if (this.numEntries.get() <= 1) {
+            return;
+          }
+          // Once the live datanode number and the replicas return to normal,
+          // enable the LowReplication-Roller.
+          this.lowReplicationRollEnabled = true;
+          LOG.info("LowReplication-Roller was enabled.");
+        }
       }
     } catch (Exception e) {
       LOG.warn("Unable to invoke DFSOutputStream.getNumCurrentReplicas" + e +
@@ -1031,7 +1183,7 @@ public class HLog implements Syncable {
    */
   int getLogReplication() throws IllegalArgumentException, IllegalAccessException, InvocationTargetException {
     if(this.getNumCurrentReplicas != null && this.hdfs_out != null) {
-      Object repl = this.getNumCurrentReplicas.invoke(this.hdfs_out, NO_ARGS);
+      Object repl = this.getNumCurrentReplicas.invoke(getOutputStream(), NO_ARGS);
       if (repl instanceof Integer) {
         return ((Integer)repl).intValue();
       }
@@ -1109,18 +1261,52 @@ public class HLog implements Syncable {
   /**
    * By acquiring a log sequence ID, we can allow log messages to continue while
    * we flush the cache.
-   *
+   * 
    * Acquire a lock so that we do not roll the log between the start and
    * completion of a cache-flush. Otherwise the log-seq-id for the flush will
    * not appear in the correct logfile.
-   *
-   * @return sequence ID to pass {@link #completeCacheFlush(byte[], byte[], long, boolean)}
-   * (byte[], byte[], long)}
+   * 
+   * Ensuring that flushes and log-rolls don't happen concurrently also allows
+   * us to temporarily put a log-seq-number in lastSeqWritten against the region
+   * being flushed that might not be the earliest in-memory log-seq-number for
+   * that region. By the time the flush is completed or aborted and before the
+   * cacheFlushLock is released it is ensured that lastSeqWritten again has the
+   * oldest in-memory edit's log-sequence-number for the region that was being
+   * flushed.
+   * 
+   * In this method, by removing the entry in lastSeqWritten for the region
+   * being flushed we ensure that the next edit inserted in this region will be
+   * correctly recorded in {@link #append(HRegionInfo, HLogKey, WALEdit)}. The
+   * of the earliest in-memory log-sequence-number - which is now in the
+   * memstore snapshot - is saved temporarily in the lastSeqWritten map while
+   * the flush is active.
+   * 
+   * @return sequence ID to pass
+   *         {@link #completeCacheFlush(byte[], byte[], long, boolean)} (byte[],
+   *         byte[], long)}
    * @see #completeCacheFlush(byte[], byte[], long, boolean)
    * @see #abortCacheFlush()
    */
-  public long startCacheFlush() {
+  public long startCacheFlush(final byte[] encodedRegionName) {
     this.cacheFlushLock.lock();
+    Long seq = this.lastSeqWritten.remove(encodedRegionName);
+    // seq is the log-sequence-number of the oldest edit associated with this
+    // region. If a snapshot already exists - because the last flush failed -
+    // then seq will
+    // be the log-sequence-number of the oldest edit in the snapshot
+    if (seq != null) {
+      // keeping the earliest sequence number of the snapshot in
+      // lastSeqWritten maintains the correctness of
+      // getOldestOutstandingSeqNum(). But it doesn't matter really because
+      // everything is being done inside of cacheFlush lock.
+      Long oldseq = lastSeqWritten.put(getSnapshotName(encodedRegionName), seq);
+      if (oldseq != null) {
+        LOG.error("Logic Error Snapshot seq id from earlier flush still"
+            + " present! for region " + Bytes.toString(encodedRegionName)
+            + " overwritten oldseq=" + oldseq + "with new seq=" + seq);
+        Runtime.getRuntime().halt(1);
+      }
+    }
     return obtainSeqNum();
   }
 
@@ -1150,15 +1336,15 @@ public class HLog implements Syncable {
         writeTime += System.currentTimeMillis() - now;
         writeOps++;
         this.numEntries.incrementAndGet();
-        Long seq = this.lastSeqWritten.get(encodedRegionName);
-        if (seq != null && logSeqId >= seq.longValue()) {
-          this.lastSeqWritten.remove(encodedRegionName);
-        }
       }
       // sync txn to file system
       this.sync();
 
     } finally {
+      // updateLock not needed for removing snapshot's entry
+      // Cleaning up of lastSeqWritten is in the finally clause because we
+      // don't want to confuse getOldestOutstandingSeqNum()
+      this.lastSeqWritten.remove(getSnapshotName(encodedRegionName));
       this.cacheFlushLock.unlock();
     }
   }
@@ -1177,7 +1363,25 @@ public class HLog implements Syncable {
    * currently is a restart of the regionserver so the snapshot content dropped
    * by the failure gets restored to the memstore.
    */
-  public void abortCacheFlush() {
+  public void abortCacheFlush(byte[] encodedRegionName) {
+    Long snapshot_seq = this.lastSeqWritten
+        .remove(getSnapshotName(encodedRegionName));
+    if (snapshot_seq != null) {
+      // updateLock not necessary because we are racing against
+      // lastSeqWritten.putIfAbsent() in append() and we will always win,
+      // before releasing cacheFlushLock make sure that the region's entry in
+      // lastSeqWritten points to the earliest edit in the region
+      Long current_memstore_earliest_seq = this.lastSeqWritten.put(
+          encodedRegionName, snapshot_seq);
+      if (current_memstore_earliest_seq != null
+          && (current_memstore_earliest_seq.longValue() <= snapshot_seq
+              .longValue())) {
+        LOG.error("Logic Error region " + Bytes.toString(encodedRegionName)
+            + " acquired edits out of order current memstore seq="
+            + current_memstore_earliest_seq + " snapshot seq=" + snapshot_seq);
+        Runtime.getRuntime().halt(1);
+      }
+    }
     this.cacheFlushLock.unlock();
   }
 
@@ -1302,6 +1506,15 @@ public class HLog implements Syncable {
   }
 
   /**
+   * Get LowReplication-Roller status
+   * 
+   * @return lowReplicationRollEnabled
+   */
+  public boolean isLowReplicationRollEnabled() {
+    return lowReplicationRollEnabled;
+  }
+
+  /**
    * Get the directory we are making logs in.
    * 
    * @return dir
@@ -1323,7 +1536,8 @@ public class HLog implements Syncable {
   }
 
   /**
-   * Returns sorted set of edit files made by wal-log splitter.
+   * Returns sorted set of edit files made by wal-log splitter, excluding files
+   * with '.temp' suffix.
    * @param fs
    * @param regiondir
    * @return Files in passed <code>regiondir</code> as a sorted set.
@@ -1333,23 +1547,33 @@ public class HLog implements Syncable {
       final Path regiondir)
   throws IOException {
     Path editsdir = getRegionDirRecoveredEditsDir(regiondir);
-    FileStatus[] files = fs.listStatus(editsdir, new PathFilter() {
-      @Override
-      public boolean accept(Path p) {
-        boolean result = false;
-        try {
-          // Return files and only files that match the editfile names pattern.
-          // There can be other files in this directory other than edit files.
-          // In particular, on error, we'll move aside the bad edit file giving
-          // it a timestamp suffix.  See moveAsideBadEditsFile.
-          Matcher m = EDITFILES_NAME_PATTERN.matcher(p.getName());
-          result = fs.isFile(p) && m.matches();
-        } catch (IOException e) {
-          LOG.warn("Failed isFile check on " + p);
+
+    FileStatus [] files = null;
+    if (fs.exists(editsdir)) {
+      files = fs.listStatus(editsdir, new PathFilter () {
+        @Override
+        public boolean accept(Path p) {
+          boolean result = false;
+          try {
+            // Return files and only files that match the editfile names pattern.
+            // There can be other files in this directory other than edit files.
+            // In particular, on error, we'll move aside the bad edit file giving
+            // it a timestamp suffix.  See moveAsideBadEditsFile.
+            Matcher m = EDITFILES_NAME_PATTERN.matcher(p.getName());
+            result = fs.isFile(p) && m.matches();
+            // Skip the file whose name ends with RECOVERED_LOG_TMPFILE_SUFFIX,
+            // because it means splithlog thread is writting this file.
+            if (p.getName().endsWith(RECOVERED_LOG_TMPFILE_SUFFIX)) {
+              result = false;
+            }
+          } catch (IOException e) {
+            LOG.warn("Failed isFile check on " + p);
+          }
+          return result;
         }
-        return result;
-      }
-    });
+      });
+    }
+
     NavigableSet<Path> filesSorted = new TreeSet<Path>();
     if (files == null) return filesSorted;
     for (FileStatus status: files) {
@@ -1436,6 +1660,11 @@ public class HLog implements Syncable {
     HLogSplitter logSplitter = HLogSplitter.createLogSplitter(
         conf, baseDir, p, oldLogDir, fs);
     logSplitter.splitLog();
+  }
+
+  /** Provide access to currently deferred sequence num for tests */
+  long getLastDeferredSeq() {
+    return lastDeferredSeq;
   }
 
   /**

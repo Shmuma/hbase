@@ -22,6 +22,7 @@ package org.apache.hadoop.hbase.replication.regionserver;
 import java.io.EOFException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -118,7 +119,9 @@ public class ReplicationSource extends Thread
   // List of all the dead region servers that had this queue (if recovered)
   private String[] deadRegionServers;
   // Maximum number of retries before taking bold actions
-  private long maxRetriesMultiplier;
+  private int maxRetriesMultiplier;
+  // Socket timeouts require even bolder actions since we don't want to DDOS
+  private int socketTimeoutMultiplier;
   // Current number of entries that we need to replicate
   private int currentNbEntries = 0;
   // Current number of operations (Put/Delete) that we need to replicate
@@ -160,7 +163,8 @@ public class ReplicationSource extends Thread
       this.entriesArray[i] = new HLog.Entry();
     }
     this.maxRetriesMultiplier =
-        this.conf.getLong("replication.source.maxretriesmultiplier", 10);
+        this.conf.getInt("replication.source.maxretriesmultiplier", 10);
+    this.socketTimeoutMultiplier = maxRetriesMultiplier * maxRetriesMultiplier;
     this.queue =
         new PriorityBlockingQueue<Path>(
             conf.getInt("hbase.regionserver.maxlogs", 32),
@@ -230,7 +234,7 @@ public class ReplicationSource extends Thread
   public void run() {
     connectToPeers();
     // We were stopped while looping to connect to sinks, just abort
-    if (this.stopper.isStopped()) {
+    if (!this.isActive()) {
       return;
     }
     // If this is recovered, the queue is already full and the first log
@@ -246,7 +250,7 @@ public class ReplicationSource extends Thread
     }
     int sleepMultiplier = 1;
     // Loop until we close down
-    while (!stopper.isStopped() && this.running) {
+    while (isActive()) {
       // Sleep until replication is enabled again
       if (!this.replicating.get() || !this.sourceEnabled.get()) {
         if (sleepForRetries("Replication is disabled", sleepMultiplier)) {
@@ -329,7 +333,7 @@ public class ReplicationSource extends Thread
       // If we didn't get anything to replicate, or if we hit a IOE,
       // wait a bit and retry.
       // But if we need to stop, don't bother sleeping
-      if (!stopper.isStopped() && (gotIOE || currentNbEntries == 0)) {
+      if (this.isActive() && (gotIOE || currentNbEntries == 0)) {
         this.manager.logPositionAndCleanOldLogs(this.currentPath,
             this.peerClusterZnode, this.position, queueRecovered);
         if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
@@ -340,6 +344,13 @@ public class ReplicationSource extends Thread
       sleepMultiplier = 1;
       shipEdits();
 
+    }
+    if (this.conn != null) {
+      try {
+        this.conn.close();
+      } catch (IOException e) {
+        LOG.debug("Attempt to close connection failed", e);
+      }
     }
     LOG.debug("Source exiting " + peerClusterId);
   }
@@ -393,7 +404,8 @@ public class ReplicationSource extends Thread
 
   private void connectToPeers() {
     // Connect to peer cluster first, unless we have to stop
-    while (!this.stopper.isStopped() && this.currentPeers.size() == 0) {
+    while (this.isActive() && this.currentPeers.size() == 0) {
+
       try {
         chooseSinks();
         Thread.sleep(this.sleepForRetries);
@@ -444,15 +456,20 @@ public class ReplicationSource extends Thread
 
             Path deadRsDirectory =
                 new Path(manager.getLogDir().getParent(), this.deadRegionServers[i]);
-            Path possibleLogLocation =
-                new Path(deadRsDirectory, currentPath.getName());
-            LOG.info("Possible location " + possibleLogLocation.toUri().toString());
-            if (this.manager.getFs().exists(possibleLogLocation)) {
-              // We found the right new location
-              LOG.info("Log " + this.currentPath + " still exists at " +
-                  possibleLogLocation);
-              // Breaking here will make us sleep since reader is null
-              return true;
+            Path[] locs = new Path[] {
+                new Path(deadRsDirectory, currentPath.getName()),
+                new Path(deadRsDirectory.suffix(HLog.SPLITTING_EXT),
+                                          currentPath.getName()),
+            };
+            for (Path possibleLogLocation : locs) {
+              LOG.info("Possible location " + possibleLogLocation.toUri().toString());
+              if (this.manager.getFs().exists(possibleLogLocation)) {
+                // We found the right new location
+                LOG.info("Log " + this.currentPath + " still exists at " +
+                    possibleLogLocation);
+                // Breaking here will make us sleep since reader is null
+                return true;
+              }
             }
           }
           // TODO What happens if the log was missing from every single location?
@@ -552,7 +569,7 @@ public class ReplicationSource extends Thread
       LOG.warn("Was given 0 edits to ship");
       return;
     }
-    while (!this.stopper.isStopped()) {
+    while (this.isActive()) {
       try {
         HRegionInterface rrs = getRS();
         LOG.debug("Replicating " + currentNbEntries);
@@ -575,10 +592,22 @@ public class ReplicationSource extends Thread
           ioe = ((RemoteException) ioe).unwrapRemoteException();
           LOG.warn("Can't replicate because of an error on the remote cluster: ", ioe);
         } else {
-          LOG.warn("Can't replicate because of a local or network error: ", ioe);
+          if (ioe instanceof SocketTimeoutException) {
+            // This exception means we waited for more than 60s and nothing
+            // happened, the cluster is alive and calling it right away
+            // even for a test just makes things worse.
+            sleepForRetries("Encountered a SocketTimeoutException. Since the" +
+              "call to the remote cluster timed out, which is usually " +
+              "caused by a machine failure or a massive slowdown",
+              this.socketTimeoutMultiplier);
+          } else {
+            LOG.warn("Can't replicate because of a local or network error: ", ioe);
+          }
         }
+
         try {
           boolean down;
+          // Spin while the slave is down and we're not asked to shutdown/close
           do {
             down = isSlaveDown();
             if (down) {
@@ -588,7 +617,7 @@ public class ReplicationSource extends Thread
                 chooseSinks();
               }
             }
-          } while (!this.stopper.isStopped() && down);
+          } while (this.isActive() && down );
         } catch (InterruptedException e) {
           LOG.debug("Interrupted while trying to contact the peer cluster");
         } catch (KeeperException e) {
@@ -625,7 +654,8 @@ public class ReplicationSource extends Thread
     Thread.UncaughtExceptionHandler handler =
         new Thread.UncaughtExceptionHandler() {
           public void uncaughtException(final Thread t, final Throwable e) {
-            terminate("Uncaught exception during runtime", new Exception(e));
+            LOG.error("Unexpected exception in ReplicationSource," +
+              " currentPath=" + currentPath, e);
           }
         };
     Threads.setDaemonThreadRunning(
@@ -706,6 +736,10 @@ public class ReplicationSource extends Thread
 
   public void setSourceEnabled(boolean status) {
     this.sourceEnabled.set(status);
+  }
+
+  private boolean isActive() {
+    return !this.stopper.isStopped() && this.running;
   }
 
   /**

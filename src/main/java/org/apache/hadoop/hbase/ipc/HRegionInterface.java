@@ -22,7 +22,6 @@ package org.apache.hadoop.hbase.ipc;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.util.List;
-import java.util.NavigableSet;
 
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HRegionInfo;
@@ -40,6 +39,7 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.wal.HLog;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.ipc.RemoteException;
 
 /**
@@ -304,8 +304,9 @@ public interface HRegionInterface extends HBaseRPCProtocolVersion, Stoppable, Ab
   /**
    * Bulk load an HFile into an open region
    */
+  @Deprecated
   public void bulkLoadHFile(String hfilePath, byte[] regionName, byte[] familyName)
-  throws IOException;
+      throws IOException;
 
   // Master methods
 
@@ -343,6 +344,20 @@ public interface HRegionInterface extends HBaseRPCProtocolVersion, Stoppable, Ab
   public boolean closeRegion(final HRegionInfo region, final boolean zk)
   throws IOException;
 
+  /**
+   * Closes the region in the RS with the specified encoded regionName and will
+   * use or not use ZK during the close according to the specified flag. Note
+   * that the encoded region name is in byte format.
+   * 
+   * @param encodedRegionName
+   *          in bytes
+   * @param zk
+   *          true if to use zookeeper, false if need not.
+   * @return true if region is closed, false if not.
+   * @throws IOException
+   */
+  public boolean closeRegion(byte[] encodedRegionName, final boolean zk)
+      throws IOException;
   // Region administrative methods
 
   /**
@@ -405,4 +420,17 @@ public interface HRegionInterface extends HBaseRPCProtocolVersion, Stoppable, Ab
    * @throws IOException
    */
   public void replicateLogEntries(HLog.Entry[] entries) throws IOException;
+
+  /**
+   * Atomically bulk load multiple HFiles (say from different column families)
+   * into an open region.
+   * 
+   * @param familyPaths List of (family, hfile path) pairs
+   * @param regionName name of region to load hfiles into
+   * @return true if successful, false if failed recoverably
+   * @throws IOException if fails unrecoverably
+   */
+  /* TODO: Move into place above master operations after deprecation cycle */
+  public boolean bulkLoadHFiles(List<Pair<byte[], String>> familyPaths, byte[] regionName)
+  throws IOException;
 }

@@ -363,6 +363,14 @@ public class HRegionInfo extends VersionedWritable implements WritableComparable
   }
 
   /**
+   * Gets the table name.
+   * @return Table name.
+   */
+  public byte[] getTableName() {
+    return getTableName(regionName);
+  }
+
+  /**
    * Separate elements of a regionName.
    * @param regionName
    * @return Array of byte[] containing tableName, startKey and id
@@ -660,6 +668,15 @@ public class HRegionInfo extends VersionedWritable implements WritableComparable
     if (result != 0) {
       return result;
     }
+
+    // regionId is usually milli timestamp -- this defines older stamps
+    // to be "smaller" than newer stamps in sort order.
+    if (this.regionId > o.regionId) {
+      return 1;
+    } else if (this.regionId < o.regionId) {
+      return -1;
+    }
+
     if (this.offLine == o.offLine)
         return 0;
     if (this.offLine == true) return -1;

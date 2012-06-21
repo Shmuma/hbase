@@ -1,7 +1,7 @@
-From f740fec3a4021b02fc1bbe233d935fd47cca2432 Mon Sep 17 00:00:00 2001
+From acc10d3f440388430495e46f056959d37ae5313d Mon Sep 17 00:00:00 2001
 From: Todd Lipcon <todd@cloudera.com>
 Date: Wed, 12 Jan 2011 13:32:54 -0800
-Subject: [PATCH 02/50] HBASE-3533. Allow HBASE_LIBRARY_PATH to point to libs
+Subject: [PATCH 002/101] HBASE-3533. Allow HBASE_LIBRARY_PATH to point to libs
 
 Author: Todd Lipcon
 ---

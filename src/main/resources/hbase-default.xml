@@ -2,8 +2,6 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
 /**
- * Copyright 2009 The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -124,12 +122,28 @@
     before running a retry of a failed get, region lookup, etc.</description>
   </property>
   <property>
+    <name>hbase.connection.per.config</name>
+    <value>false</value>
+    <description>Disallows sharing of connections for configuration instances
+    with equivalent settings.
+    Default: false 
+    </description>
+  </property>
+  <property>
     <name>hbase.client.retries.number</name>
     <value>10</value>
     <description>Maximum retries.  Used as maximum for all retryable
     operations such as fetching of the root region from root region
     server, getting a cell's value, starting a row update, etc.
     Default: 10.
+    </description>
+  </property> 
+  <property>
+    <name>hbase.bulkload.retries.number</name>
+    <value>0</value>
+    <description>Maximum retries.  This is maximum number of iterations
+    to atomic bulk loads are attempted in the face of splitting operations
+    0 means never give up.  Default: 0.
     </description>
   </property>
   <property>
@@ -198,6 +212,15 @@
     <value>3600000</value>
     <description>Period at which we will roll the commit log regardless
     of how many edits it has.</description>
+  </property>
+  <property>
+    <name>hbase.regionserver.logroll.errors.tolerated</name>
+    <value>2</value>
+    <description>The number of consecutive WAL close errors we will allow
+    before triggering a server abort.  A setting of 0 will cause the
+    region server to abort if closing the current WAL writer fails during
+    log rolling.  Even a small value (2 or 3) will allow a region server
+    to ride over transient HDFS errors.</description>
   </property>
   <property>
     <name>hbase.regionserver.hlog.reader.impl</name>

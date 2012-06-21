@@ -24,7 +24,9 @@ Map<String, Integer> frags = null;
 HServerAddress rootLocation = null;
 HServerAddress  metaLocation = null;
 Map<String, HServerInfo> servers = null;
-boolean showAppendWarning = false;
+Set<String> deadServers = null;
+boolean showSyncWarning = false;
+boolean showHflushWarning = false;
 int interval = 1;
 </%args>
 <%import>
@@ -69,9 +71,9 @@ org.apache.hadoop.hbase.HTableDescriptor;
   for details.
   </div>
 </%if>
-<%if showAppendWarning %>
+<%if showSyncWarning && showHflushWarning %>
   <div class="warning">
-  You are currently running the HMaster without HDFS append support enabled.
+  You are currently running the HMaster without either HDFS sync or hflush support enabled.
   This may result in data loss.
   Please see the <a href="http://wiki.apache.org/hadoop/Hbase/HdfsSyncSupport">HBase wiki</a>
   for details.
@@ -105,6 +107,9 @@ org.apache.hadoop.hbase.HTableDescriptor;
 </%if>
 <%if (servers != null) %>
 <& regionServers &>
+</%if>
+<%if (deadServers != null) %>
+<& deadRegionServers &>
 </%if>
 
 <& AssignmentManagerStatusTmpl; assignmentManager=master.getAssignmentManager()&>
@@ -203,5 +208,45 @@ org.apache.hadoop.hbase.HTableDescriptor;
 </table>
 
 <p>Load is requests per second and count of regions loaded</p>
+</%if>
+</%def>
+
+<%def deadRegionServers>
+<h2>Dead Region Servers</h2>
+<%if (deadServers != null && deadServers.size() > 0)%>
+
+<table>
+<tr><th rowspan="<% deadServers.size() + 1%>"></th><th>Address</th><th>Start Code</th></tr>
+<%java>
+   String [] deadServerNames = deadServers.toArray(new String[deadServers.size()]);
+   int infoPort = master.getConfiguration().getInt("hbase.regionserver.info.port", 60030);
+   Arrays.sort(deadServerNames);
+   for (String deadServerName: deadServerNames) {
+     String hostname;
+     Long startcode;
+     // First, try parsing names like "hbase.apache.org,9454,1327103687194"
+     String delims = ",";
+     String[] tokens = deadServerName.split(delims);
+     if (tokens.length == 3) {
+       hostname = tokens[0] + ":" + infoPort;
+       startcode = Long.parseLong(tokens[2]);
+     } else {
+       // Then, try parsing names like "localhost:23569"
+       delims = ":";
+       tokens = deadServerName.split(delims);
+       if (tokens.length == 2) {
+         hostname = tokens[0] + ":" + infoPort;
+       } else {
+         hostname = deadServerName;
+       }
+       startcode = (long)-1;
+     }
+</%java>
+<tr><td><% hostname %></td><td><% startcode %></td></tr>
+<%java>
+   }
+</%java>
+<tr><th>Total: </th><td>servers: <% deadServers.size() %></td></tr>
+</table>
 </%if>
 </%def>

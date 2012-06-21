@@ -19,6 +19,7 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import java.io.Closeable;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
@@ -50,6 +51,7 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.UnknownScannerException;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
+import org.apache.hadoop.hbase.client.HConnectionManager.HConnectable;
 import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
@@ -58,10 +60,18 @@ import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.zookeeper.KeeperException;
 
 /**
- * Used to communicate with a single HBase table.
+ * <p>Used to communicate with a single HBase table.
  *
- * This class is not thread safe for updates; the underlying write buffer can
+ * <p>This class is not thread safe for reads nor write.
+ * 
+ * <p>In case of writes (Put, Delete), the underlying write buffer can
  * be corrupted if multiple threads contend over a single HTable instance.
+ * 
+ * <p>In case of reads, some fields used by a Scan are shared among all threads.
+ * The HTable implementation can either not contract to be safe in case of a Get
+ *
+ * <p>To access a table in a multi threaded environment, please consider
+ * using the {@link HTablePool} class to create your HTable instances.
  *
  * <p>Instances of HTable passed the same {@link Configuration} instance will
  * share connections to servers out on the cluster and to the zookeeper ensemble
@@ -81,13 +91,17 @@ import org.apache.zookeeper.KeeperException;
  * {@link HTable} passing a new {@link Configuration} instance that has the
  * new configuration.
  *
+ * <p>Note that this class implements the {@link Closeable} interface. When a
+ * HTable instance is no longer required, it *should* be closed in order to ensure
+ * that the underlying resources are promptly released.
+ *
  * @see HBaseAdmin for create, drop, list, enable and disable of tables.
  * @see HConnection
  * @see HConnectionManager
  */
-public class HTable implements HTableInterface {
+public class HTable implements HTableInterface, Closeable {
   private static final Log LOG = LogFactory.getLog(HTable.class);
-  private final HConnection connection;
+  private HConnection connection;
   private final byte [] tableName;
   protected final int scannerTimeout;
   private volatile Configuration configuration;
@@ -100,6 +114,8 @@ public class HTable implements HTableInterface {
   private int maxKeyValueSize;
   private ExecutorService pool;  // For Multi
   private long maxScannerResultSize;
+  private boolean closed;
+  private static final int DOPUT_WB_CHECK = 10;    // i.e., doPut checks the writebuffer every X Puts.
 
   /**
    * Creates an object to access a HBase table.
@@ -186,16 +202,19 @@ public class HTable implements HTableInterface {
     if (maxThreads == 0) {
       maxThreads = 1; // is there a better default?
     }
-
+    
+    long keepAliveTime = conf.getLong("hbase.htable.threads.keepAliveTime", 60);
+    
     // Using the "direct handoff" approach, new threads will only be created
     // if it is necessary and will grow unbounded. This could be bad but in HCM
     // we only create as many Runnables as there are region servers. It means
     // it also scales when new region servers are added.
     this.pool = new ThreadPoolExecutor(1, maxThreads,
-        60, TimeUnit.SECONDS,
+        keepAliveTime, TimeUnit.SECONDS,
         new SynchronousQueue<Runnable>(),
         new DaemonThreadFactory());
     ((ThreadPoolExecutor)this.pool).allowCoreThreadTimeOut(true);
+    this.closed = false;
   }
 
   /**
@@ -259,9 +278,14 @@ public class HTable implements HTableInterface {
    * @return {@code true} if table is online.
    * @throws IOException if a remote or network exception occurs
    */
-  public static boolean isTableEnabled(Configuration conf, byte[] tableName)
-  throws IOException {
-    return HConnectionManager.getConnection(conf).isTableEnabled(tableName);
+  public static boolean isTableEnabled(Configuration conf,
+      final byte[] tableName) throws IOException {
+    return HConnectionManager.execute(new HConnectable<Boolean>(conf) {
+      @Override
+      public Boolean connect(HConnection connection) throws IOException {
+        return connection.isTableEnabled(tableName);
+      }
+    });
   }
 
   /**
@@ -369,8 +393,8 @@ public class HTable implements HTableInterface {
         byte [] bytes = rowResult.getValue(HConstants.CATALOG_FAMILY,
           HConstants.REGIONINFO_QUALIFIER);
         if (bytes == null) {
-          LOG.warn("Null " + HConstants.REGIONINFO_QUALIFIER + " cell in " +
-            rowResult);
+          LOG.warn("Null " + HConstants.REGIONINFO_QUALIFIER_STR +
+        		  " cell in " + rowResult);
           return true;
         }
         HRegionInfo info = Writables.getHRegionInfo(bytes);
@@ -675,10 +699,17 @@ public class HTable implements HTableInterface {
   }
 
   private void doPut(final List<Put> puts) throws IOException {
+    int n = 0;
     for (Put put : puts) {
       validatePut(put);
       writeBuffer.add(put);
       currentWriteBufferSize += put.heapSize();
+     
+      // we need to periodically see if the writebuffer is full instead of waiting until the end of the List
+      n++;
+      if (n % DOPUT_WB_CHECK == 0 && currentWriteBufferSize > writeBufferSize) {
+        flushCommits();
+      }
     }
     if (autoFlush || currentWriteBufferSize > writeBufferSize) {
       flushCommits();
@@ -842,8 +873,15 @@ public class HTable implements HTableInterface {
 
   @Override
   public void close() throws IOException {
+    if (this.closed) {
+      return;
+    }
     flushCommits();
     this.pool.shutdown();
+    if (this.connection != null) {
+      this.connection.close();
+    }
+    this.closed = true;
   }
 
   // validate for well-formedness
@@ -1330,12 +1368,18 @@ public class HTable implements HTableInterface {
    * @param tableName name of table to configure.
    * @param enable Set to true to enable region cache prefetch. Or set to
    * false to disable it.
-   * @throws ZooKeeperConnectionException
+   * @throws IOException
    */
   public static void setRegionCachePrefetch(final byte[] tableName,
-      boolean enable) throws ZooKeeperConnectionException {
-    HConnectionManager.getConnection(HBaseConfiguration.create()).
-    setRegionCachePrefetch(tableName, enable);
+      final boolean enable) throws IOException {
+    HConnectionManager.execute(new HConnectable<Void>(HBaseConfiguration
+        .create()) {
+      @Override
+      public Void connect(HConnection connection) throws IOException {
+        connection.setRegionCachePrefetch(tableName, enable);
+        return null;
+      }
+    });
   }
 
   /**
@@ -1346,12 +1390,17 @@ public class HTable implements HTableInterface {
    * @param tableName name of table to configure.
    * @param enable Set to true to enable region cache prefetch. Or set to
    * false to disable it.
-   * @throws ZooKeeperConnectionException
+   * @throws IOException
    */
   public static void setRegionCachePrefetch(final Configuration conf,
-      final byte[] tableName, boolean enable) throws ZooKeeperConnectionException {
-    HConnectionManager.getConnection(conf).setRegionCachePrefetch(
-        tableName, enable);
+      final byte[] tableName, final boolean enable) throws IOException {
+    HConnectionManager.execute(new HConnectable<Void>(conf) {
+      @Override
+      public Void connect(HConnection connection) throws IOException {
+        connection.setRegionCachePrefetch(tableName, enable);
+        return null;
+      }
+    });
   }
 
   /**
@@ -1360,12 +1409,16 @@ public class HTable implements HTableInterface {
    * @param tableName name of table to check
    * @return true if table's region cache prefecth is enabled. Otherwise
    * it is disabled.
-   * @throws ZooKeeperConnectionException
+   * @throws IOException
    */
   public static boolean getRegionCachePrefetch(final Configuration conf,
-      final byte[] tableName) throws ZooKeeperConnectionException {
-    return HConnectionManager.getConnection(conf).getRegionCachePrefetch(
-        tableName);
+      final byte[] tableName) throws IOException {
+    return HConnectionManager.execute(new HConnectable<Boolean>(conf) {
+      @Override
+      public Boolean connect(HConnection connection) throws IOException {
+        return connection.getRegionCachePrefetch(tableName);
+      }
+    });
   }
 
   /**
@@ -1373,10 +1426,14 @@ public class HTable implements HTableInterface {
    * @param tableName name of table to check
    * @return true if table's region cache prefecth is enabled. Otherwise
    * it is disabled.
-   * @throws ZooKeeperConnectionException
+   * @throws IOException
    */
-  public static boolean getRegionCachePrefetch(final byte[] tableName) throws ZooKeeperConnectionException {
-    return HConnectionManager.getConnection(HBaseConfiguration.create()).
-    getRegionCachePrefetch(tableName);
+  public static boolean getRegionCachePrefetch(final byte[] tableName) throws IOException {
+    return HConnectionManager.execute(new HConnectable<Boolean>(HBaseConfiguration.create()) {
+      @Override
+      public Boolean connect(HConnection connection) throws IOException {
+        return connection.getRegionCachePrefetch(tableName);
+      }
+    });
   }
 }

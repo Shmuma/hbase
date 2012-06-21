@@ -1,0 +1,543 @@
+From d64bbd23a97e7c1ab3bfadcac05eccdd54e7f419 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 26 Apr 2012 15:56:48 -0700
+Subject: [PATCH 087/101] Revert CDH-3664 HBase Region distributions in Web UI
+
+Reason: Backward compatibility
+Author: Jimmy Xiang
+Ref: CDH-5436
+
+Revert "HBASE-3704 Show per region request count in table.jsp"
+Revert "HBASE-3676 Update region server load for AssignmentManager through regionServerReport()"
+Revert "HBASE-3507 requests count per HRegion and rebalance command; part 1"
+
+This reverts commit 974e6d5414be9b16c7c76bfc8255ce17e5df7f97.
+This reverts commit 723bb871678b80a07b54e1766846cdc4657dffed.
+This reverts commit 00d86ac720c5cbe0d4dc8ed3867c607e5cdf4d4d.
+---
+ pom.xml                                            |    5 --
+ .../java/org/apache/hadoop/hbase/HServerLoad.java  |   62 ++++++--------------
+ .../org/apache/hadoop/hbase/avro/AvroUtil.java     |    2 +-
+ .../apache/hadoop/hbase/master/ServerManager.java  |   12 ----
+ .../apache/hadoop/hbase/regionserver/HRegion.java  |   13 +----
+ .../hadoop/hbase/regionserver/HRegionServer.java   |    8 +--
+ .../hbase/regionserver/SplitTransaction.java       |    1 -
+ .../regionserver/metrics/RegionServerMetrics.java  |    8 ---
+ .../hbase/rest/StorageClusterStatusResource.java   |    2 +-
+ src/main/resources/hbase-webapps/master/table.jsp  |   28 +--------
+ 10 files changed, 25 insertions(+), 116 deletions(-)
+
+diff --git a/pom.xml b/pom.xml
+index 426add9..629925b 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -664,11 +664,6 @@
+       <version>${commons-cli.version}</version>
+     </dependency>
+     <dependency>
+-     <groupId>com.github.stephenc.high-scale-lib</groupId>
+-     <artifactId>high-scale-lib</artifactId>
+-     <version>1.1.1</version>
+-    </dependency>
+-    <dependency>
+       <groupId>commons-codec</groupId>
+       <artifactId>commons-codec</artifactId>
+       <version>${commons-codec.version}</version>
+diff --git a/src/main/java/org/apache/hadoop/hbase/HServerLoad.java b/src/main/java/org/apache/hadoop/hbase/HServerLoad.java
+index 561a000..efa7e0e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/HServerLoad.java
++++ b/src/main/java/org/apache/hadoop/hbase/HServerLoad.java
+@@ -22,9 +22,9 @@ package org.apache.hadoop.hbase;
+ import java.io.DataInput;
+ import java.io.DataOutput;
+ import java.io.IOException;
++import java.util.ArrayList;
++import java.util.Collection;
+ import java.util.Collections;
+-import java.util.Map;
+-import java.util.TreeMap;
+ 
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.Strings;
+@@ -47,7 +47,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+   /** the maximum allowable size of the heap, in MB */
+   private int maxHeapMB;
+   /** per-region load metrics */
+-  private Map<byte[], RegionLoad> regionLoad = new TreeMap<byte[], RegionLoad>(Bytes.BYTES_COMPARATOR);
++  private ArrayList<RegionLoad> regionLoad = new ArrayList<RegionLoad>();
+ 
+   /**
+    * Encapsulates per-region loading metrics.
+@@ -65,8 +65,6 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+     private int memstoreSizeMB;
+     /** the current total size of storefile indexes for the region, in MB */
+     private int storefileIndexSizeMB;
+-    /** the current total request made to region */
+-    private long requestsCount;
+ 
+     /**
+      * Constructor, for Writable
+@@ -82,18 +80,16 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+      * @param storefileSizeMB
+      * @param memstoreSizeMB
+      * @param storefileIndexSizeMB
+-     * @param requestsCount
+      */
+     public RegionLoad(final byte[] name, final int stores,
+         final int storefiles, final int storefileSizeMB,
+-        final int memstoreSizeMB, final int storefileIndexSizeMB,final long requestsCount) {
++        final int memstoreSizeMB, final int storefileIndexSizeMB) {
+       this.name = name;
+       this.stores = stores;
+       this.storefiles = storefiles;
+       this.storefileSizeMB = storefileSizeMB;
+       this.memstoreSizeMB = memstoreSizeMB;
+       this.storefileIndexSizeMB = storefileIndexSizeMB;
+-      this.requestsCount = requestsCount;
+     }
+ 
+     // Getters
+@@ -147,13 +143,6 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+       return storefileIndexSizeMB;
+     }
+ 
+-    /**
+-     * @return the number of requests made to region
+-     */
+-    public long getRequestsCount() {
+-      return requestsCount;
+-    }
+-
+     // Setters
+ 
+     /**
+@@ -192,13 +181,6 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+       this.storefileIndexSizeMB = storefileIndexSizeMB;
+     }
+ 
+-    /**
+-     * @param requestsCount the number of requests to region
+-     */
+-    public void setRequestsCount(long requestsCount) {
+-      this.requestsCount = requestsCount;
+-    }
+-
+     // Writable
+     public void readFields(DataInput in) throws IOException {
+       int namelen = in.readInt();
+@@ -209,7 +191,6 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+       this.storefileSizeMB = in.readInt();
+       this.memstoreSizeMB = in.readInt();
+       this.storefileIndexSizeMB = in.readInt();
+-      this.requestsCount = in.readLong();
+     }
+ 
+     public void write(DataOutput out) throws IOException {
+@@ -220,7 +201,6 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+       out.writeInt(storefileSizeMB);
+       out.writeInt(memstoreSizeMB);
+       out.writeInt(storefileIndexSizeMB);
+-      out.writeLong(requestsCount);
+     }
+ 
+     /**
+@@ -238,8 +218,6 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+         Integer.valueOf(this.memstoreSizeMB));
+       sb = Strings.appendKeyValue(sb, "storefileIndexSizeMB",
+         Integer.valueOf(this.storefileIndexSizeMB));
+-      sb = Strings.appendKeyValue(sb, "requestsCount",
+-          Long.valueOf(this.requestsCount));
+       return sb.toString();
+     }
+   }
+@@ -281,9 +259,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+    */
+   public HServerLoad(final HServerLoad hsl) {
+     this(hsl.numberOfRequests, hsl.usedHeapMB, hsl.maxHeapMB);
+-    for (Map.Entry<byte[], RegionLoad> e : hsl.regionLoad.entrySet()) {
+-      this.regionLoad.put(e.getKey(), e.getValue());
+-    }
++    this.regionLoad.addAll(hsl.regionLoad);
+   }
+ 
+   /**
+@@ -388,8 +364,8 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+   /**
+    * @return region load metrics
+    */
+-  public Map<byte[], RegionLoad> getRegionsLoad() {
+-    return Collections.unmodifiableMap(regionLoad);
++  public Collection<RegionLoad> getRegionsLoad() {
++    return Collections.unmodifiableCollection(regionLoad);
+   }
+ 
+   /**
+@@ -397,7 +373,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+    */
+   public int getStorefiles() {
+     int count = 0;
+-    for (RegionLoad info: regionLoad.values())
++    for (RegionLoad info: regionLoad)
+     	count += info.getStorefiles();
+     return count;
+   }
+@@ -407,7 +383,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+    */
+   public int getStorefileSizeInMB() {
+     int count = 0;
+-    for (RegionLoad info: regionLoad.values())
++    for (RegionLoad info: regionLoad)
+       count += info.getStorefileSizeMB();
+     return count;
+   }
+@@ -417,7 +393,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+    */
+   public int getMemStoreSizeInMB() {
+     int count = 0;
+-    for (RegionLoad info: regionLoad.values())
++    for (RegionLoad info: regionLoad)
+     	count += info.getMemStoreSizeMB();
+     return count;
+   }
+@@ -427,7 +403,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+    */
+   public int getStorefileIndexSizeInMB() {
+     int count = 0;
+-    for (RegionLoad info: regionLoad.values())
++    for (RegionLoad info: regionLoad)
+     	count += info.getStorefileIndexSizeMB();
+     return count;
+   }
+@@ -467,7 +443,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+    */
+   public void addRegionInfo(final HServerLoad.RegionLoad load) {
+     this.numberOfRegions++;
+-    this.regionLoad.put(load.getName(), load);
++    this.regionLoad.add(load);
+   }
+ 
+   /**
+@@ -476,16 +452,14 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+    * @param storefiles
+    * @param memstoreSizeMB
+    * @param storefileIndexSizeMB
+-   * @param requestsCount
+    * @deprecated Use {@link #addRegionInfo(RegionLoad)}
+    */
+   @Deprecated
+   public void addRegionInfo(final byte[] name, final int stores,
+       final int storefiles, final int storefileSizeMB,
+-      final int memstoreSizeMB, final int storefileIndexSizeMB,
+-      final long requestsCount) {
+-    this.regionLoad.put(name, new HServerLoad.RegionLoad(name, stores, storefiles,
+-      storefileSizeMB, memstoreSizeMB, storefileIndexSizeMB, requestsCount));
++      final int memstoreSizeMB, final int storefileIndexSizeMB) {
++    this.regionLoad.add(new HServerLoad.RegionLoad(name, stores, storefiles,
++      storefileSizeMB, memstoreSizeMB, storefileIndexSizeMB));
+   }
+ 
+   // Writable
+@@ -498,7 +472,7 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+     for (int i = 0; i < numberOfRegions; i++) {
+       RegionLoad rl = new RegionLoad();
+       rl.readFields(in);
+-      regionLoad.put(rl.getName(), rl);
++      regionLoad.add(rl);
+     }
+   }
+ 
+@@ -507,8 +481,8 @@ public class HServerLoad implements WritableComparable<HServerLoad> {
+     out.writeInt(usedHeapMB);
+     out.writeInt(maxHeapMB);
+     out.writeInt(numberOfRegions);
+-    for (RegionLoad rl: regionLoad.values())
+-      rl.write(out);
++    for (int i = 0; i < numberOfRegions; i++)
++      regionLoad.get(i).write(out);
+   }
+ 
+   // Comparable
+diff --git a/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java b/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java
+index d7a1e67..14e8fa1 100644
+--- a/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java
++++ b/src/main/java/org/apache/hadoop/hbase/avro/AvroUtil.java
+@@ -93,7 +93,7 @@ public class AvroUtil {
+     asl.numberOfRegions = hsl.getNumberOfRegions();
+     asl.numberOfRequests = hsl.getNumberOfRequests();
+ 
+-    Collection<HServerLoad.RegionLoad> regionLoads = hsl.getRegionsLoad().values();
++    Collection<HServerLoad.RegionLoad> regionLoads = hsl.getRegionsLoad();
+     Schema s = Schema.createArray(ARegionLoad.SCHEMA$);
+     GenericData.Array<ARegionLoad> aregionLoads = null;
+     if (regionLoads != null) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java b/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
+index f8de951..014f56b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
+@@ -368,18 +368,6 @@ public class ServerManager {
+     // No more piggyback messages on heartbeats for other stuff
+     return msgs;
+   }
+-  
+-  /**
+-   *  Make server load accessible to AssignmentManager
+-   * @param serverName
+-   * @return
+-   * @throws HServerLoad if serverName is known
+-   */
+-  HServerLoad getLoad(String serverName) {
+-    HServerInfo hsi = this.onlineServers.get(serverName);
+-    if (hsi == null) return null;
+-    return hsi.getLoad();
+-  }
+ 
+   /**
+    * @param serverName
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index d179499..6bb22f7 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -95,8 +95,6 @@ import org.apache.hadoop.io.MultipleIOException;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.util.StringUtils;
+ 
+-import org.cliffc.high_scale_lib.Counter;
+-
+ import com.google.common.collect.Lists;
+ 
+ /**
+@@ -163,8 +161,6 @@ public class HRegion implements HeapSize { // , Writable{
+ 
+   final AtomicLong memstoreSize = new AtomicLong(0);
+ 
+-  final Counter requestsCount = new Counter();
+-
+   /**
+    * The directory for the table this region is part of.
+    * This directory contains the directory for this region.
+@@ -457,11 +453,6 @@ public class HRegion implements HeapSize { // , Writable{
+     return this.regionInfo;
+   }
+ 
+-  /** @return requestsCount for this region */
+-  public long getRequestsCount() {
+-    return this.requestsCount.get();
+-  }
+-
+   /** @return true if region is closed */
+   public boolean isClosed() {
+     return this.closed.get();
+@@ -3047,7 +3038,6 @@ public class HRegion implements HeapSize { // , Writable{
+       listPaths(fs, newRegionDir);
+     }
+     HRegion dstRegion = HRegion.newHRegion(tableDir, log, fs, conf, newRegionInfo, null);
+-    dstRegion.requestsCount.set(a.requestsCount.get() + b.requestsCount.get());
+     dstRegion.initialize();
+     dstRegion.compactStores();
+     if (LOG.isDebugEnabled()) {
+@@ -3443,7 +3433,7 @@ public class HRegion implements HeapSize { // , Writable{
+       Bytes.SIZEOF_INT + // rowLockWaitDuration
+       (2 * Bytes.SIZEOF_BOOLEAN) + // forceMajorCompaction, splitRequest 
+       ClassSize.ARRAY + // splitPoint
+-      (24 * ClassSize.REFERENCE));
++      (23 * ClassSize.REFERENCE));
+ 
+   public static final long DEEP_OVERHEAD = FIXED_OVERHEAD +
+       ClassSize.OBJECT + // closeLock
+@@ -3602,7 +3592,6 @@ public class HRegion implements HeapSize { // , Writable{
+       throw new NotServingRegionException(regionInfo.getRegionNameAsString() +
+           " is closed");
+     }
+-    this.requestsCount.increment();
+   }
+ 
+   /**
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+index 93de201..17a393e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+@@ -922,7 +922,6 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+     int storefileSizeMB = 0;
+     int memstoreSizeMB = (int) (r.memstoreSize.get() / 1024 / 1024);
+     int storefileIndexSizeMB = 0;
+-    long requestsCount = r.requestsCount.get();
+     synchronized (r.stores) {
+       stores += r.stores.size();
+       for (Store store : r.stores.values()) {
+@@ -931,8 +930,8 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+         storefileIndexSizeMB += (int) (store.getStorefilesIndexSize() / 1024 / 1024);
+       }
+     }
+-    return new HServerLoad.RegionLoad(name,stores, storefiles,
+-        storefileSizeMB, memstoreSizeMB, storefileIndexSizeMB, requestsCount);
++    return new HServerLoad.RegionLoad(name, stores, storefiles,
++        storefileSizeMB, memstoreSizeMB, storefileIndexSizeMB);
+   }
+ 
+   /**
+@@ -1189,12 +1188,10 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+     int stores = 0;
+     int storefiles = 0;
+     long memstoreSize = 0;
+-    long requestsCount = 0;
+     long storefileIndexSize = 0;
+     for (Map.Entry<String, HRegion> e : this.onlineRegions.entrySet()) {
+         HRegion r = e.getValue();
+         memstoreSize += r.memstoreSize.get();
+-        requestsCount += r.requestsCount.get();
+         synchronized (r.stores) {
+           stores += r.stores.size();
+           for (Map.Entry<byte[], Store> ee : r.stores.entrySet()) {
+@@ -1207,7 +1204,6 @@ public class HRegionServer implements HRegionInterface, HBaseRPCErrorHandler,
+     this.metrics.stores.set(stores);
+     this.metrics.storefiles.set(storefiles);
+     this.metrics.memstoreSizeMB.set((int) (memstoreSize / (1024 * 1024)));
+-    this.metrics.requestsCount.set(requestsCount);
+     this.metrics.storefileIndexSizeMB
+         .set((int) (storefileIndexSize / (1024 * 1024)));
+     this.metrics.compactionQueueSize.set(compactSplitThread
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/SplitTransaction.java b/src/main/java/org/apache/hadoop/hbase/regionserver/SplitTransaction.java
+index 51b0f0c..7f1f4a4 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/SplitTransaction.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/SplitTransaction.java
+@@ -568,7 +568,6 @@ class SplitTransaction {
+     HRegion r = HRegion.newHRegion(this.parent.getTableDir(),
+       this.parent.getLog(), fs, this.parent.getConf(),
+       hri, flusher);
+-    r.requestsCount.set(this.parent.getRequestsCount() / 2);
+     HRegion.moveInitialFilesIntoPlace(fs, regionDir, r.getRegionDir());
+     return r;
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerMetrics.java b/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerMetrics.java
+index 8a6394e..e2adaa3 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerMetrics.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerMetrics.java
+@@ -127,11 +127,6 @@ public class RegionServerMetrics implements Updater {
+   public final MetricsIntValue storefiles = new MetricsIntValue("storefiles", registry);
+ 
+   /**
+-   * Count of requests
+-   */
+-  public final MetricsLongValue requestsCount = new MetricsLongValue("requestsCount", registry);
+-
+-  /**
+    * Sum of all the storefile index sizes in this regionserver in MB
+    */
+   public final MetricsIntValue storefileIndexSizeMB =
+@@ -247,7 +242,6 @@ public class RegionServerMetrics implements Updater {
+       this.storefiles.pushMetric(this.metricsRecord);
+       this.storefileIndexSizeMB.pushMetric(this.metricsRecord);
+       this.memstoreSizeMB.pushMetric(this.metricsRecord);
+-      this.requestsCount.pushMetric(this.metricsRecord);
+       this.regions.pushMetric(this.metricsRecord);
+       this.requests.pushMetric(this.metricsRecord);
+       this.compactionQueueSize.pushMetric(this.metricsRecord);
+@@ -337,8 +331,6 @@ public class RegionServerMetrics implements Updater {
+       Integer.valueOf(this.storefileIndexSizeMB.get()));
+     sb = Strings.appendKeyValue(sb, "memstoreSize",
+       Integer.valueOf(this.memstoreSizeMB.get()));
+-    sb = Strings.appendKeyValue(sb, "requestsCount",
+-        Long.valueOf(this.requestsCount.get()));
+     sb = Strings.appendKeyValue(sb, "compactionQueueSize",
+       Integer.valueOf(this.compactionQueueSize.get()));
+     sb = Strings.appendKeyValue(sb, "flushQueueSize",
+diff --git a/src/main/java/org/apache/hadoop/hbase/rest/StorageClusterStatusResource.java b/src/main/java/org/apache/hadoop/hbase/rest/StorageClusterStatusResource.java
+index 59f26f6..ad20ff3 100644
+--- a/src/main/java/org/apache/hadoop/hbase/rest/StorageClusterStatusResource.java
++++ b/src/main/java/org/apache/hadoop/hbase/rest/StorageClusterStatusResource.java
+@@ -80,7 +80,7 @@ public class StorageClusterStatusResource extends ResourceBase {
+             info.getStartCode(), load.getUsedHeapMB(),
+             load.getMaxHeapMB());
+         node.setRequests(load.getNumberOfRequests());
+-        for (HServerLoad.RegionLoad region: load.getRegionsLoad().values()) {
++        for (HServerLoad.RegionLoad region: load.getRegionsLoad()) {
+           node.addRegion(region.getName(), region.getStores(),
+             region.getStorefiles(), region.getStorefileSizeMB(),
+             region.getMemStoreSizeMB(), region.getStorefileIndexSizeMB());
+diff --git a/src/main/resources/hbase-webapps/master/table.jsp b/src/main/resources/hbase-webapps/master/table.jsp
+index 4b6c6d7..f7edce6 100644
+--- a/src/main/resources/hbase-webapps/master/table.jsp
++++ b/src/main/resources/hbase-webapps/master/table.jsp
+@@ -18,7 +18,7 @@
+  */
+ --%>
+ <%@ page contentType="text/html;charset=UTF-8"
+-  import="java.util.HashMap"
++  import="java.util.Map"
+   import="org.apache.hadoop.io.Writable"
+   import="org.apache.hadoop.conf.Configuration"
+   import="org.apache.hadoop.hbase.client.HTable"
+@@ -27,8 +27,6 @@
+   import="org.apache.hadoop.hbase.HRegionInfo"
+   import="org.apache.hadoop.hbase.HServerAddress"
+   import="org.apache.hadoop.hbase.HServerInfo"
+-  import="org.apache.hadoop.hbase.HServerLoad"
+-  import="org.apache.hadoop.hbase.HServerLoad.RegionLoad"
+   import="org.apache.hadoop.hbase.io.ImmutableBytesWritable"
+   import="org.apache.hadoop.hbase.master.HMaster" 
+   import="org.apache.hadoop.hbase.util.Bytes"
+@@ -40,7 +38,7 @@
+   HBaseAdmin hbadmin = new HBaseAdmin(conf);
+   String tableName = request.getParameter("name");
+   HTable table = new HTable(conf, tableName);
+-  String tableHeader = "<h2>Table Regions</h2><table><tr><th>Name</th><th>Region Server</th><th>Start Key</th><th>End Key</th><th>Requests</th></tr>";
++  String tableHeader = "<h2>Table Regions</h2><table><tr><th>Name</th><th>Region Server</th><th>Start Key</th><th>End Key</th></tr>";
+   HServerAddress rl = master.getCatalogTracker().getRootLocation();
+   boolean showFragmentation = conf.getBoolean("hbase.master.ui.fragmentation.enabled", false);
+   Map<String, Integer> frags = null;
+@@ -157,7 +155,6 @@
+ <%  } %>
+ </table>
+ <%
+-  Map<String, Integer> regDistribution = new HashMap<String, Integer>();
+   Map<HRegionInfo, HServerAddress> regions = table.getRegionsInfo();
+   if(regions != null && regions.size() > 0) { %>
+ <%=     tableHeader %>
+@@ -165,7 +162,6 @@
+   for(Map.Entry<HRegionInfo, HServerAddress> hriEntry : regions.entrySet()) {
+     HRegionInfo regionInfo = hriEntry.getKey();
+     HServerAddress addr = hriEntry.getValue();
+-    long req = 0;
+ 
+     int infoPort = 0;
+     String urlRegionServer = null;
+@@ -173,17 +169,9 @@
+     if (addr != null) {
+       HServerInfo info = master.getServerManager().getHServerInfo(addr);
+       if (info != null) {
+-        HServerLoad sl = info.getLoad();
+-        Map<byte[], RegionLoad> map = sl.getRegionsLoad();
+-        if (map.containsKey(regionInfo.getRegionName())) {
+-          req = map.get(regionInfo.getRegionName()).getRequestsCount();
+-        }
+         infoPort = info.getInfoPort();
+         urlRegionServer =
+             "http://" + addr.getHostname().toString() + ":" + infoPort + "/";
+-        Integer i = regDistribution.get(urlRegionServer);
+-        if (null == i) i = new Integer(0);
+-        regDistribution.put(urlRegionServer, i+1);
+       }
+     }
+ %>
+@@ -204,18 +192,6 @@
+   %>
+   <td><%= Bytes.toStringBinary(regionInfo.getStartKey())%></td>
+   <td><%= Bytes.toStringBinary(regionInfo.getEndKey())%></td>
+-  <td><%= req%></td>
+-</tr>
+-<% } %>
+-</table>
+-<h2>Regions by Region Server</h2>
+-<table><tr><th>Region Server</th><th>Region Count</th></tr>
+-<%
+-  for (Map.Entry<String, Integer> rdEntry : regDistribution.entrySet()) {
+-%>
+-<tr>
+-  <td><%= rdEntry.getKey()%></td>
+-  <td><%= rdEntry.getValue()%></td>
+ </tr>
+ <% } %>
+ </table>
+-- 
+1.7.0.4
+

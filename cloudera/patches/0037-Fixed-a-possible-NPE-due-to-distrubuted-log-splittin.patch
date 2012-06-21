@@ -1,0 +1,32 @@
+From b53db06076e328322344e4dff2c6aa3d065be915 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 10 Nov 2011 02:28:40 -0800
+Subject: [PATCH 037/101] Fixed a possible NPE due to distrubuted log splitting
+
+Reason: Bug
+Author: Jimmy Xiang
+Ref: CDH-3791
+---
+ .../hadoop/hbase/master/SplitLogManager.java       |    6 ++++--
+ 1 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+index 70f09fb..38fab03 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+@@ -158,8 +158,10 @@ public class SplitLogManager extends ZooKeeperListener {
+   public void finishInitialization() {
+     Threads.setDaemonThreadRunning(timeoutMonitor, serverName
+         + ".splitLogManagerTimeoutMonitor");
+-    this.watcher.registerListener(this);
+-    lookForOrphans();
++    if (this.watcher != null) {
++    	this.watcher.registerListener(this);
++    	lookForOrphans();
++    }
+   }
+ 
+   /**
+-- 
+1.7.0.4
+

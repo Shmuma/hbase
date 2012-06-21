@@ -25,6 +25,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -51,8 +52,6 @@ import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.catalog.CatalogTracker;
 import org.apache.hadoop.hbase.catalog.MetaEditor;
 import org.apache.hadoop.hbase.catalog.MetaReader;
-import org.apache.hadoop.hbase.client.HConnection;
-import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.MetaScanner;
 import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
 import org.apache.hadoop.hbase.client.Result;
@@ -68,6 +67,7 @@ import org.apache.hadoop.hbase.master.handler.DeleteTableHandler;
 import org.apache.hadoop.hbase.master.handler.DisableTableHandler;
 import org.apache.hadoop.hbase.master.handler.EnableTableHandler;
 import org.apache.hadoop.hbase.master.handler.ModifyTableHandler;
+import org.apache.hadoop.hbase.master.handler.ServerShutdownHandler;
 import org.apache.hadoop.hbase.master.handler.TableAddFamilyHandler;
 import org.apache.hadoop.hbase.master.handler.TableDeleteFamilyHandler;
 import org.apache.hadoop.hbase.master.handler.TableModifyFamilyHandler;
@@ -140,8 +140,6 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
   private final MasterMetrics metrics;
   // file system manager for the master FS operations
   private MasterFileSystem fileSystemManager;
-
-  private HConnection connection;
 
   // server manager to deal with region server info
   private ServerManager serverManager;
@@ -289,7 +287,15 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
           this);
       this.zooKeeper.registerListener(activeMasterManager);
       stallIfBackupMaster(this.conf, this.activeMasterManager);
-      this.activeMasterManager.blockUntilBecomingActiveMaster(startupStatus);
+
+      // The ClusterStatusTracker is setup before the other
+      // ZKBasedSystemTrackers because it's needed by the activeMasterManager
+      // to check if the cluster should be shutdown.
+      this.clusterStatusTracker = new ClusterStatusTracker(getZooKeeper(), this);
+      this.clusterStatusTracker.start();
+      this.activeMasterManager.blockUntilBecomingActiveMaster(
+        startupStatus,this.clusterStatusTracker);
+
       // We are either the active master or we were asked to shutdown
       if (!this.stopped) {
         finishInitialization(startupStatus);
@@ -313,7 +319,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
       if (this.catalogTracker != null) this.catalogTracker.stop();
       if (this.serverManager != null) this.serverManager.stop();
       if (this.assignmentManager != null) this.assignmentManager.stop();
-      HConnectionManager.deleteConnection(this.conf, true);
+      if (this.fileSystemManager != null) this.fileSystemManager.stop();
       this.zooKeeper.close();
     }
     LOG.info("HMaster main thread exiting");
@@ -360,7 +366,6 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     status.setStatus("Initializing Master file system");
     // TODO: Do this using Dependency Injection, using PicoContainer, Guice or Spring.
     this.fileSystemManager = new MasterFileSystem(this, metrics);
-    this.connection = HConnectionManager.getConnection(conf);
     this.executorService = new ExecutorService(getServerName());
     this.rsFatals = new MemoryBoundedLogMessageBuffer(
         conf.getLong("hbase.master.buffer.for.rs.fatals", 1*1024*1024));
@@ -368,7 +373,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     this.serverManager = new ServerManager(this, this, metrics);
 
     status.setStatus("Initializing ZK system trackers");
-    this.catalogTracker = new CatalogTracker(this.zooKeeper, this.connection,
+    this.catalogTracker = new CatalogTracker(this.zooKeeper, this.conf,
       this, conf.getInt("hbase.master.catalog.timeout", Integer.MAX_VALUE));
     this.catalogTracker.start();
 
@@ -383,8 +388,6 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
 
     // Set the cluster as up.  If new RSs, they'll be waiting on this before
     // going ahead with their startup.
-    this.clusterStatusTracker = new ClusterStatusTracker(getZooKeeper(), this);
-    this.clusterStatusTracker.start();
     boolean wasUp = this.clusterStatusTracker.isClusterUp();
     if (!wasUp) this.clusterStatusTracker.setClusterUp();
 
@@ -422,6 +425,9 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
       this.assignmentManager.processFailover();
     }
 
+    // Fixing up missing daughters if any
+    fixupDaughters();
+
     // Start balancer and meta catalog janitor after meta and regions have
     // been assigned.
     status.setStatus("Starting balancer and catalog janitor");
@@ -454,6 +460,8 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     if (!catalogTracker.verifyRootRegionLocation(timeout)) {
       this.assignmentManager.assignRoot();
       this.catalogTracker.waitForRoot();
+      //This guarantees that the transition has completed
+      this.assignmentManager.waitForAssignment(HRegionInfo.ROOT_REGIONINFO);
       assigned++;
     }
     LOG.info("-ROOT- assigned=" + assigned + ", rit=" + rit +
@@ -475,6 +483,37 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
       ", location=" + catalogTracker.getMetaLocation());
     status.setStatus("META and ROOT assigned.");
     return assigned;
+  }
+
+  void fixupDaughters() throws IOException {
+    final Map<HRegionInfo, Result> offlineSplitParents =
+      new HashMap<HRegionInfo, Result>();
+    // This visitor collects offline split parents in the .META. table
+    MetaReader.Visitor visitor = new MetaReader.Visitor() {
+      @Override
+      public boolean visit(Result r) throws IOException {
+        if (r == null || r.isEmpty()) return true;
+        HRegionInfo info = CatalogJanitor.getHRegionInfo(r);
+        if (info == null) return true; // Keep scanning
+        if (info.isOffline() && info.isSplit()) {
+          offlineSplitParents.put(info, r);
+        }
+        // Returning true means "keep scanning"
+        return true;
+      }
+    };
+    // Run full scan of .META. catalog table passing in our custom visitor
+    MetaReader.fullScan(this.catalogTracker, visitor);
+    // Now work on our list of found parents. See if any we can clean up.
+    int fixups = 0;
+    for (Map.Entry<HRegionInfo, Result> e : offlineSplitParents.entrySet()) {
+      fixups += ServerShutdownHandler.fixupDaughters(
+          e.getValue(), assignmentManager, catalogTracker);
+    }
+    if (fixups != 0) {
+      LOG.info("Scanned the catalog and fixed up " + fixups +
+        " missing daughter region(s)");
+    }
   }
 
   /*
@@ -635,7 +674,8 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
     // Everafter, the HSI combination 'server name' is what uniquely identifies
     // the incoming RegionServer.
     InetSocketAddress address = new InetSocketAddress(
-        HBaseServer.getRemoteIp().getHostName(),
+        Strings.domainNamePointerToHostName(
+          HBaseServer.getRemoteIp().getHostName()),
         serverInfo.getServerAddress().getPort());
     serverInfo.setServerAddress(new HServerAddress(address));
 
@@ -849,7 +889,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
         regionInfos.clear();
       }
 
-      // 4. Close the new region to flush to disk.  Close log file too.
+      // 3. Close the new region to flush to disk.  Close log file too.
       region.close();
     }
     hlog.closeAndDelete();
@@ -857,7 +897,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
       MetaEditor.addRegionsToMeta(catalogTracker, regionInfos);
     }
 
-    // 5. Trigger immediate assignment of the regions in round-robin fashion
+    // 4. Trigger immediate assignment of the regions in round-robin fashion
     if (newRegions.length == 1) {
       this.assignmentManager.assign(newRegions[0], true);
     } else {
@@ -976,7 +1016,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
 
   public void clearFromTransition(HRegionInfo hri) {
     if (this.assignmentManager.isRegionInTransition(hri) != null) {
-      this.assignmentManager.clearRegionFromTransition(hri);
+      this.assignmentManager.regionOffline(hri);
     }
   }
   /**
@@ -1098,8 +1138,24 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
       MetaReader.getRegion(this.catalogTracker, regionName);
     if (pair == null) throw new UnknownRegionException(Bytes.toStringBinary(regionName));
     HRegionInfo hri = pair.getFirst();
-    if (force) this.assignmentManager.clearRegionFromTransition(hri);
-    this.assignmentManager.unassign(hri, force);
+    if (force) {
+      this.assignmentManager.regionOffline(hri);
+      assignRegion(hri);
+    } else {
+      this.assignmentManager.unassign(hri, force);
+    }
+  }
+  
+  /**
+   * Special method, only used by hbck.
+   */
+  @Override
+  public void offline(final byte[] regionName) throws IOException {
+    Pair<HRegionInfo, HServerAddress> pair =
+      MetaReader.getRegion(this.catalogTracker, regionName);
+    if (pair == null) throw new UnknownRegionException(Bytes.toStringBinary(regionName));
+    HRegionInfo hri = pair.getFirst();
+    this.assignmentManager.regionOffline(hri);
   }
 
   /**
@@ -1126,7 +1182,6 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
           e.getCause().getMessage(): ""), e);
     }
   }
-
 
   /**
    * @see org.apache.hadoop.hbase.master.HMasterCommandLine

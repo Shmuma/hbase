@@ -1,0 +1,69 @@
+From c076719364eabcd11be715290f5052068e0cbe99 Mon Sep 17 00:00:00 2001
+From: Roman Shaposhnik <rvs@cloudera.com>
+Date: Wed, 24 Aug 2011 16:03:12 -0700
+Subject: [PATCH 022/101] HBASE-3465 Hbase should use a HADOOP_HOME environment variable if available.
+
+Reason: Bug
+Author: Alejandro Abdelnur
+Ref: DISTRO-272
+---
+ bin/hbase |   35 +++++++++++++++++++++++++++--------
+ 1 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/bin/hbase b/bin/hbase
+index 04322c2..04e0fcb 100755
+--- a/bin/hbase
++++ b/bin/hbase
+@@ -190,11 +190,34 @@ function append_path() {
+   fi
+ }
+ 
+-# setup 'java.library.path' for native-hadoop code if necessary
+-JAVA_LIBRARY_PATH="$HBASE_LIBRARY_PATH"
+-if [ -d "${HBASE_HOME}/build/native" -o -d "${HBASE_HOME}/lib/native" ]; then
+-  JAVA_PLATFORM=`CLASSPATH=${CLASSPATH} ${JAVA} org.apache.hadoop.util.PlatformName | sed -e "s/ /_/g"`
++JAVA_PLATFORM=""
++
++#If avail, add Hadoop to the CLASSPATH and to the JAVA_LIBRARY_PATH
++if [ ! -z $HADOOP_HOME ]; then
++  HADOOPCPPATH=""
++  if [ -z $HADOOP_CONF_DIR ]; then
++    HADOOPCPPATH=$(append_path "${HADOOPCPPATH}" "${HADOOP_HOME}/conf")
++  else
++    HADOOPCPPATH=$(append_path "${HADOOPCPPATH}" "${HADOOP_CONF_DIR}")
++  fi
++  HADOOPCPPATH=$(append_path "${HADOOPCPPATH}" `ls ${HADOOP_HOME}/hadoop-core*.jar | head -1`)
++  for i in "${HADOOP_HOME}/lib/"*.jar; do
++    HADOOPCPPATH="${HADOOPCPPATH}:$i"
++  done
++  CLASSPATH=$(append_path "${HADOOPCPPATH}" "${CLASSPATH}")
++  
++  if [ -d "${HADOOP_HOME}/lib/native" ]; then
++    JAVA_PLATFORM=`CLASSPATH=${HADOOPCPPATH} ${JAVA} org.apache.hadoop.util.PlatformName | sed -e "s/ /_/g"`
++    if [ -d "${HADOOP_HOME}/lib/native/${JAVA_PLATFORM}" ]; then
++      JAVA_LIBRARY_PATH=$(append_path "${JAVA_LIBRARY_PATH}" "${HADOOP_HOME}/lib/native/${JAVA_PLATFORM}")
++    fi
++  fi
++fi
+ 
++if [ -d "${HBASE_HOME}/build/native" -o -d "${HBASE_HOME}/lib/native" ]; then
++  if [ -z $JAVA_PLATFORM ]; then
++    JAVA_PLATFORM=`CLASSPATH=${CLASSPATH} ${JAVA} org.apache.hadoop.util.PlatformName | sed -e "s/ /_/g"`
++  fi
+   if [ -d "$HBASE_HOME/build/native" ]; then
+     JAVA_LIBRARY_PATH=$(append_path "$JAVA_LIBRARY_PATH" ${HBASE_HOME}/build/native/${JAVA_PLATFORM}/lib)
+   fi
+@@ -204,10 +227,6 @@ if [ -d "${HBASE_HOME}/build/native" -o -d "${HBASE_HOME}/lib/native" ]; then
+   fi
+ fi
+ 
+-if [ -d "/usr/lib/hadoop-0.20/lib/native/${JAVA_PLATFORM}" ] ; then
+-  JAVA_LIBRARY_PATH=$(append_path "${JAVA_LIBRARY_PATH}" /usr/lib/hadoop-0.20/lib/native/${JAVA_PLATFORM})
+-fi
+-
+ # cygwin path translation
+ if $cygwin; then
+   JAVA_LIBRARY_PATH=`cygpath -p "$JAVA_LIBRARY_PATH"`
+-- 
+1.7.0.4
+

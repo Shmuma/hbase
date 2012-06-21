@@ -114,8 +114,8 @@ public class TestLoadIncrementalHFiles {
           new byte[][]{ Bytes.toBytes("fff"), Bytes.toBytes("zzz") },
     });
   }
-
-  private void runTest(String testName, BloomType bloomType,
+  
+  private void runTest(String testName, BloomType bloomType, 
           byte[][][] hfileRanges) throws Exception {
     Path dir = HBaseTestingUtility.getTestDir(testName);
     FileSystem fs = util.getTestFileSystem();

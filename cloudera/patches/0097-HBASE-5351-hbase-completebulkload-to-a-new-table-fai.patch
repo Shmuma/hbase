@@ -1,0 +1,440 @@
+From f5ae6d9cbe9cfbcd01b0f5af09050c12ecc972a6 Mon Sep 17 00:00:00 2001
+From: Gregory Chanan <gchanan@cloudera.com>
+Date: Mon, 30 Apr 2012 16:31:41 -0700
+Subject: [PATCH 097/101] HBASE-5351 hbase completebulkload to a new table fails in a race
+
+CDH-5519: TestImportTsv.testLoadToNewTable fails in CDH3u4 (Backport HBASE-5351)
+Backported HBASE-5351 to CDH3u4.
+
+I also had to re-backport HBASE-3440, which is a bit of a mess.  It was originally in 0.92/0.90 and we backported to cdh3u3 (or earlier).  It got reverted upstream in 0.90 later, and got reverted when we rebased to 0.90.6.  It was reverted upstream for two reasons:
+1) It didn't compile [this was fixed by our backport]
+2) It made the LoadIncrementalHFiles class incompatible (this isn't a wire-compatibility thing, just changed the interface for the class).  Since this made it into cdh3u3, it is actually incompatible for us to revert it.
+
+Reason: Bug
+Author: Gregory Chanan
+Ref: CDH-5519
+---
+ bin/loadtable.rb                                   |  132 +-------------------
+ .../org/apache/hadoop/hbase/client/HBaseAdmin.java |    4 +-
+ .../hbase/mapreduce/LoadIncrementalHFiles.java     |  130 +++++++++++++++++++-
+ .../hbase/mapreduce/TestLoadIncrementalHFiles.java |   68 ++++++++++
+ 4 files changed, 199 insertions(+), 135 deletions(-)
+
+diff --git a/bin/loadtable.rb b/bin/loadtable.rb
+index 7b9ced2..ea8c726 100644
+--- a/bin/loadtable.rb
++++ b/bin/loadtable.rb
+@@ -17,134 +17,4 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ #
+-# Script that takes over from org.apache.hadoop.hbase.mapreduce.HFileOutputFormat.
+-# Pass it output directory of HFileOutputFormat. It will read the passed files,
+-# move them into place and update the catalog table appropriately.  Warning:
+-# it will overwrite anything that exists already for passed table.
+-# It expects hbase to be up and running so it can insert table info.
+-#
+-# To see usage for this script, run: 
+-#
+-#  ${HBASE_HOME}/bin/hbase org.jruby.Main loadtable.rb
+-#
+-include Java
+-import java.util.TreeMap
+-import org.apache.hadoop.hbase.client.HTable
+-import org.apache.hadoop.hbase.client.Put
+-import org.apache.hadoop.hbase.util.FSUtils
+-import org.apache.hadoop.hbase.util.Bytes
+-import org.apache.hadoop.hbase.util.Writables
+-import org.apache.hadoop.hbase.HConstants
+-import org.apache.hadoop.hbase.HBaseConfiguration
+-import org.apache.hadoop.hbase.HRegionInfo
+-import org.apache.hadoop.hbase.HTableDescriptor
+-import org.apache.hadoop.hbase.HColumnDescriptor
+-import org.apache.hadoop.hbase.HRegionInfo
+-import org.apache.hadoop.hbase.io.hfile.HFile
+-import org.apache.hadoop.fs.Path
+-import org.apache.hadoop.fs.FileSystem
+-import org.apache.hadoop.mapred.OutputLogFilter
+-import org.apache.commons.logging.Log
+-import org.apache.commons.logging.LogFactory
+-
+-# Name of this script
+-NAME = "loadtable"
+-
+-# Print usage for this script
+-def usage
+-  puts 'Usage: %s.rb TABLENAME HFILEOUTPUTFORMAT_OUTPUT_DIR' % NAME
+-  exit!
+-end
+-
+-# Passed 'dir' exists and is a directory else exception
+-def isDirExists(fs, dir)
+-  raise IOError.new("Does not exit: " + dir.toString()) unless fs.exists(dir)
+-  raise IOError.new("Not a directory: " + dir.toString()) unless fs.isDirectory(dir)
+-end
+-
+-# Check arguments
+-if ARGV.size != 2
+-  usage
+-end
+-
+-# Check good table names were passed.
+-tableName = HTableDescriptor.isLegalTableName(ARGV[0].to_java_bytes)
+-outputdir = Path.new(ARGV[1])
+-
+-# Get configuration to use.
+-c = HBaseConfiguration.new()
+-# Get a logger and a metautils instance.
+-LOG = LogFactory.getLog(NAME)
+-
+-# Set hadoop filesystem configuration using the hbase.rootdir.
+-# Otherwise, we'll always use localhost though the hbase.rootdir
+-# might be pointing at hdfs location.
+-c.set("fs.defaultFS", c.get(HConstants::HBASE_DIR))
+-fs = FileSystem.get(c)
+-
+-# If hfiles directory does not exist, exit.
+-isDirExists(fs, outputdir)
+-# Create table dir if it doesn't exist.
+-rootdir = FSUtils.getRootDir(c)
+-tableDir = Path.new(rootdir, Path.new(Bytes.toString(tableName)))
+-fs.mkdirs(tableDir) unless fs.exists(tableDir)
+-
+-# Start. Per hfile, move it, and insert an entry in catalog table.
+-families = fs.listStatus(outputdir, OutputLogFilter.new())
+-throw IOError.new("Can do one family only") if families.length > 1
+-# Read meta on all files. Put in map keyed by start key.
+-map = TreeMap.new(Bytes::ByteArrayComparator.new())
+-family = families[0]
+-# Make sure this subdir exists under table
+-hfiles = fs.listStatus(family.getPath())
+-LOG.info("Found " + hfiles.length.to_s + " hfiles");
+-count = 0
+-for hfile in hfiles
+-  reader = HFile::Reader.new(fs, hfile.getPath(), nil, false)
+-  begin
+-    fileinfo = reader.loadFileInfo() 
+-    firstkey = reader.getFirstKey()
+-    # First key is row/column/ts.  We just want the row part.
+-    rowlen = Bytes.toShort(firstkey)
+-    firstkeyrow = firstkey[2, rowlen] 
+-    LOG.info(count.to_s + " read firstkey of " +
+-      Bytes.toString(firstkeyrow) + " from " + hfile.getPath().toString())
+-    map.put(firstkeyrow, [hfile, fileinfo])
+-    count = count + 1
+-  ensure
+-    reader.close()
+-  end
+-end
+-# Now I have sorted list of fileinfo+paths.  Start insert.
+-# Get a client on catalog table.
+-meta = HTable.new(c, HConstants::META_TABLE_NAME)
+-# I can't find out from hfile how its compressed.
+-# Using all defaults. Change manually after loading if
+-# something else wanted in column or table attributes.
+-familyName = family.getPath().getName()
+-hcd = HColumnDescriptor.new(familyName)
+-htd = HTableDescriptor.new(tableName)
+-htd.addFamily(hcd)
+-previouslastkey = HConstants::EMPTY_START_ROW
+-count = map.size()
+-for i in map.descendingKeySet().iterator()
+-  tuple = map.get(i)
+-  startkey = i
+-  count = count - 1
+-  # If last time through loop, set start row as EMPTY_START_ROW
+-  startkey = HConstants::EMPTY_START_ROW unless count > 0
+-  # Next time around, lastkey is this startkey
+-  hri = HRegionInfo.new(htd, startkey, previouslastkey)  
+-  previouslastkey = startkey 
+-  LOG.info(hri.toString())
+-  hfile = tuple[0].getPath()
+-  rdir = Path.new(Path.new(tableDir, hri.getEncodedName().to_s), familyName)
+-  fs.mkdirs(rdir)
+-  tgt = Path.new(rdir, hfile.getName())
+-  fs.rename(hfile, tgt)
+-  LOG.info("Moved " + hfile.toString() + " to " + tgt.toString())
+-  p = Put.new(hri.getRegionName())
+-  p.add(HConstants::CATALOG_FAMILY, HConstants::REGIONINFO_QUALIFIER, Writables.getBytes(hri))
+-  meta.put(p)
+-  LOG.info("Inserted " + hri.toString())
+-end
++puts 'DISABLED!!!! Use completebulkload instead.  See tail of http://hbase.apache.org/bulk-loads.html'
+diff --git a/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java b/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
+index a6885f5..65ac527 100644
+--- a/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
++++ b/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
+@@ -367,7 +367,9 @@ public class HBaseAdmin implements Abortable, Closeable {
+ 
+   /**
+    * Creates a new table but does not block and wait for it to come online.
+-   * Asynchronous operation.
++   * Asynchronous operation.  To check if the table exists, use
++   * {@link: #isTableAvailable} -- it is not safe to create an HTable
++   * instance to this table before it is available.
+    *
+    * @param desc table descriptor for table
+    *
+diff --git a/src/main/java/org/apache/hadoop/hbase/mapreduce/LoadIncrementalHFiles.java b/src/main/java/org/apache/hadoop/hbase/mapreduce/LoadIncrementalHFiles.java
+index 3cd0348..0f04bf7 100644
+--- a/src/main/java/org/apache/hadoop/hbase/mapreduce/LoadIncrementalHFiles.java
++++ b/src/main/java/org/apache/hadoop/hbase/mapreduce/LoadIncrementalHFiles.java
+@@ -40,6 +40,7 @@ import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicLong;
++import java.util.ArrayList;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+@@ -69,6 +70,11 @@ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.Pair;
+ import org.apache.hadoop.util.Tool;
+ import org.apache.hadoop.util.ToolRunner;
++import org.apache.hadoop.hbase.HBaseConfiguration;
++import org.apache.hadoop.hbase.HTableDescriptor;
++import org.apache.hadoop.hbase.client.HBaseAdmin;
++import java.util.TreeMap;
++
+ 
+ import com.google.common.collect.HashMultimap;
+ import com.google.common.collect.Multimap;
+@@ -82,14 +88,21 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
+ public class LoadIncrementalHFiles extends Configured implements Tool {
+ 
+   private static Log LOG = LogFactory.getLog(LoadIncrementalHFiles.class);
++  private static final int  TABLE_CREATE_MAX_RETRIES = 20;
++  private static final long TABLE_CREATE_SLEEP = 60000;
++  private HBaseAdmin hbAdmin;
+   static AtomicLong regionCount = new AtomicLong(0);
+ 
+   public static String NAME = "completebulkload";
+ 
+-  public LoadIncrementalHFiles(Configuration conf) {
++  public LoadIncrementalHFiles(Configuration conf) throws Exception {
+     super(conf);
++    this.hbAdmin = new HBaseAdmin(conf);
+   }
+ 
++  /* This constructor does not add HBase configuration. 
++   * Explicit addition is necessary. Do we need this constructor? 
++   */
+   public LoadIncrementalHFiles() {
+     super();
+   }
+@@ -550,6 +563,111 @@ public class LoadIncrementalHFiles extends Configured implements Tool {
+     return !HFile.isReservedFileInfoKey(key);
+   }
+ 
++  private boolean doesTableExist(String tableName) throws Exception {
++    return hbAdmin.tableExists(tableName);
++  }
++  
++  /*
++   * Infers region boundaries for a new table.
++   * Parameter:
++   *   bdryMap is a map between keys to an integer belonging to {+1, -1}
++   *     If a key is a start key of a file, then it maps to +1
++   *     If a key is an end key of a file, then it maps to -1
++   * Algo:
++   * 1) Poll on the keys in order: 
++   *    a) Keep adding the mapped values to these keys (runningSum) 
++   *    b) Each time runningSum reaches 0, add the start Key from when the runningSum had started to a boundary list.
++   * 2) Return the boundary list. 
++   */
++  public static byte[][] inferBoundaries(TreeMap<byte[], Integer> bdryMap) {
++    ArrayList<byte[]> keysArray = new ArrayList<byte[]>();
++    int runningValue = 0;
++    byte[] currStartKey = null;
++    boolean firstBoundary = true;
++    
++    for (Map.Entry<byte[], Integer> item: bdryMap.entrySet()) {
++      if (runningValue == 0) currStartKey = item.getKey();
++      runningValue += item.getValue();
++      if (runningValue == 0) {
++        if (!firstBoundary) keysArray.add(currStartKey);
++        firstBoundary = false;
++      } 
++    }
++    
++    return keysArray.toArray(new byte[0][0]);
++  }
++ 
++  /*
++   * If the table is created for the first time, then "completebulkload" reads the files twice.
++   * More modifications necessary if we want to avoid doing it.
++   */
++  private void createTable(String tableName, String dirPath) throws Exception {
++    Path hfofDir = new Path(dirPath);
++    FileSystem fs = hfofDir.getFileSystem(getConf());
++
++    if (!fs.exists(hfofDir)) {
++      throw new FileNotFoundException("HFileOutputFormat dir " +
++          hfofDir + " not found");
++    }
++
++    FileStatus[] familyDirStatuses = fs.listStatus(hfofDir);
++    if (familyDirStatuses == null) {
++      throw new FileNotFoundException("No families found in " + hfofDir);
++    }
++
++    HTableDescriptor htd = new HTableDescriptor(tableName);
++    HColumnDescriptor hcd = null;
++
++    // Add column families
++    // Build a set of keys
++    byte[][] keys = null;
++    TreeMap<byte[], Integer> map = new TreeMap<byte[], Integer>(Bytes.BYTES_COMPARATOR);
++    
++    for (FileStatus stat : familyDirStatuses) {
++      if (!stat.isDir()) {
++        LOG.warn("Skipping non-directory " + stat.getPath());
++        continue;
++      }
++      Path familyDir = stat.getPath();
++      // Skip _logs, etc
++      if (familyDir.getName().startsWith("_")) continue;
++      byte[] family = familyDir.getName().getBytes();
++     
++      hcd = new HColumnDescriptor(family);
++      htd.addFamily(hcd);
++      
++      Path[] hfiles = FileUtil.stat2Paths(fs.listStatus(familyDir));
++      for (Path hfile : hfiles) {
++        if (hfile.getName().startsWith("_")) continue;
++        
++        HFile.Reader reader = new HFile.Reader(fs, hfile, null, false);
++        final byte[] first, last;
++        try {
++          reader.loadFileInfo();
++          first = reader.getFirstRowKey();
++          last =  reader.getLastRowKey();
++
++          LOG.info("Trying to figure out region boundaries hfile=" + hfile +
++            " first=" + Bytes.toStringBinary(first) +
++            " last="  + Bytes.toStringBinary(last));
++          
++          // To eventually infer start key-end key boundaries
++          Integer value = map.containsKey(first)?(Integer)map.get(first):0;
++          map.put(first, value+1);
++
++          value = map.containsKey(last)?(Integer)map.get(last):0;
++          map.put(last, value-1);
++        }  finally {
++          reader.close();
++        }
++      }
++    }
++    
++    keys = LoadIncrementalHFiles.inferBoundaries(map);
++    this.hbAdmin.createTable(htd,keys);
++
++    LOG.info("Table "+ tableName +" is available!!");
++  }
+ 
+   @Override
+   public int run(String[] args) throws Exception {
+@@ -558,8 +676,14 @@ public class LoadIncrementalHFiles extends Configured implements Tool {
+       return -1;
+     }
+ 
+-    Path hfofDir = new Path(args[0]);
+-    HTable table = new HTable(this.getConf(), args[1]);
++    String dirPath   = args[0];
++    String tableName = args[1];
++    
++    boolean tableExists   = this.doesTableExist(tableName);
++    if (!tableExists) this.createTable(tableName,dirPath);
++    
++    Path hfofDir = new Path(dirPath);
++    HTable table = new HTable(tableName);
+ 
+     doBulkLoad(hfofDir, table);
+     return 0;
+diff --git a/src/test/java/org/apache/hadoop/hbase/mapreduce/TestLoadIncrementalHFiles.java b/src/test/java/org/apache/hadoop/hbase/mapreduce/TestLoadIncrementalHFiles.java
+index 47ec916..a6182aa 100644
+--- a/src/test/java/org/apache/hadoop/hbase/mapreduce/TestLoadIncrementalHFiles.java
++++ b/src/test/java/org/apache/hadoop/hbase/mapreduce/TestLoadIncrementalHFiles.java
+@@ -22,6 +22,8 @@ package org.apache.hadoop.hbase.mapreduce;
+ import static org.junit.Assert.assertEquals;
+ 
+ import java.io.IOException;
++import java.util.Arrays;
++import java.util.TreeMap;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystem;
+@@ -213,4 +215,70 @@ public class TestLoadIncrementalHFiles {
+       writer.close();
+     }
+   }
++
++  private void addStartEndKeysForTest(TreeMap<byte[], Integer> map, byte[] first, byte[] last) {
++    Integer value = map.containsKey(first)?(Integer)map.get(first):0;
++    map.put(first, value+1);
++
++    value = map.containsKey(last)?(Integer)map.get(last):0;
++    map.put(last, value-1);
++  }
++
++  @Test 
++  public void testInferBoundaries() {
++    TreeMap<byte[], Integer> map = new TreeMap<byte[], Integer>(Bytes.BYTES_COMPARATOR);
++
++    /* Toy example
++     *     c---------i            o------p          s---------t     v------x
++     * a------e    g-----k   m-------------q   r----s            u----w
++     *
++     * Should be inferred as:
++     * a-----------------k   m-------------q   r--------------t  u---------x
++     * 
++     * The output should be (m,r,u) 
++     */
++
++    String first;
++    String last;
++
++    first = "a"; last = "e";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++    
++    first = "r"; last = "s";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++
++    first = "o"; last = "p";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++
++    first = "g"; last = "k";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++
++    first = "v"; last = "x";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++
++    first = "c"; last = "i";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++
++    first = "m"; last = "q";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++
++    first = "s"; last = "t";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++    
++    first = "u"; last = "w";
++    addStartEndKeysForTest(map, first.getBytes(), last.getBytes());
++
++    byte[][] keysArray = LoadIncrementalHFiles.inferBoundaries(map);
++    byte[][] compare = new byte[3][];
++    compare[0] = "m".getBytes();
++    compare[1] = "r".getBytes(); 
++    compare[2] = "u".getBytes();
++
++    assertEquals(keysArray.length, 3);
++
++    for (int row = 0; row<keysArray.length; row++){
++      assertArrayEquals(keysArray[row], compare[row]);
++    }
++  }
++
+ }
+-- 
+1.7.0.4
+

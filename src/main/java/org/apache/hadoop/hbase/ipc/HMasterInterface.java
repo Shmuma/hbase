@@ -167,11 +167,23 @@ public interface HMasterInterface extends HBaseRPCProtocolVersion {
    * @param regionName Region to unassign. Will clear any existing RegionPlan
    * if one found.
    * @param force If true, force unassign (Will remove region from
-   * regions-in-transition too if present).
+   * regions-in-transition too if present) - radical! If results in double
+   * assignment use hbck -fix to resolve.
    * @throws IOException
    */
   public void unassign(final byte [] regionName, final boolean force)
   throws IOException;
+
+  /**
+   * Offline a region from the assignment manager's in-memory state.  The
+   * region should be in a closed state and there will be no attempt to
+   * automatically reassign the region as in unassign.   This is a special
+   * method, and should only be used by experts or hbck.
+   * @param regionName Region to offline.  Will clear any existing RegionPlan
+   * if one found.
+   * @throws IOException
+   */
+  public void offline(final byte[] regionName) throws IOException;
 
   /**
    * Run the balancer.  Will run the balancer and if regions to move, it will

@@ -1,0 +1,31 @@
+From f788e983100c446ee0639cbc9829a74da632399e Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jmhsieh@apache.org>
+Date: Fri, 6 Apr 2012 22:41:49 +0000
+Subject: [PATCH 090/101] HBASE-5734 Change hbck sideline root (Jimmy Xiang)
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1310626 13f79535-47bb-0310-9956-ffa450edef68
+
+Reason: Supportability
+Author: Jimmy Xiang
+Ref: CDH-5570
+---
+ .../org/apache/hadoop/hbase/util/HBaseFsck.java    |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+index 8e5c638..3f92e6e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
++++ b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+@@ -794,7 +794,8 @@ public class HBaseFsck {
+ 
+   private Path getSidelineDir() throws IOException {
+     Path hbaseDir = FSUtils.getRootDir(conf);
+-    Path backupDir = new Path(hbaseDir.getParent(), hbaseDir.getName() + "-"
++    Path hbckDir = new Path(hbaseDir.getParent(), "hbck");
++    Path backupDir = new Path(hbckDir, hbaseDir.getName() + "-"
+         + hbckStartMillis);
+     return backupDir;
+   }
+-- 
+1.7.0.4
+

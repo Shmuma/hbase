@@ -1,10 +1,726 @@
-commit 1f2c6e82f5ed7ca895c67f8106e69bd3fee56ca6
+commit bc5f693f0efd0da86f4b72f07d4477564f74dc69
+Author: Himanshu <himanshu@cloudera.com>
+Date:   Fri May 4 09:04:10 2012 -0600
+
+    Revert CDH-4880 hbase shell: status 'detailed' errors
+    The changes done in the above JIRA are reverted because its corresponding patch, which was a backport of HBASE-3704, is also reverted.
+    
+    Reason: Backward Compatibility
+    Author: Himanshu Vashishtha
+    Ref: CDH-4880
+
+commit 80d2619fa6b7e355dfe3a66a5b566b92fff27c5b
+Author: David S. Wang <dsw@cloudera.com>
+Date:   Wed May 2 13:12:27 2012 -0700
+
+    CDH-5597 hbase web ui displays misleading message about hdfs append
+    Change append checks to sync and hflush checks.
+    
+    Reason: Bug
+    Author: David S. Wang
+    Ref: CDH-5597
+
+commit 33228bf4fe4b87d4b55a637c2a4d851539a3b258
+Author: Gregory Chanan <gchanan@cloudera.com>
+Date:   Mon Apr 30 21:36:37 2012 -0700
+
+    HBASE-5908. TestHLogSplit.testTralingGarbageCorruptionFileSkipErrorsPasses should not use append to corrupt the HLog. Contributed by Gregory Chanan.
+    
+    Reason: Bug
+    Author: Gregory Chanan
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1332492 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Conflicts:
+    
+    	CHANGES.txt
+
+commit 9573a361dcddba14f2ff1728dfff2c67c667cb75
+Author: Himanshu <himanshu@cloudera.com>
+Date:   Mon Apr 30 17:55:50 2012 -0600
+
+    CDH-5523 -ROOT- region goes offline during HBase rolling upgrade
+    This is undoing the backport of HBase-5490 from cdh3u4 which is breaking the rolling restart between cdh3u3 and cdh3u4.
+    Upstream is ok with this patch as they don't have HBase-4287 in 0.90.4 branch, and hence they are ok with the enum state at the bottom.
+    
+    Bottom line is that the ordinality of M_ZK_REGION_OFFLINE should be same between the minor versions.
+
+commit f5ae6d9cbe9cfbcd01b0f5af09050c12ecc972a6
+Author: Gregory Chanan <gchanan@cloudera.com>
+Date:   Mon Apr 30 16:31:41 2012 -0700
+
+    HBASE-5351 hbase completebulkload to a new table fails in a race
+    
+    CDH-5519: TestImportTsv.testLoadToNewTable fails in CDH3u4 (Backport HBASE-5351)
+    Backported HBASE-5351 to CDH3u4.
+    
+    I also had to re-backport HBASE-3440, which is a bit of a mess.  It was originally in 0.92/0.90 and we backported to cdh3u3 (or earlier).  It got reverted upstream in 0.90 later, and got reverted when we rebased to 0.90.6.  It was reverted upstream for two reasons:
+    1) It didn't compile [this was fixed by our backport]
+    2) It made the LoadIncrementalHFiles class incompatible (this isn't a wire-compatibility thing, just changed the interface for the class).  Since this made it into cdh3u3, it is actually incompatible for us to revert it.
+    
+    Reason: Bug
+    Author: Gregory Chanan
+    Ref: CDH-5519
+
+commit 8e7a0711886a7ed179d26d637cad8c57ad9665df
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Mon Apr 30 06:33:44 2012 +0000
+
+    HBASE-5712 Parallelize load of .regioninfo files in diagnostic/repair portion of hbck
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1332069 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Supportability
+    Author: Jonathan Hsieh
+    Ref: CDH-5570
+
+commit 580f55aae5a485a1df277735444872d5b993ba86
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Thu Apr 26 22:27:23 2012 +0000
+
+    HBASE-5801 [hbck] Hbck should handle case where some regions have different HTD settings in .regioninfo files (0.90 specific) (Jimmy Xiang)
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1331129 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Supportability
+    Author: Jimmy Xiang
+    Ref: CDH-5570
+
+commit f955f99a231d969888a2e045b7a310d848573c1a
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Sun Apr 15 22:43:56 2012 +0000
+
+    HBASE-5793 TestHBaseFsck#testNoHdfsTable test hangs after client retries increased
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1326437 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Supportability
+    Author: Jonathan Hsieh
+    Ref: CDH-5570
+
+commit 7d1e6dfc8ea5008cd5b896c713efc9a0c076d9c6
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Fri Apr 13 06:44:53 2012 +0000
+
+    HBASE-5488 OfflineMetaRepair doesn't support hadoop 0.20's fs.default.name property (gaojinchao)
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1325628 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Bug
+    Author: Gaojinchao
+    Ref: CDH-5570
+
+commit 362de71c0ac28c1a69d706ff6ddf4b8287684619
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Thu Apr 12 17:43:26 2012 +0000
+
+    HBASE-5719 Enhance hbck to sideline overlapped mega regions (Jimmy Xiang)
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1325402 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Supportability
+    Author: Jimmy Xiang
+    Ref: CDH-5570
+
+commit cb3e0cac4413eb74838661da4e432eb5335c5813
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Wed Apr 11 17:19:57 2012 +0000
+
+    HBASE-5599 [hbck] handle NO_VERSION_FILE and SHOULD_NOT_BE_DEPLOYED inconsistencies (fulin wang)
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1324878 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Supportability
+    Author: Fulin Wang
+    Ref: CDH-5570
+
+commit f788e983100c446ee0639cbc9829a74da632399e
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Fri Apr 6 22:41:49 2012 +0000
+
+    HBASE-5734 Change hbck sideline root (Jimmy Xiang)
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1310626 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Supportability
+    Author: Jimmy Xiang
+    Ref: CDH-5570
+
+commit 9cecc21320e525615b1e25e6577b04956db4c020
+Author: David S. Wang <dsw@cloudera.com>
+Date:   Mon Apr 30 11:01:09 2012 -0700
+
+    HBASE-5904 is_enabled from shell returns differently from pre- and post- HBASE-5155
+    Revert HBASE-5155 to avoid incompatible change.
+    
+    Reason: Bug
+    Author: David S. Wang
+    Ref: CDH-5520
+
+commit 190b7fb313dda4238b1b803f6ef5cb5ec2e8f800
+Author: David S. Wang <dsw@cloudera.com>
+Date:   Fri Apr 27 09:43:33 2012 -0700
+
+    HBASE-3704 Show per region request count in table.jsp
+    (partial backport to avoid pulling in incompatible dependencies)
+    
+    Reason: Improvement
+    Author: Ted Yu
+    Ref: CDH-3664
+
+commit d64bbd23a97e7c1ab3bfadcac05eccdd54e7f419
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Apr 26 15:56:48 2012 -0700
+
+    Revert CDH-3664 HBase Region distributions in Web UI
+    
+    Reason: Backward compatibility
+    Author: Jimmy Xiang
+    Ref: CDH-5436
+    
+    Revert "HBASE-3704 Show per region request count in table.jsp"
+    Revert "HBASE-3676 Update region server load for AssignmentManager through regionServerReport()"
+    Revert "HBASE-3507 requests count per HRegion and rebalance command; part 1"
+    
+    This reverts commit 974e6d5414be9b16c7c76bfc8255ce17e5df7f97.
+    This reverts commit 723bb871678b80a07b54e1766846cdc4657dffed.
+    This reverts commit 00d86ac720c5cbe0d4dc8ed3867c607e5cdf4d4d.
+
+commit df4f7131a89a9b0cfb0d1d80c63c58bcfbe2ded8
+Author: Michael Stack <stack@apache.org>
+Date:   Mon Apr 9 22:58:19 2012 +0000
+
+    HBASE-5740 Compaction interruption may be due to balacing
+    
+    Reason: Bug
+    Author: Michael Stack, Jimmy Xiang
+    Ref: CDH-4963
+
+commit 2bbdc8e8beade78c7faf0ac9d4d4d0b195104832
+Author: Jonathan M Hsieh <jon@cloudera.com>
+Date:   Sat Apr 14 15:40:42 2012 -0700
+
+    HBASE-5781 [hbck] hbck -fix fails due to closed zk connection.
+    
+    Reason: Bug - Functionality regression
+    Author: Jonathan Hsieh
+    Ref: CDH-5278
+
+commit 2bac4e8f41601e06cacd67d14fb85aa89abfa938
 Author: Andrew Bayer <andrew@cloudera.com>
-Date:   Mon Oct 3 09:20:54 2011 -0700
+Date:   Mon Apr 9 16:08:24 2012 -0700
 
-    Prep for CDH3u2 release
+    CLOUDERA-BUILD. Preparing for CDH3u4 release.
 
-commit 09577989203338734c83e1668ca7d8b7179af64d
+commit e252984e2ead899ab10c75ed8835258b5d974458
+Author: Himanshu <himanshu@cloudera.com>
+Date:   Thu Apr 5 21:58:10 2012 -0600
+
+    HBASE-3923 The HBase-1502 patch  broke Shell's status 'simple' and 'detailed' commands
+    
+    Reason: Bug
+    Author: Lars H
+    Ref: CDH-4880
+    Files modified:   src/main/ruby/hbase/admin.rb
+
+commit e925e528584dffc4ed40cdcf7016c1dec3d76370
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Mon Mar 26 17:46:45 2012 +0000
+
+    HBASE-5637 Fix failing 0.90 TestHMsg testcase introduced by HBASE-5563
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1305474 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: bug introduced by hbck backports
+    Author: Jonathan Hsieh
+    Ref: CDH-4040
+
+commit 7e80a1dd965c991e7ca7d9cb92f2e4f38eba9390
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Fri Mar 23 23:54:48 2012 +0000
+
+    HBASE-5128 [uber hbck] Online automated repair of table integrity and region consistency problems
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1304668 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: Supportability
+    Author: Jonathan Hsieh
+    Ref: CDH-4040
+
+commit 750d3e562470772109e8a59102db143aa3b9c2b0
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Fri Mar 23 23:46:17 2012 +0000
+
+    HBASE-5563 Add comparison of regionId to HRegionInfo#compareTo (chunhui and jmhsieh)
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1304661 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: prereq for hbck
+    Author: Jonathan Hsieh
+    Ref: CDH-4040
+
+commit feb555a4ed4aa04789e2d22ae548a1dd392c8908
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Wed Mar 21 19:32:04 2012 +0000
+
+    HBASE-5589 Add of the offline call to the Master Interface
+    - Includes Addendum
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1303522 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: hbck prerequisite
+    Author: Jonathan Hsieh
+    Ref: CDH-4040
+
+commit dfda62d85f0738f3b28c9dd12fde4ccc01341f7c
+Author: Jonathan Hsieh <jmhsieh@apache.org>
+Date:   Sat Mar 17 07:28:13 2012 +0000
+
+    HBASE-5588 Deprecate/remove AssignmentManager#clearRegionFromTransition
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1301880 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Reason: hbck prerequisite
+    Author: Jonathan Hsieh
+    Ref: CDH-4040
+
+commit d6482e622b6fc5b3f0cdcb403f93aae1f62ce035
+Author: David S. Wang <dsw@cloudera.com>
+Date:   Wed Mar 21 11:40:21 2012 -0700
+
+    HBASE-5593 Reverse DNS resolution in regionServerStartup() does not strip trailing dot. REAPPLICATION
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1303178 13f79535-47bb-0310-9956-ffa450edef68
+    (cherry picked from commit 2ae2f4e423ccb0e22c10a07d27d39952076b9968)
+    
+        Reason: Bug
+        Author: David S. Wang
+        Ref: CDH-4962
+
+commit a821615d40cfa988fdf75924d210eb9e6162b148
+Author: Gregory Chanan <gchanan@cloudera.com>
+Date:   Fri Mar 9 15:54:25 2012 -0800
+
+    HBASE-5213 "hbase master stop" does not bring down backup masters (Gregory)
+    Backport to cdh3/0.90.4+49
+    
+    Reason: Bug
+    Author: Gregory Chanan
+    Ref: CDH-4007
+
+commit a605182d6356b0b4d69ee07d59793b03dd83ca5a
+Author: Michael Stack <stack@apache.org>
+Date:   Fri Mar 2 21:16:03 2012 +0000
+
+    HBASE-5486 Warn message in HTable: Stringify the byte[]
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1296478 13f79535-47bb-0310-9956-ffa450edef68
+
+commit d0b214369d2430ce704acba6daaf20f8966719d5
+Author: David S. Wang <dsw@cloudera.com>
+Date:   Tue Feb 28 14:23:43 2012 -0800
+
+    HBASE-5484 Fix spelling mistakes in error message when starting HBase in standalone mode and the configured ZK port is not able to be bound to.
+
+commit 974e6d5414be9b16c7c76bfc8255ce17e5df7f97
+Author: Michael Stack <stack@apache.org>
+Date:   Sat Apr 2 01:37:41 2011 +0000
+
+    HBASE-3704 Show per region request count in table.jsp
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1087954 13f79535-47bb-0310-9956-ffa450edef68
+
+commit 723bb871678b80a07b54e1766846cdc4657dffed
+Author: Michael Stack <stack@apache.org>
+Date:   Mon Mar 21 22:13:38 2011 +0000
+
+    HBASE-3676 Update region server load for AssignmentManager through regionServerReport()
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1083992 13f79535-47bb-0310-9956-ffa450edef68
+
+commit 00d86ac720c5cbe0d4dc8ed3867c607e5cdf4d4d
+Author: Michael Stack <stack@apache.org>
+Date:   Mon Mar 14 23:38:57 2011 +0000
+
+    HBASE-3507 requests count per HRegion and rebalance command; part 1
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1081610 13f79535-47bb-0310-9956-ffa450edef68
+
+commit 327c57703571a68281b95b57c3fbf02ff33fb1d2
+Author: dsw <dsw@cloudera.com>
+Date:   Wed Jan 18 13:35:56 2012 -0800
+
+    HBASE-4359 Show dead RegionServer names in the HMaster info page
+    
+    Reason: Improvement
+    Author: Harsh
+    Ref: CDH-3563
+
+commit 79192ca4946ba994943dee10338859cedfb3a892
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Fri Jan 6 14:34:24 2012 -0800
+
+    HBASE-5081 Distributed log splitting deleteNode races against splitLog retry (Prakash)
+    
+    Reason: Bug
+    Author: Prakash
+    Ref: CDH-3990
+
+commit a24e9a856547cbd93c427f96787876a3640aa79c
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Jan 4 09:03:47 2012 -0800
+
+    CDH-4045 Disable distributed log splitting by default since this feature is not fully tested yet
+    
+    Reason: Task
+    Author: Jimmy Xiang
+    Ref: CDH-4045
+
+commit 6ed8698b45e3bff2d82f27f9ce69571ea41f9d66
+Author: Zhihong Yu <tedyu@apache.org>
+Date:   Sat Dec 31 05:02:25 2011 +0000
+
+    HBASE-5112  TestReplication#queueFailover flaky due to potentially
+                   uninitialized Scan (Jimmy Xiang)
+    
+    Reason: Test
+    Author: Jimmy Xiang
+    Ref: CDH-4035
+
+commit 8443bbb54af4e0d07608087a1f56b2cf50df600d
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Dec 28 19:05:01 2011 -0800
+
+    HBASE-2312 [jira] Possible data loss when RS goes into GC pause while rolling HLog, backport error fixed.
+    
+        Reason: Bug
+        Author: Nicolas Spiegelberg
+        Ref: CDH-4011
+
+commit f7b609896211accdbd3ed0cbe39724d540f034bc
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Dec 28 19:01:30 2011 -0800
+
+    HBASE-1364 [performance] Distributed splitting of regionserver commit logs, backport error fixed.
+    
+    Reason: Bug
+    Author: Prakash Khemani
+    Ref: CDH-4008
+
+commit 92c15ebb60240247f58da6a658dea16ab23adee6
+Author: Michael Stack <stack@apache.org>
+Date:   Wed Dec 21 04:15:58 2011 +0000
+
+    HBASE-5077 SplitLogWorker fails to let go of a task, kills the RS -- fix compile error
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-4008
+
+commit 9efdffbb217ce15df7aa78e6fb2828da922de970
+Author: Michael Stack <stack@apache.org>
+Date:   Wed Dec 21 04:05:12 2011 +0000
+
+    HBASE-5077 SplitLogWorker fails to let go of a task, kills the RS
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-4008
+
+commit 39e3131901513e1febe48112290dc4e9eedaea85
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 14:28:42 2012 -0700
+
+    HBASE-5078 DistributedLogSplitter failing to split file because it has edits for lots of regions
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-4008
+
+commit b91a8b655cb706ddc98a5d13fa71171d73ef0f97
+Author: Michael Stack <stack@apache.org>
+Date:   Mon Dec 12 22:46:33 2011 +0000
+
+    HBASE-4997 SplitLogManager can have a race on batch.installed
+    
+    Reason: Bug
+    Author: Prakash Khemani
+    Ref: CDH-3901
+
+commit c72e743840ea041f6601e41e7315080ccfd1b757
+Author: Michael Stack <stack@apache.org>
+Date:   Fri Dec 9 06:16:03 2011 +0000
+
+    HBASE-4987 wrong use of incarnation var in SplitLogManager
+    
+    Reason: Bug
+    Author: Prakash Khemani
+    Ref: CDH-3901
+
+commit 0965ec135ddc49a3cbe2818f0ad6a5bb3eb4c5f4
+Author: Jonathan Hsieh <jon@cloudera.com>
+Date:   Thu Dec 15 15:06:46 2011 -0800
+
+    HBASE-5049 TestHLogSplit.testLogrollAfterSplitStart not working due to HBASE-5006
+    
+    Reason: Bug
+    Author: Jimmy Xiang
+    Ref: CDH-3816
+
+commit e03436b9633ad19a5359a3c8e1c32fb4d98fc33b
+Author: Jonathan Hsieh <jon@cloudera.com>
+Date:   Thu Dec 15 12:24:54 2011 -0800
+
+    HBASE-5006 Move hbase 0.92RC1 on to hadoop 1.0.0RC2
+    
+    Although the title doesn't explicitly say it, this backport fixes tests broken when HBASE-2312 and
+    HADOOP-6840 introduced createNonRecursive call.
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-3816
+
+commit eeaf9486bf1c6608554bbe650ec9a8710ac9e640
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 14:25:04 2012 -0700
+
+    HBASE-2233 Support both Hadoop 0.20, 0.21, and 0.22
+    
+    NOTE: This is only a partial backport that takes parts dealing with the HLog to prevent data loss in
+    HBase.
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-3816
+
+commit c9b29fed3dc41cb6a31e78dac3aefbaeb9904d30
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 14:21:15 2012 -0700
+
+    HBASE-2312 [jira] Possible data loss when RS goes into GC pause while rolling
+    HLog
+    
+    Reason: Bug
+    Author: Nicolas Spiegelberg
+    Ref: CDH-3816
+
+commit 603c0b82c1617c478d794318b5231e8357aeaa6d
+Author: Lars Hofhansl <larsh@apache.org>
+Date:   Sun Dec 4 20:54:37 2011 +0000
+
+    HBASE-4945  NPE in HRegion.bulkLoadHFiles (Andrew P and Lars H)
+    
+    Reason: Bug
+    Author: Lars Hofhansl
+    Ref: CDH-3885
+
+commit bf7edb0869350d25f899f617b8555544bbde5e85
+Author: Todd Lipcon <todd@apache.org>
+Date:   Wed Nov 30 21:28:36 2011 +0000
+
+    HBASE-4820. Distributed log splitting coding enhancement to make it easier to understand, no semantics change. Contributed by Jimmy Xiang.
+    
+    Reason: Enhancement
+    Author: Jimmy Xiang
+    Ref: CDH-3791
+
+commit 34bbdb1eb71f90cbecfe1794656045804a990e9d
+Author: Zhihong Yu <tedyu@apache.org>
+Date:   Mon Nov 28 20:50:26 2011 +0000
+
+    HBASE-4869  Backport to 0.92: HBASE-4797 [availability] Skip recovered.edits
+                   files with edits older than what region currently has (Jimmy Xiang)
+    
+    Reason: Enhancement
+    Author: Jimmy Xiang
+    Ref: CDH-3791
+
+commit d0d53b6ef2a499625f6c9508f417162a038c063c
+Author: Zhihong Yu <tedyu@apache.org>
+Date:   Tue Nov 15 17:13:33 2011 +0000
+
+    HBASE-4790  Occasional TestDistributedLogSplitting failure (Jinchao)
+    
+    Reason: Enhancement
+    Author: Jinchao
+    Ref: CDH-3791
+
+commit 2a0fe5b93c23f8a54ca98d57cce2689e0f2d0a0c
+Author: Zhihong Yu <tedyu@apache.org>
+Date:   Thu Nov 24 19:02:46 2011 +0000
+
+    HBASE-4855  SplitLogManager hangs on cluster restart due to batch.installed doubly counted
+    
+    Reason: Bug
+    Author: Ramkrishna
+    Ref: CDH-3791
+
+commit 50d4569ec42a34f4bac54cf02906a0397586b649
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Mon Nov 14 22:51:07 2011 -0800
+
+    HBASE-4790  Occasional TestDistributedLogSplitting failure (Jinchao)
+    
+    Reason: Enhancement
+    Authot: Jinchao Gao
+    Ref: CDH-3791
+
+commit 0e6970c83b3bf42364fa8552301d9e83a2765e20
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Mon Nov 14 16:37:34 2011 -0800
+
+    Fixed a possible NPE in HLogSplitter
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-3791
+
+commit e0c2f56f1ddb35c6d9a607c86025e17aee520918
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 09:10:38 2011 -0800
+
+    HBASE-4194  RegionSplitter: Split on under-loaded region servers first
+    
+    Reason: Bug
+    Author: Zhihong Yu
+    Ref: CDH-3791
+
+commit e0fe902b4b65828666fcd8e3010df617d0e9728a
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 09:04:21 2011 -0800
+
+    HBASE-4685 TestDistributedLogSplitting.testOrphanLogCreation failing because of ArithmeticException: / by zero.
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-3791
+
+commit dce43b18654c4ab911cfed7cacf8ee316a68ff47
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 08:53:15 2011 -0800
+
+    HBASE-4007 distributed log splitting can get indefinitely stuck
+    
+    Reason: Bug
+    Author: Prakash Khemani
+    Ref: CDH-3791
+
+commit 5ebdbfd89575d7d84d356df1db4fd59adb3d1aa9
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 07:45:37 2011 -0800
+
+    HBASE-3889  NPE in Distributed Log Splitting
+    
+    Reason: Bug
+    Author: Anirudh Todi
+    Ref: CDH-3791
+
+commit 844d8fed17fbf4f7e42a8c99de91c8b5ae9b124d
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 14:09:54 2012 -0700
+
+    HBASE-3963 Schedule all log-spliiting at startup all at once
+    
+    Reason: Bug
+    Author: mingjian
+    Ref: CDH-3791
+
+commit ca8b45e27273bdf31a0739af37b383f124503138
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 02:15:40 2011 -0800
+
+    HBASE-3843 splitLogWorker starts too early
+    
+    Reason: Bug
+    Author: Prakash Khemani
+    Ref: CDH-3791
+
+commit c469485b715e0060f4dc7ebcc312d878b35280b8
+Author: Michael Stack <stack@apache.org>
+Date:   Fri Apr 29 05:38:39 2011 +0000
+
+    Fix broke jenkins build; Fix TestSplitLogWorker.  Remove added assert.  Value may have already been set by background thread so assert was checking input at wrong time
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1097689 13f79535-47bb-0310-9956-ffa450edef68
+
+commit 1f904b958d01574379e2e64962bb8176acb124fc
+Author: Michael Stack <stack@apache.org>
+Date:   Tue Apr 26 19:23:00 2011 +0000
+
+    HBASE-3819 TestSplitLogWorker has too many SLWs running -- makes for contention and occasional failures; attempt at fixing broken tests in build introduced by first commit on this issue
+    
+    git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1096859 13f79535-47bb-0310-9956-ffa450edef68
+
+commit b0ae14c902dc905e7d57ab7ff387cd8c81f262d2
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 01:46:12 2011 -0800
+
+    HBASE-3819 TestSplitLogWorker has too many SLWs running -- makes for contention and occasional failures
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-3791
+
+commit 081fa49514f0c24bff295cdb97e4156312315d7e
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 01:42:42 2011 -0800
+
+    Fix broken jenkins test, broke since submission of distributed split issue
+    
+    Reason: Bug
+    Author: Michael Stack
+    Ref: CDH-3791
+
+commit 3bdb5c192ede569acd8dc007715348c7c326e845
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 01:31:43 2011 -0800
+
+    HBASE-3806 distributed log splitting double escapes task names
+    
+    Reason: Bug
+    Author: Prakash Khemani
+    Ref: CDH-3791
+
+commit b53db06076e328322344e4dff2c6aa3d065be915
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Thu Nov 10 02:28:40 2011 -0800
+
+    Fixed a possible NPE due to distrubuted log splitting
+    
+    Reason: Bug
+    Author: Jimmy Xiang
+    Ref: CDH-3791
+
+commit 9ec9cbb668f9217f69d6aef2176ed19e09356dba
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 14:07:27 2012 -0700
+
+    HBASE-1364 [performance] Distributed splitting of regionserver commit logs
+    
+    Reason: Performance
+    Author: Prakash Khemani
+    Ref: CDH-3791
+
+commit 26ecf1d907eaffb62db02f74a28015dcdfc4e7cd
+Author: Roman Shaposhnik <rvs@cloudera.com>
+Date:   Wed Nov 23 11:05:17 2011 -0800
+
+    HBASE-4854. it seems that CLASSPATH elements coming from Hadoop change HBase behaviour
+    
+    Reason: Bug
+    Author: Roman Shaposhnik
+    Ref: CDH-3811
+
+commit 4de8dc80dd82d0c58316f2a6013e6c3ec38944a1
+Author: Todd Lipcon <todd@cloudera.com>
+Date:   Thu Oct 6 15:43:22 2011 -0700
+
+    HBASE-4386. Fix a potential NPE in TaskMonitor
+    
+    Reason: fix rare but possible NPE
+    Ref: CDH-3667
+    Author: Todd Lipcon
+
+commit c4fbdeccdbf7c107683a712cd9c24951f2c350fe
 Author: Roman Shaposhnik <rvs@cloudera.com>
 Date:   Fri Sep 30 15:41:02 2011 -0700
 
@@ -14,53 +730,9 @@ Date:   Fri Sep 30 15:41:02 2011 -0700
     Author: Roman Shaposhnik
     Ref: DISTRO-119
 
-commit 4f781b408fe5ca504b2a01e9049211840668b9cd
-Author: Michael Stack <stack@apache.org>
-Date:   Sun Sep 18 18:05:15 2011 +0000
-
-    HBASE-4375 [hbck] Add region coverage visualization to hbck
-    
-    Reason: Supportability
-    Author: Jonathan Hsieh
-    Ref: CDH-3582
-
-commit ab497be36cefd5d4569cf70d0298f0dc25c96e27
-Author: Michael Stack <stack@apache.org>
-Date:   Fri Sep 16 16:23:44 2011 +0000
-
-    HBASE-4322 [hbck] Update checkIntegrity/checkRegionChain to present more accurate region split problem
-    
-    Reason: Supportability
-    Author: Jonathan Hsieh
-    Ref: CDH-3582
-    
-    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1171646 13f79535-47bb-0310-9956-ffa450edef68
-
-commit d7365af7fbb5c1fdea7cbbd224a7ee436bdce0a2
-Author: Todd Lipcon <todd@apache.org>
-Date:   Tue Sep 13 02:39:04 2011 +0000
-
-    HBASE-4321. Add a more comprehensive region split calculator for future use in hbck.
-    
-    Reason: Supportability
-    Author: Jonathan Hsieh
-    Ref: CDH-3582
-    
-    git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1170012 13f79535-47bb-0310-9956-ffa450edef68
-
-commit d56e457e57761792b658de839156c5d98d304fd2
-Author: Michael Stack <stack@apache.org>
-Date:   Fri Sep 9 04:51:47 2011 +0000
-
-    HBASE-4313 Refactor TestHBaseFsck to make adding individual hbck tests easier
-    
-    Reason: Supportability
-    Author: Jonathan Hsieh
-    Ref: CDH-3582
-
-commit f955c457537385046b70a01ec56417e04969a7c3
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Fri Sep 16 13:02:55 2011 -0700
+commit cb0163f58eb686a3db417a7896e597670d83727f
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 13:51:03 2012 -0700
 
     HBASE-4406. TestOpenRegionHandler failing after HBASE-4287
     
@@ -68,17 +740,7 @@ Date:   Fri Sep 16 13:02:55 2011 -0700
     Reason: fix test case failure
     Ref: CDH-3541
 
-commit f9f33f74c85ab46b092db270f9888ac0253981de
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Mon Sep 12 18:57:50 2011 -0700
-
-    HBASE-4287. Add FAILED_OPEN state in ZooKeeper
-    
-    Reason: prevents stuck regions in transition when region-opening fails on one server
-    Author: Todd Lipcon
-    Ref: CDH-3541
-
-commit 2b27d82b24c4c344f93c833462580eebb3837a36
+commit 3a14280381c59ad688a6d5587d52472e34fa77a8
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Thu Sep 1 15:53:00 2011 -0700
 
@@ -88,37 +750,7 @@ Date:   Thu Sep 1 15:53:00 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3540
 
-commit 36ff1adf9a6a6038c2537b62cdc85696b2dd8d1f
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Thu Sep 1 13:54:08 2011 -0700
-
-    HBASE-4272. Add mode to hbck which only checks META and ROOT
-    
-    Reason: allow hbck to run when META or ROOT is not deployed
-    Author: Todd Lipcon
-    Ref: CDH-3540
-
-commit f5c68f3c2cdf880b95b1e80ac3b1da68f1f5e321
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Sun Aug 28 21:19:02 2011 -0700
-
-    HBASE-4270. Abort and rethrow errors on close failure
-    
-    Reason: dataloss bug fix
-    Author: Todd Lipcon
-    Ref: CDH-3541
-
-commit 29feae239ba000fb2fdeb57a99e75ef0a00f726b
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Mon Aug 29 19:29:25 2011 -0700
-
-    HBASE-4323. Add debug logging when couldn't come up with a plan
-    
-    Reason: Better debuggability of stuck regions
-    Author: Todd Lipcon
-    Ref: CDH-3540
-
-commit 9c7977f39033323a943dd11ec845aa3b0033f4aa
+commit 0ed5b2e0fbb1eba510bef33f7af92e2c5eac4baf
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Thu Sep 1 13:32:16 2011 -0700
 
@@ -128,27 +760,7 @@ Date:   Thu Sep 1 13:32:16 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3540
 
-commit ee50fe0abdd338c76ca678132567fedd85b61dd7
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Mon Aug 29 18:15:19 2011 -0700
-
-    HBASE-4294. Fix 1-second sleep in HLogSplitter
-    
-    Reason: slightly improve recovery time during log splitting
-    Author: Todd Lipcon
-    Ref: CDH-3542
-
-commit 97ca2223c4cf158cd4ef0133bea388968ad24b74
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Mon Aug 29 18:15:02 2011 -0700
-
-    HBASE-4293. Some more verbose logging in ServerShutdownHandler
-    
-    Reason: Better debuggability when master is in a stuck state
-    Author: Todd Lipcon
-    Ref: CDH-3540
-
-commit 4f40654cdb42226b144a1e15bc9e8a1606f45e5d
+commit 7eb3a766796cc3884a102e0af8965c946d0df844
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Mon Aug 29 18:14:04 2011 -0700
 
@@ -158,7 +770,7 @@ Date:   Mon Aug 29 18:14:04 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3540
 
-commit 29281b227c41b3ea218539cef09e0888904a6ec2
+commit 93a6812cc7e2113d7eeb8dd587a4b51c86e4c576
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Mon Aug 29 18:13:13 2011 -0700
 
@@ -168,9 +780,9 @@ Date:   Mon Aug 29 18:13:13 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3540
 
-commit ac7a2d1418d665854baf1bd617075da9a8f15c7d
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Mon Aug 29 18:10:29 2011 -0700
+commit 17bef6b908f7de339a56b1628cb3d131f6eb3cb8
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 13:49:24 2012 -0700
 
     HBASE-4291. More descriptive string for region state in AssignmentManager web ui
     
@@ -178,7 +790,7 @@ Date:   Mon Aug 29 18:10:29 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3540
 
-commit 1195077965abe4fe1286a68747180a9c5858e763
+commit 51208331ab22c7c831fd9417e06bc8dbb3180f0c
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Sun Aug 28 22:48:08 2011 -0700
 
@@ -188,17 +800,7 @@ Date:   Sun Aug 28 22:48:08 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3605
 
-commit e44ed1c9998591f98e61385cfeaa154cbb930233
-Author: Todd Lipcon <todd@cloudera.com>
-Date:   Sun Aug 28 21:52:48 2011 -0700
-
-    HBASE-4276. INFO level logging for transitions of meta regions
-    
-    Reason: Better debuggability of HMaster state
-    Author: Todd Lipcon
-    Ref: CDH-3540
-
-commit 64d34e1a7892ea49ef8278d667b3f92b45048882
+commit ae64aa9eff953c1a8854416c178576f847018be2
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Mon Sep 12 18:58:24 2011 -0700
 
@@ -208,7 +810,7 @@ Date:   Mon Sep 12 18:58:24 2011 -0700
     Author: Ryan Rawson
     Ref: CDH-3604
 
-commit d86dad99f994f01c3e9658867760646144b4e8d5
+commit 5fcbd9341a0c65022d9141289815dd38942d6ce8
 Author: Alejandro Abdelnur <tucu@cloudera.com>
 Date:   Thu Sep 8 14:18:35 2011 -0700
 
@@ -218,7 +820,7 @@ Date:   Thu Sep 8 14:18:35 2011 -0700
       Author: Alejandro Abdelnur
       Ref: CDH-3562
 
-commit ea67d78243bda3d1f401f0806daca1689f4ac99b
+commit e5b5ce37f8844a956db59f74e63cf0e22addfb7e
 Author: Roman Shaposhnik <rvs@cloudera.com>
 Date:   Tue Sep 6 10:19:18 2011 -0700
 
@@ -228,7 +830,7 @@ Date:   Tue Sep 6 10:19:18 2011 -0700
     Author: Michajlo Matijkiw
     Ref: DISTRO-195
 
-commit 2b11dfd2ad80ad100deea66faf108a0e2fadbae8
+commit c076719364eabcd11be715290f5052068e0cbe99
 Author: Roman Shaposhnik <rvs@cloudera.com>
 Date:   Wed Aug 24 16:03:12 2011 -0700
 
@@ -238,7 +840,7 @@ Date:   Wed Aug 24 16:03:12 2011 -0700
     Author: Alejandro Abdelnur
     Ref: DISTRO-272
 
-commit 6b930ec066334eaa0b9915b09f78e7bf916aa6bd
+commit bbb5a7e96720b68c5b416be08c3de3c6fcd35733
 Author: Alejandro Abdelnur <tucu@cloudera.com>
 Date:   Wed Sep 7 18:39:54 2011 -0700
 
@@ -248,9 +850,9 @@ Date:   Wed Sep 7 18:39:54 2011 -0700
       Author: Alejandro Abdelnur
       Ref: CDH-3549
 
-commit a8c436b004c6c7ee65f9d14a85c4cc16d0a19076
-Author: Alejandro Abdelnur <tucu@cloudera.com>
-Date:   Mon Sep 5 12:22:16 2011 -0700
+commit 9c63b726d986ee34a5a8b273d4bef85cb4757074
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 13:47:42 2012 -0700
 
     HBASE-4299. Upgrade to Avro 1.5.3 & use Avro Maven plugin to generate Avro classes
     
@@ -258,7 +860,7 @@ Date:   Mon Sep 5 12:22:16 2011 -0700
       Author: Alejandro Abdelnur
       Ref: CDH-3534
 
-commit 592f6cc623f284d4bf520ccbdd9deee5204972d5
+commit 4112d5c648194f6adf3d147d3f08ba03483dcb86
 Author: Alejandro Abdelnur <tucu@cloudera.com>
 Date:   Mon Sep 5 12:09:07 2011 -0700
 
@@ -268,29 +870,7 @@ Date:   Mon Sep 5 12:09:07 2011 -0700
       Author: Jeff Hammerbacher
       Ref: CDH-3534
 
-commit 433eb35f07408dcbcacad6720864f29fca948853
-Author: Jonathan Hsieh <jon@cloudera.com>
-Date:   Sun Aug 28 19:10:57 2011 -0700
-
-    HBASE-4269: Add tests and restore semantics to TableInputFormat/TableRecordReader
-    
-    Adding tests cases and restoring sematics from HBASE-4196 patch.
-    
-    Reason: Bug
-    Author: Jonathan Hsieh
-    Ref: CDH-3482
-
-commit 7b957c9af1f9724a293c883697aefda713c798cf
-Author: Jonathan Hsieh <jon@cloudera.com>
-Date:   Wed Aug 24 23:42:37 2011 -0700
-
-    HBASE-4196: TableRecordReader may skip first row of region
-    
-    Reason: Bug
-    Author: Ming Ma
-    Ref: CDH-3482
-
-commit fbfc4f525d978fc9fadd40e4411423c935f81b7e
+commit 5bf60c89cac5d6f80d01359bd734de41a1e60e94
 Author: Jonathan Hsieh <jon@cloudera.com>
 Date:   Fri Aug 19 15:52:03 2011 -0700
 
@@ -304,19 +884,9 @@ Date:   Fri Aug 19 15:52:03 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3353
 
-commit 0806d7d604d4dcfa5546728fb5ba4f88d3445e3a
-Author: Jonathan Hsieh <jon@cloudera.com>
-Date:   Tue Aug 9 00:15:41 2011 +0000
-
-    HBASE-4160 HBase shell move and online may be unusable if region name or server includes binary-encoded data
-    
-    Reason: Bug
-    Author: Jonathan Hsieh
-    Ref: CDH-3358
-
-commit 8c97ae13f0a5a7b4b696bf7f26f26b3f506c59d3
-Author: Jonathan Hsieh <jon@cloudera.com>
-Date:   Wed Jun 22 06:48:28 2011 +0000
+commit 26dbbc68b450068f3644998eeb2272c7c5804463
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 13:45:53 2012 -0700
 
     HBASE-4010 HMaster.createTable could be heavily optimized
     
@@ -327,7 +897,7 @@ Date:   Wed Jun 22 06:48:28 2011 +0000
     Author: Zhihong Yu <tedyu@apache.org>
     Ref: CDH-3354
 
-commit e9b45b21e026b4857f45b1ad65a0ef61b3f5cbbc
+commit 2f8d94d5fa2dfc41b699683ad28b7fc1536cdf9e
 Author: Jonathan Hsieh <jon@cloudera.com>
 Date:   Mon Aug 8 18:44:51 2011 -0700
 
@@ -342,19 +912,7 @@ Date:   Mon Aug 8 18:44:51 2011 -0700
     Author: Joey Echeverria
     Ref: CDH-3354
 
-commit 22f8ec51c768340904f789455a1796153b9f6022
-Author: Jonathan Hsieh <jon@cloudera.com>
-Date:   Sat Jul 30 08:24:05 2011 -0700
-
-    HBASE-4148 HFileOutputFormat doesn't fill in TIMERANGE_KEY metadata
-    
-    This patch will improve the performance of hbase scans that use the TIMERANGE_KEY.
-    
-    Reason: Performance bug
-    Author: Jonathan Hsieh
-    Ref: CDH-3437
-
-commit e34b171decc26d88daf72407d3737b7d96f32296
+commit 10e378893707bb05394f74a2eb64d7674416291e
 Author: Jonathan Hsieh <jon@cloudera.com>
 Date:   Tue May 3 19:09:20 2011 +0000
 
@@ -364,7 +922,7 @@ Date:   Tue May 3 19:09:20 2011 +0000
     Author: Todd Lipcon
     Ref: CDH-3353
 
-commit 57e4180aaec09ff917ef739a67be080a3a153993
+commit fe9e64b17f97879fe947aa83e316a1a3f1dceb39
 Author: Jonathan Hsieh <jon@cloudera.com>
 Date:   Wed May 4 17:54:50 2011 +0000
 
@@ -374,9 +932,9 @@ Date:   Wed May 4 17:54:50 2011 +0000
     Author: Todd Lipcon
     Ref: CDH-3353
 
-commit b4f8ff0c97d1b7f802de563eca916a3be148b0c4
-Author: Jonathan Hsieh <jon@cloudera.com>
-Date:   Tue May 3 19:07:00 2011 +0000
+commit d19f93a77a97cbc0d51e06004152998fa2b4f904
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 13:43:57 2012 -0700
 
     HBASE-3835 Switch master and region server pages to Jamon-based templates
     
@@ -392,9 +950,9 @@ Date:   Tue May 3 19:07:00 2011 +0000
     Author: Todd Lipcon
     Ref: CDH-3353
 
-commit 2432febfcf21d8de3d6ddb905b54f4f3a2a4f395
-Author: Jonathan Hsieh <jon@cloudera.com>
-Date:   Wed Jul 27 06:40:04 2011 -0700
+commit a498c7a925f857573ccea66412aae99921e1ccce
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 13:40:59 2012 -0700
 
     HBASE-3836 Add facility to track currently progressing actions/workflows
     
@@ -408,7 +966,7 @@ Date:   Wed Jul 27 06:40:04 2011 -0700
     Author: Todd Lipcon
     Ref: CDH-3353
 
-commit 525f5146dd9ee426158e73bd2cd4c8ff45b0004c
+commit 09b9f927ffec29c6f7608ce6417917721859ec9b
 Author: Aaron T. Myers <atm@cloudera.com>
 Date:   Tue Jul 5 17:38:01 2011 -0700
 
@@ -418,7 +976,7 @@ Date:   Tue Jul 5 17:38:01 2011 -0700
     Author: Aaron T. Myers
     Ref: CDH-3057
 
-commit 8328988ef9a4337306d5978ce1aa631a888a60d5
+commit ae5ab958db318f0ed7705e2a69640ce402140283
 Author: Michael Stack <stack@apache.org>
 Date:   Thu Jun 9 22:34:32 2011 +0000
 
@@ -426,15 +984,20 @@ Date:   Thu Jun 9 22:34:32 2011 +0000
     
     git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1134119 13f79535-47bb-0310-9956-ffa450edef68
 
-commit f4cd799c8464e0f777b3930c09d66f4013f8369c
-Author: Michael Stack <stack@apache.org>
-Date:   Thu Mar 24 22:59:45 2011 +0000
+commit e70266040893ad65cce4a7b5fb0bda42e427bc7b
+Author: Jimmy Xiang <jxiang@cloudera.com>
+Date:   Wed Mar 21 13:34:45 2012 -0700
 
     HBASE-3474 HFileOutputFormat to use column family's compression algorithm
     
     git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1085179 13f79535-47bb-0310-9956-ffa450edef68
+    
+    Conflicts:
+    
+    	src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
+    	src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java
 
-commit fe6b4ddea0c7853dc758877d7d216f0b02834ee8
+commit 08eef328a3d036515ca1379fef78e43a7e5622d3
 Author: Michael Stack <stack@apache.org>
 Date:   Mon Jun 6 23:16:09 2011 +0000
 
@@ -442,7 +1005,7 @@ Date:   Mon Jun 6 23:16:09 2011 +0000
     
     git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1132833 13f79535-47bb-0310-9956-ffa450edef68
 
-commit 936afe5c37a1d800305c877e2ea0baac3e7f42da
+commit b3a0fc478f17a1e05da56035c21a0cdf3cccb204
 Author: Michael Stack <stack@apache.org>
 Date:   Mon May 23 21:45:20 2011 +0000
 
@@ -450,7 +1013,7 @@ Date:   Mon May 23 21:45:20 2011 +0000
     
     git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1126768 13f79535-47bb-0310-9956-ffa450edef68
 
-commit ea28b76586bac8b2711d0e7d7ac9c8eaaf98ff74
+commit a82474b3b83f9090648709e828bed77d498f7187
 Author: Michael Stack <stack@apache.org>
 Date:   Fri May 20 16:58:25 2011 +0000
 
@@ -458,7 +1021,7 @@ Date:   Fri May 20 16:58:25 2011 +0000
     
     git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1125467 13f79535-47bb-0310-9956-ffa450edef68
 
-commit 47f36cbc635239ca7eda3a64be60fdc0c7dc5954
+commit c88ca236cedcedc5a355bff04462357a9d812a87
 Author: Michael Stack <stack@apache.org>
 Date:   Thu May 19 23:00:47 2011 +0000
 
@@ -466,17 +1029,7 @@ Date:   Thu May 19 23:00:47 2011 +0000
     
     git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1125163 13f79535-47bb-0310-9956-ffa450edef68
 
-commit 4fb4ebd3952295012223681431b16b197a72d190
-Author: Aaron T. Myers <atm@cloudera.com>
-Date:   Thu May 5 14:08:50 2011 -0700
-
-    HBASE-3440. Clean out load_table.rb and make sure all roads lead to completebulkload tool
-    
-    Reason: Bug
-    Author: Vidhyashankar Venkataraman
-    Ref: CDH-3057
-
-commit c8dacb3bbc9e21ceeee61c3fe687ac8a4eff224e
+commit a1c477e7f42ce92041f345daaea0e6a06bce1bcc
 Author: Aaron T. Myers <atm@cloudera.com>
 Date:   Fri May 6 16:07:05 2011 -0700
 
@@ -486,7 +1039,7 @@ Date:   Fri May 6 16:07:05 2011 -0700
     Author: Aaron T. Myers
     Ref: CDH-3057
 
-commit 93ab3e768267a0ba5298370115e4903be7f111d7
+commit 142f834d6551f224343ad0ea29fd389acf0b64c0
 Author: Aaron T. Myers <atm@cloudera.com>
 Date:   Thu May 5 13:53:57 2011 -0700
 
@@ -496,7 +1049,7 @@ Date:   Thu May 5 13:53:57 2011 -0700
     Author: Nicolas Spiegelberg
     Ref: CDH-3057
 
-commit f740fec3a4021b02fc1bbe233d935fd47cca2432
+commit acc10d3f440388430495e46f056959d37ae5313d
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Wed Jan 12 13:32:54 2011 -0800
 
@@ -504,7 +1057,7 @@ Date:   Wed Jan 12 13:32:54 2011 -0800
     
     Author: Todd Lipcon
 
-commit 1170358c166394ae31eff8ba06aec91b80154b17
+commit 966b77b06f61dc66e9ec016ed0bb93d727f46f6b
 Author: Todd Lipcon <todd@cloudera.com>
 Date:   Tue Jun 14 11:02:00 2011 -0700
 

@@ -104,13 +104,7 @@ implements Configurable {
     @Override
     public void close(TaskAttemptContext context)
     throws IOException {
-      table.flushCommits();
-      // The following call will shutdown all connections to the cluster from
-      // this JVM.  It will close out our zk session otherwise zk wil log
-      // expired sessions rather than closed ones.  If any other HTable instance
-      // running in this JVM, this next call will cause it damage.  Presumption
-      // is that the above this.table is only instance.
-      HConnectionManager.deleteAllConnections(true);
+      table.close();
     }
 
     /**
@@ -184,6 +178,9 @@ implements Configurable {
   public void setConf(Configuration otherConf) {
     this.conf = HBaseConfiguration.create(otherConf);
     String tableName = this.conf.get(OUTPUT_TABLE);
+    if(tableName == null || tableName.length() <= 0) {
+      throw new IllegalArgumentException("Must specify table name");
+    }
     String address = this.conf.get(QUORUM_ADDRESS);
     String serverClass = this.conf.get(REGION_SERVER_CLASS);
     String serverImpl = this.conf.get(REGION_SERVER_IMPL);
@@ -200,6 +197,7 @@ implements Configurable {
       LOG.info("Created table instance for "  + tableName);
     } catch(IOException e) {
       LOG.error(e);
+      throw new RuntimeException(e);
     }
   }
 }

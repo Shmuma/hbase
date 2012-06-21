@@ -273,12 +273,4 @@ public class SingleColumnValueFilter extends FilterBase {
     out.writeBoolean(filterIfMissing);
     out.writeBoolean(latestVersionOnly);
   }
-
-  /**
-   * The only thing this filter need to check row is given column family. So,
-   * it's the only essential column in whole scan.
-   */
-  public boolean isFamilyEssential(byte[] name) {
-    return Bytes.equals(name, this.columnFamily);
-  }
 }

@@ -1,7 +1,7 @@
-From c8dacb3bbc9e21ceeee61c3fe687ac8a4eff224e Mon Sep 17 00:00:00 2001
+From a1c477e7f42ce92041f345daaea0e6a06bce1bcc Mon Sep 17 00:00:00 2001
 From: Aaron T. Myers <atm@cloudera.com>
 Date: Fri, 6 May 2011 16:07:05 -0700
-Subject: [PATCH 04/50] HBASE-3864. Rename of hfile.min.blocksize.size in HBASE-2899 reverted in HBASE-1861
+Subject: [PATCH 004/101] HBASE-3864. Rename of hfile.min.blocksize.size in HBASE-2899 reverted in HBASE-1861
 
 Reason: Bug
 Author: Aaron T. Myers
@@ -11,10 +11,10 @@ Ref: CDH-3057
  1 files changed, 1 insertions(+), 1 deletions(-)
 
 diff --git a/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java b/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
-index a0a2f86..36b3ab9 100644
+index e2143f0..2d5d846 100644
 --- a/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
 +++ b/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
-@@ -75,7 +75,7 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
+@@ -77,7 +77,7 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
      // These configs. are from hbase-*.xml
      final long maxsize = conf.getLong("hbase.hregion.max.filesize",
          HConstants.DEFAULT_MAX_FILE_SIZE);

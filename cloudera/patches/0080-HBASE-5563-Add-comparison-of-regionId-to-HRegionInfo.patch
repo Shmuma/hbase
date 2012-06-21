@@ -1,0 +1,79 @@
+From 750d3e562470772109e8a59102db143aa3b9c2b0 Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jmhsieh@apache.org>
+Date: Fri, 23 Mar 2012 23:46:17 +0000
+Subject: [PATCH 080/101] HBASE-5563 Add comparison of regionId to HRegionInfo#compareTo (chunhui and jmhsieh)
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1304661 13f79535-47bb-0310-9956-ffa450edef68
+
+Reason: prereq for hbck
+Author: Jonathan Hsieh
+Ref: CDH-4040
+---
+ .../java/org/apache/hadoop/hbase/HRegionInfo.java  |    9 +++++++++
+ .../hadoop/hbase/master/AssignmentManager.java     |    4 +++-
+ .../hadoop/hbase/regionserver/TestHRegionInfo.java |   15 +++++++++++++++
+ 3 files changed, 27 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/HRegionInfo.java b/src/main/java/org/apache/hadoop/hbase/HRegionInfo.java
+index ad1c643..571b4e6 100644
+--- a/src/main/java/org/apache/hadoop/hbase/HRegionInfo.java
++++ b/src/main/java/org/apache/hadoop/hbase/HRegionInfo.java
+@@ -668,6 +668,15 @@ public class HRegionInfo extends VersionedWritable implements WritableComparable
+     if (result != 0) {
+       return result;
+     }
++
++    // regionId is usually milli timestamp -- this defines older stamps
++    // to be "smaller" than newer stamps in sort order.
++    if (this.regionId > o.regionId) {
++      return 1;
++    } else if (this.regionId < o.regionId) {
++      return -1;
++    }
++
+     if (this.offLine == o.offLine)
+         return 0;
+     if (this.offLine == true) return -1;
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index eb6f949..e9089cc 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -1913,8 +1913,10 @@ public class AssignmentManager extends ZooKeeperListener {
+    */
+   public List<HRegionInfo> getRegionsOfTable(byte[] tableName) {
+     List<HRegionInfo> tableRegions = new ArrayList<HRegionInfo>();
++    // boundary needs to have table's name but regionID 0 so that it is sorted 
++    // before all table's regions.
+     HRegionInfo boundary =
+-      new HRegionInfo(new HTableDescriptor(tableName), null, null);
++      new HRegionInfo(new HTableDescriptor(tableName), null, null, false, 0L);
+     synchronized (this.regions) {
+       for (HRegionInfo regionInfo: this.regions.tailMap(boundary).keySet()) {
+         if(Bytes.equals(regionInfo.getTableDesc().getName(), tableName)) {
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegionInfo.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegionInfo.java
+index 516139b..c519abd 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegionInfo.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestHRegionInfo.java
+@@ -79,4 +79,19 @@ public class TestHRegionInfo {
+     } catch (IllegalArgumentException iae) {
+     }
+   }
++ 
++  @Test
++  public void testComparator() {
++    String tableName = "comparatorTablename";
++    byte[] empty = new byte[0];
++    HRegionInfo older = new HRegionInfo(
++        new HTableDescriptor(tableName), empty, empty, false, 0L); 
++    HRegionInfo newer = new HRegionInfo(
++        new HTableDescriptor(tableName), empty, empty, false, 1L); 
++    assertTrue(older.compareTo(newer) < 0);
++    assertTrue(newer.compareTo(older) > 0);
++    assertTrue(older.compareTo(older) == 0);
++    assertTrue(newer.compareTo(newer) == 0);
++  }
++
+ }
+-- 
+1.7.0.4
+

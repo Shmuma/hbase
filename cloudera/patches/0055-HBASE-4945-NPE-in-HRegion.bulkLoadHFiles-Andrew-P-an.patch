@@ -1,0 +1,50 @@
+From 603c0b82c1617c478d794318b5231e8357aeaa6d Mon Sep 17 00:00:00 2001
+From: Lars Hofhansl <larsh@apache.org>
+Date: Sun, 4 Dec 2011 20:54:37 +0000
+Subject: [PATCH 055/101] HBASE-4945  NPE in HRegion.bulkLoadHFiles (Andrew P and Lars H)
+
+Reason: Bug
+Author: Lars Hofhansl
+Ref: CDH-3885
+---
+ .../apache/hadoop/hbase/regionserver/HRegion.java  |   21 +++++++++----------
+ 1 files changed, 10 insertions(+), 11 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index 4bbadef..0879c7b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -2362,20 +2362,19 @@ public class HRegion implements HeapSize { // , Writable{
+               "No such column family " + Bytes.toStringBinary(familyName));
+           ioes.add(ioe);
+           failures.add(p);
+-        }
+-
+-        try {
+-          store.assertBulkLoadHFileOk(new Path(path));
+-        } catch (WrongRegionException wre) {
+-          // recoverable (file doesn't fit in region)
+-          failures.add(p);
+-        } catch (IOException ioe) {
+-          // unrecoverable (hdfs problem)
+-          ioes.add(ioe);
++        } else {
++          try {
++            store.assertBulkLoadHFileOk(new Path(path));
++          } catch (WrongRegionException wre) {
++            // recoverable (file doesn't fit in region)
++            failures.add(p);
++          } catch (IOException ioe) {
++            // unrecoverable (hdfs problem)
++            ioes.add(ioe);
++          }
+         }
+       }
+ 
+-
+       // validation failed, bail out before doing anything permanent.
+       if (failures.size() != 0) {
+         StringBuilder list = new StringBuilder();
+-- 
+1.7.0.4
+

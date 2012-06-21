@@ -1,7 +1,7 @@
-From 93ab3e768267a0ba5298370115e4903be7f111d7 Mon Sep 17 00:00:00 2001
+From 142f834d6551f224343ad0ea29fd389acf0b64c0 Mon Sep 17 00:00:00 2001
 From: Aaron T. Myers <atm@cloudera.com>
 Date: Thu, 5 May 2011 13:53:57 -0700
-Subject: [PATCH 03/50] HBASE-1861. Multi-family support for HFileOutputFormat
+Subject: [PATCH 003/101] HBASE-1861. Multi-family support for HFileOutputFormat
 
 Reason: Improvement
 Author: Nicolas Spiegelberg
@@ -13,10 +13,10 @@ Ref: CDH-3057
  3 files changed, 141 insertions(+), 61 deletions(-)
 
 diff --git a/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java b/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
-index 8ccdf4d..a0a2f86 100644
+index 3135392..e2143f0 100644
 --- a/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
 +++ b/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
-@@ -58,7 +58,8 @@ import org.apache.commons.logging.LogFactory;
+@@ -59,7 +59,8 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
   * Currently, can only write files to a single column family at a
   * time.  Multiple column families requires coordinating keys cross family.
   * Writes current time as the sequence id for the file. Sets the major compacted
@@ -26,7 +26,7 @@ index 8ccdf4d..a0a2f86 100644
   * @see KeyValueSortReducer
   */
  public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable, KeyValue> {
-@@ -72,9 +73,10 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
+@@ -74,9 +75,10 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
      Configuration conf = context.getConfiguration();
      final FileSystem fs = outputdir.getFileSystem(conf);
      // These configs. are from hbase-*.xml
@@ -40,7 +40,7 @@ index 8ccdf4d..a0a2f86 100644
      // Invented config.  Add to hbase-*.xml if other than default compression.
      final String compression = conf.get("hfile.compression",
        Compression.Algorithm.NONE.getName());
-@@ -85,48 +87,77 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
+@@ -87,49 +89,78 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
          new TreeMap<byte [], WriterLength>(Bytes.BYTES_COMPARATOR);
        private byte [] previousRow = HConstants.EMPTY_BYTE_ARRAY;
        private final byte [] now = Bytes.toBytes(System.currentTimeMillis());
@@ -98,6 +98,7 @@ index 8ccdf4d..a0a2f86 100644
 +
 +        // we now have the proper HLog writer. full steam ahead
          kv.updateLatestStamp(this.now);
+         trt.includeTimestamp(kv);
          wl.writer.append(kv);
          wl.written += length;
 +
@@ -145,7 +146,7 @@ index 8ccdf4d..a0a2f86 100644
        }
  
        private void close(final HFile.Writer w) throws IOException {
-@@ -143,8 +174,8 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
+@@ -148,8 +179,8 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
  
        public void close(TaskAttemptContext c)
        throws IOException, InterruptedException {
@@ -228,10 +229,10 @@ index 5fb3e83..0cba4bf 100644
    }
  }
 diff --git a/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java b/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java
-index 89241eb..ecf7223 100644
+index 07a660a..dff313e 100644
 --- a/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java
 +++ b/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java
-@@ -41,6 +41,9 @@ import org.apache.hadoop.hbase.KeyValue;
+@@ -43,6 +43,9 @@ import org.apache.hadoop.hbase.KeyValue;
  import org.apache.hadoop.hbase.PerformanceEvaluation;
  import org.apache.hadoop.hbase.client.HBaseAdmin;
  import org.apache.hadoop.hbase.client.HTable;
@@ -239,9 +240,9 @@ index 89241eb..ecf7223 100644
 +import org.apache.hadoop.hbase.client.ResultScanner;
 +import org.apache.hadoop.hbase.client.Scan;
  import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
- import org.apache.hadoop.hbase.util.Bytes;
- import org.apache.hadoop.hbase.util.Threads;
-@@ -64,7 +67,9 @@ import org.mockito.Mockito;
+ import org.apache.hadoop.hbase.io.hfile.HFile;
+ import org.apache.hadoop.hbase.regionserver.TimeRangeTracker;
+@@ -69,7 +72,9 @@ import org.mockito.Mockito;
  public class TestHFileOutputFormat  {
    private final static int ROWSPERSPLIT = 1024;
  
@@ -252,7 +253,7 @@ index 89241eb..ecf7223 100644
    private static final byte[] TABLE_NAME = Bytes.toBytes("TestTable");
    
    private HBaseTestingUtility util = new HBaseTestingUtility();
-@@ -118,9 +123,11 @@ public class TestHFileOutputFormat  {
+@@ -123,9 +128,11 @@ public class TestHFileOutputFormat  {
          random.nextBytes(valBytes);
          ImmutableBytesWritable key = new ImmutableBytesWritable(keyBytes);
  
@@ -267,7 +268,7 @@ index 89241eb..ecf7223 100644
        }
      }
    }
-@@ -267,14 +274,12 @@ public class TestHFileOutputFormat  {
+@@ -341,14 +348,12 @@ public class TestHFileOutputFormat  {
      try {
        util.startMiniCluster();
        HBaseAdmin admin = new HBaseAdmin(conf);
@@ -286,7 +287,7 @@ index 89241eb..ecf7223 100644
  
        // Generate the bulk load files
        util.startMiniMapReduceCluster();
-@@ -283,6 +288,19 @@ public class TestHFileOutputFormat  {
+@@ -357,6 +362,19 @@ public class TestHFileOutputFormat  {
        assertEquals("HFOF should not touch actual table",
            0, util.countRows(table));
    
@@ -306,7 +307,7 @@ index 89241eb..ecf7223 100644
        if (shouldChangeRegions) {
          LOG.info("Changing regions in table");
          admin.disableTable(table.getTableName());
-@@ -292,8 +310,8 @@ public class TestHFileOutputFormat  {
+@@ -366,8 +384,8 @@ public class TestHFileOutputFormat  {
            LOG.info("Waiting on table to finish disabling");
          }
          byte[][] newStartKeys = generateRandomStartKeys(15);
@@ -317,7 +318,7 @@ index 89241eb..ecf7223 100644
          admin.enableTable(table.getTableName());
          while (table.getRegionsInfo().size() != 15 ||
              !admin.isTableAvailable(table.getTableName())) {
-@@ -309,6 +327,19 @@ public class TestHFileOutputFormat  {
+@@ -383,6 +401,19 @@ public class TestHFileOutputFormat  {
        int expectedRows = NMapInputFormat.getNumMapTasks(conf) * ROWSPERSPLIT;
        assertEquals("LoadIncrementalHFiles should put expected data in table",
            expectedRows, util.countRows(table));
@@ -337,7 +338,7 @@ index 89241eb..ecf7223 100644
        String tableDigestBefore = util.checksumRows(table);
              
        // Cause regions to reopen
-@@ -350,11 +381,11 @@ public class TestHFileOutputFormat  {
+@@ -424,11 +455,11 @@ public class TestHFileOutputFormat  {
      util = new HBaseTestingUtility(conf);
      if ("newtable".equals(args[0])) {
        byte[] tname = args[1].getBytes();

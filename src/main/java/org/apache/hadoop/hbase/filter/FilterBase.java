@@ -119,13 +119,4 @@ public abstract class FilterBase implements Filter {
     return null;
   }
 
-  /**
-   * By default, we require all scan's column families to be present. Our
-   * anchestors are free to be more precise.
-   *
-   * @inheritDoc
-   */
-  public boolean isFamilyEssential(byte[] name) {
-    return true;
-  }
 }

@@ -1,0 +1,106 @@
+From f7b609896211accdbd3ed0cbe39724d540f034bc Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 28 Dec 2011 19:01:30 -0800
+Subject: [PATCH 065/101] HBASE-1364 [performance] Distributed splitting of regionserver commit logs, backport error fixed.
+
+Reason: Bug
+Author: Prakash Khemani
+Ref: CDH-4008
+---
+ .../hbase/regionserver/wal/HLogSplitter.java       |   32 ++++++++++++++++++--
+ 1 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+index 122560b..b9d9caa 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+@@ -299,7 +299,7 @@ public class HLogSplitter {
+         }
+       }
+       status.setStatus("Log splits complete. Checking for orphaned logs.");
+-      
++
+       if (fs.listStatus(srcDir).length > processedLogs.size()
+           + corruptedLogs.size()) {
+         throw new OrphanHLogAfterSplitException(
+@@ -312,7 +312,7 @@ public class HLogSplitter {
+     }
+ 
+     status.setStatus("Archiving logs after completed split");
+-    archiveLogs(srcDir, corruptedLogs, processedLogs, oldLogDir, fs, conf); 
++    archiveLogs(srcDir, corruptedLogs, processedLogs, oldLogDir, fs, conf);
+     return splits;
+   }
+ 
+@@ -348,6 +348,11 @@ public class HLogSplitter {
+     synchronizedMap(new TreeMap<byte[], Object>(Bytes.BYTES_COMPARATOR));
+     boolean isCorrupted = false;
+ 
++    Preconditions.checkState(status == null);
++    status = TaskMonitor.get().createStatus(
++        "Splitting log file " + logfile.getPath() +
++        "into a temporary staging area.");
++
+     Object BAD_WRITER = new Object();
+ 
+     boolean progress_failed = false;
+@@ -364,6 +369,7 @@ public class HLogSplitter {
+     Path logPath = logfile.getPath();
+     long logLength = logfile.getLen();
+     LOG.info("Splitting hlog: " + logPath + ", length=" + logLength);
++    status.setStatus("Opening log file");
+     Reader in = null;
+     try {
+       in = getReader(fs, logfile, conf, skipErrors);
+@@ -373,12 +379,14 @@ public class HLogSplitter {
+       isCorrupted = true;
+     }
+     if (in == null) {
++      status.markComplete("Was nothing to split in log file");
+       LOG.warn("Nothing to split in log file " + logPath);
+       return true;
+     }
+     long t = EnvironmentEdgeManager.currentTimeMillis();
+     long last_report_at = t;
+     if (reporter != null && reporter.progress() == false) {
++      status.markComplete("Failed: reporter.progress asked us to terminate");
+       return false;
+     }
+     // Report progress every so many edits and/or files opened (opening a file
+@@ -452,6 +460,24 @@ public class HLogSplitter {
+         WriterAndPath wap = (WriterAndPath)o;
+         wap.w.close();
+         LOG.debug("Closed " + wap.p);
++        Path dst = getCompletedRecoveredEditsFilePath(wap.p);
++        if (!dst.equals(wap.p) && fs.exists(dst)) {
++          LOG.warn("Found existing old edits file. It could be the "
++              + "result of a previous failed split attempt. Deleting " + dst
++              + ", length=" + fs.getFileStatus(dst).getLen());
++          if (!fs.delete(dst, false)) {
++            LOG.warn("Failed deleting of old " + dst);
++            throw new IOException("Failed deleting of old " + dst);
++          }
++        }
++        // Skip the unit tests which create a splitter that reads and writes the
++        // data without touching disk. TestHLogSplit#testThreading is an
++        // example.
++        if (fs.exists(wap.p)) {
++          if (!fs.rename(wap.p, dst)) {
++            throw new IOException("Failed renaming " + wap.p + " to " + dst);
++          }
++        }
+       }
+       String msg = "Processed " + editsCount + " edits across " + n + " regions" +
+         " threw away edits for " + (logWriters.size() - n) + " regions" +
+@@ -526,7 +552,7 @@ public class HLogSplitter {
+   private static List<FileStatus> listAll(FileSystem fs, Path dir)
+   throws IOException {
+     List<FileStatus> fset = new ArrayList<FileStatus>(100);
+-    FileStatus [] files = fs.listStatus(dir);
++    FileStatus [] files = fs.exists(dir)? fs.listStatus(dir) : null;
+     if (files != null) {
+       for (FileStatus f : files) {
+         if (f.isDir()) {
+-- 
+1.7.0.4
+

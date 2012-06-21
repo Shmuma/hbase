@@ -1,0 +1,777 @@
+From c9b29fed3dc41cb6a31e78dac3aefbaeb9904d30 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 21 Mar 2012 14:21:15 -0700
+Subject: [PATCH 056/101] HBASE-2312 [jira] Possible data loss when RS goes into GC pause while rolling
+ HLog
+
+Reason: Bug
+Author: Nicolas Spiegelberg
+Ref: CDH-3816
+---
+ .../hadoop/hbase/master/MasterFileSystem.java      |  117 +++++++++------
+ .../master/handler/ServerShutdownHandler.java      |  126 ++++++++--------
+ .../apache/hadoop/hbase/regionserver/wal/HLog.java |   14 ++-
+ .../hbase/regionserver/wal/HLogSplitter.java       |    3 +-
+ .../regionserver/wal/SequenceFileLogWriter.java    |  157 +++++++++++++++-----
+ .../regionserver/ReplicationSource.java            |   23 ++-
+ .../hbase/master/TestOpenedRegionHandler.java      |    3 +-
+ .../hbase/regionserver/wal/TestHLogSplit.java      |   69 +++++++++
+ 8 files changed, 349 insertions(+), 163 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+index de0b843..7a7c94b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+@@ -173,66 +173,97 @@ public class MasterFileSystem {
+    * {@link HServerInfo#getServerName()}
+    */
+   void splitLogAfterStartup(final Map<String, HServerInfo> onlineServers) {
++    boolean retrySplitting = !conf.getBoolean("hbase.hlog.split.skip.errors",
++        HLog.SPLIT_SKIP_ERRORS_DEFAULT);
+     Path logsDirPath = new Path(this.rootdir, HConstants.HREGION_LOGDIR_NAME);
+-    try {
+-      if (!this.fs.exists(logsDirPath)) {
+-        return;
+-      }
+-    } catch (IOException e) {
+-      throw new RuntimeException("Failed exists test on " + logsDirPath, e);
+-    }
+-    FileStatus[] logFolders;
+-    try {
+-      logFolders = this.fs.listStatus(logsDirPath);
+-    } catch (IOException e) {
+-      throw new RuntimeException("Failed listing " + logsDirPath.toString(), e);
+-    }
+-    if (logFolders == null || logFolders.length == 0) {
+-      LOG.debug("No log files to split, proceeding...");
+-      return;
+-    }
+-    List<String> serverNames = new ArrayList<String>();
+-    for (FileStatus status : logFolders) {
+-      String serverName = status.getPath().getName();
+-      if (onlineServers.get(serverName) == null) {
+-        LOG.info("Log folder " + status.getPath() + " doesn't belong " +
+-          "to a known region server, splitting");
+-        serverNames.add(serverName);
+-      } else {
+-        LOG.info("Log folder " + status.getPath() +
+-          " belongs to an existing region server");
++    do {
++      List<String> serverNames = new ArrayList<String>();
++      try {
++        if (!this.fs.exists(logsDirPath)) return;
++        FileStatus[] logFolders = this.fs.listStatus(logsDirPath);
++
++        if (logFolders == null || logFolders.length == 0) {
++          LOG.debug("No log files to split, proceeding...");
++          return;
++        }
++        for (FileStatus status : logFolders) {
++          String sn = status.getPath().getName();
++          // truncate splitting suffix if present (for ServerName parsing)
++          if (sn.endsWith(HLog.SPLITTING_EXT)) {
++            sn = sn.substring(0, sn.length() - HLog.SPLITTING_EXT.length());
++          }
++          String serverName = status.getPath().getName();
++          if (!onlineServers.keySet().contains(serverName)) {
++            LOG.info("Log folder " + status.getPath() + " doesn't belong "
++                + "to a known region server, splitting");
++            serverNames.add(serverName);
++          } else {
++            LOG.info("Log folder " + status.getPath()
++                + " belongs to an existing region server");
++          }
++        }
++        splitLog(serverNames);
++        retrySplitting = false;
++      } catch (IOException ioe) {
++        LOG.warn("Failed splitting of " + serverNames, ioe);
++        if (!checkFileSystem()) {
++          LOG.warn("Bad Filesystem, exiting");
++          Runtime.getRuntime().halt(1);
++        }
++        try {
++          if (retrySplitting) {
++            Thread.sleep(conf.getInt(
++              "hbase.hlog.split.failure.retry.interval", 30 * 1000));
++          }
++        } catch (InterruptedException e) {
++          LOG.warn("Interrupted, returning w/o splitting at startup");
++          Thread.currentThread().interrupt();
++          retrySplitting = false;
++        }
+       }
+-    }  
+-    splitLog(serverNames);
++    } while (retrySplitting);
+   }
+ 
+-  public void splitLog(final String serverName) {
++  public void splitLog(final String serverName) throws IOException {
+     List<String> serverNames = new ArrayList<String>();
+     serverNames.add(serverName);
+     splitLog(serverNames);
+   }
+   
+-  public void splitLog(final List<String> serverNames) {
++  public void splitLog(final List<String> serverNames) throws IOException {
+     long splitTime = 0, splitLogSize = 0;
+     List<Path> logDirs = new ArrayList<Path>();
+     for(String serverName: serverNames){
+-      Path logDir = new Path(this.rootdir, HLog.getHLogDirectoryName(serverName));
+-      logDirs.add(logDir);
++      Path logDir = new Path(this.rootdir,
++        HLog.getHLogDirectoryName(serverName.toString()));
++      Path splitDir = logDir.suffix(HLog.SPLITTING_EXT);
++      // rename the directory so a rogue RS doesn't create more HLogs
++      if (fs.exists(logDir)) {
++        if (!this.fs.rename(logDir, splitDir)) {
++          throw new IOException("Failed fs.rename for log split: " + logDir);
++        }
++        logDir = splitDir;
++        LOG.debug("Renamed region directory: " + splitDir);
++      } else if (!fs.exists(splitDir)) {
++        LOG.info("Log dir for server " + serverName + " does not exist");
++        continue;
++      }
++      logDirs.add(splitDir);
++    }
++
++    if (logDirs.isEmpty()) {
++      LOG.info("No logs to split");
++      return;
+     }
+       
+     if (distributedLogSplitting) {
+       splitLogManager.handleDeadWorkers(serverNames);
+       splitTime = EnvironmentEdgeManager.currentTimeMillis();
+       try {
+-        try {
+-          splitLogSize = splitLogManager.splitLogDistributed(logDirs);
+-        } catch (OrphanHLogAfterSplitException e) {
+-          LOG.warn("Retrying distributed splitting for " +
+-            serverNames + "because of:", e);
+-            splitLogManager.splitLogDistributed(logDirs);
+-        }
+-      } catch (IOException e) {
+-        LOG.error("Failed distributed splitting " + serverNames, e);
++        splitLogSize = splitLogManager.splitLogDistributed(logDirs);
++      } catch (OrphanHLogAfterSplitException e) {
++        LOG.warn("Retrying distributed splitting for " + serverNames, e);
++        splitLogManager.splitLogDistributed(logDirs);
+       }
+       splitTime = EnvironmentEdgeManager.currentTimeMillis() - splitTime;
+     } else {
+@@ -256,8 +287,6 @@ public class MasterFileSystem {
+           }
+           splitTime = splitter.getTime();
+           splitLogSize = splitter.getSize();
+-        } catch (IOException e) {
+-          LOG.error("Failed splitting " + logDir.toString(), e);
+         } finally {
+           this.splitLogLock.unlock();
+         }
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java b/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
+index 15ea341..e6d721c 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/handler/ServerShutdownHandler.java
+@@ -162,34 +162,68 @@ public class ServerShutdownHandler extends EventHandler {
+   public void process() throws IOException {
+     final String serverName = this.hsi.getServerName();
+ 
+-    LOG.info("Splitting logs for " + serverName);
+     try {
+-      this.services.getMasterFileSystem().splitLog(serverName);
+-    
+-      // Clean out anything in regions in transition.  Being conservative and
+-      // doing after log splitting.  Could do some states before -- OPENING?
+-      // OFFLINE? -- and then others after like CLOSING that depend on log
+-      // splitting.
+-      Set<HRegionInfo> regionsFromRegionPlansForServer = new HashSet<HRegionInfo>();
+-      List<RegionState> regionsInTransition = new ArrayList<RegionState>();
+-      RegionsOnDeadServer regionsOnDeadServer = this.services
+-          .getAssignmentManager().processServerShutdown(this.hsi);
+-      regionsFromRegionPlansForServer = regionsOnDeadServer
+-          .getRegionsFromRegionPlansForServer();
+-      regionsInTransition = regionsOnDeadServer.getRegionsInTransition();
++
++      try {
++        LOG.info("Splitting logs for " + serverName);
++        this.services.getMasterFileSystem().splitLog(serverName);
++      } catch (IOException ioe) {
++        this.services.getExecutorService().submit(this);
++        this.deadServers.add(serverName);
++        throw new IOException("failed log splitting for " +
++          serverName + ", will retry", ioe);
++      }
+ 
+       // Assign root and meta if we were carrying them.
+       if (isCarryingRoot()) { // -ROOT-
+-        LOG.info("Server " + serverName + " was carrying ROOT. Trying to assign.");
++        LOG.info("Server " + serverName +
++            " was carrying ROOT. Trying to assign.");
++        this.services.getAssignmentManager().
++        regionOffline(HRegionInfo.ROOT_REGIONINFO);
+         verifyAndAssignRootWithRetries();
+       }
+-    
++
+       // Carrying meta?
+       if (isCarryingMeta()) {
+-        LOG.info("Server " + serverName + " was carrying META. Trying to assign.");
++        LOG.info("Server " + serverName +
++          " was carrying META. Trying to assign.");
++        this.services.getAssignmentManager().
++        regionOffline(HRegionInfo.FIRST_META_REGIONINFO);
+         this.services.getAssignmentManager().assignMeta();
+       }
+-    
++
++      // We don't want worker thread in the MetaServerShutdownHandler
++      // executor pool to block by waiting availability of -ROOT-
++      // and .META. server. Otherwise, it could run into the following issue:
++      // 1. The current MetaServerShutdownHandler instance For RS1 waits for the .META.
++      //    to come online.
++      // 2. The newly assigned .META. region server RS2 was shutdown right after
++      //    it opens the .META. region. So the MetaServerShutdownHandler
++      //    instance For RS1 will still be blocked.
++      // 3. The new instance of MetaServerShutdownHandler for RS2 is queued.
++      // 4. The newly assigned .META. region server RS3 was shutdown right after
++      //    it opens the .META. region. So the MetaServerShutdownHandler
++      //    instance For RS1 and RS2 will still be blocked.
++      // 5. The new instance of MetaServerShutdownHandler for RS3 is queued.
++      // 6. Repeat until we run out of MetaServerShutdownHandler worker threads
++      // The solution here is to resubmit a ServerShutdownHandler request to process
++      // user regions on that server so that MetaServerShutdownHandler
++      // executor pool is always available.
++      if (isCarryingRoot() || isCarryingMeta()) { // -ROOT- or .META.
++        this.services.getExecutorService().submit(new ServerShutdownHandler(
++            this.server, this.services, this.deadServers, this.hsi));
++        this.deadServers.add(serverName);
++        return;
++      }
++
++      // Clean out anything in regions in transition.  Being conservative and
++      // doing after log splitting.  Could do some states before -- OPENING?
++      // OFFLINE? -- and then others after like CLOSING that depend on log
++      // splitting.
++      List<RegionState> regionsInTransition =
++        this.services.getAssignmentManager()
++        .processServerShutdown(this.hsi).getRegionsInTransition();
++
+       // Wait on meta to come online; we need it to progress.
+       // TODO: Best way to hold strictly here?  We should build this retry logic
+       //       into the MetaReader operations themselves.
+@@ -208,7 +242,7 @@ public class ServerShutdownHandler extends EventHandler {
+               serverName + ", retrying META read", ioe);
+         }
+       }
+-    
++
+       // Skip regions that were in transition unless CLOSING or PENDING_CLOSE
+       for (RegionState rit : regionsInTransition) {
+         if (!rit.isClosing() && !rit.isPendingClose()) {
+@@ -217,55 +251,23 @@ public class ServerShutdownHandler extends EventHandler {
+           hris.remove(rit.getRegion());
+         }
+       }
+-    
++
+       LOG.info("Reassigning " + (hris == null? 0: hris.size()) +
+-        " region(s) that " + serverName +
+-        " was carrying (skipping " + regionsInTransition.size() +
+-        " regions(s) that are already in transition)");
+-    
++          " region(s) that " + serverName +
++          " was carrying (skipping " + regionsInTransition.size() +
++          " regions(s) that are already in transition)");
++
+       // Iterate regions that were on this server and assign them
+-      if (hris != null) {
+-        for (Map.Entry<HRegionInfo, Result> e : hris.entrySet()) {
+-          if (processDeadRegion(e.getKey(), e.getValue(),
+-              this.services.getAssignmentManager(),
+-              this.server.getCatalogTracker())) {
+-            RegionState rit = this.services.getAssignmentManager()
+-                .isRegionInTransition(e.getKey());
+-            Pair<HRegionInfo, HServerInfo> p = this.services
+-                .getAssignmentManager().getAssignment(
+-                    e.getKey().getEncodedNameAsBytes());
+-
+-            if (rit != null && !rit.isClosing() && !rit.isPendingClose()
+-                && !regionsFromRegionPlansForServer.contains(rit.getRegion())) {
+-              // Skip regions that were in transition unless CLOSING or
+-              // PENDING_CLOSE
+-              LOG.info("Skip assigning region " + rit.toString());
+-            } else if ((p != null) && (p.getSecond() != null)
+-                && !(p.getSecond().equals(this.hsi))) {
+-              LOG.debug("Skip assigning region "
+-                  + e.getKey().getRegionNameAsString()
+-                  + " because it has been opened in " + p.getSecond());
+-            } else {
+-              this.services.getAssignmentManager().assign(e.getKey(), true);
+-              regionsFromRegionPlansForServer.remove(e.getKey());
+-            }
+-          }
+-        }
+-      }
+-      
+-      int reassignedPlans = 0;
+-      for (HRegionInfo hri : regionsFromRegionPlansForServer) {
+-        if (!this.services.getAssignmentManager().isRegionOnline(hri)) {
+-          this.services.getAssignmentManager().assign(hri, true);
+-          reassignedPlans++;
++      for (Map.Entry<HRegionInfo, Result> e: hris.entrySet()) {
++        if (processDeadRegion(e.getKey(), e.getValue(),
++            this.services.getAssignmentManager(),
++            this.server.getCatalogTracker())) {
++          this.services.getAssignmentManager().assign(e.getKey(), true);
+         }
+       }
+-      LOG.info(reassignedPlans + " regions which planned to open on "
+-          + this.hsi.getServerName() + " be re-assigned.");
+-    } finally {
++    } finally { 
+       this.deadServers.finish(serverName);
+     }
+-    
+     LOG.info("Finished processing of shutdown of " + serverName);
+   }
+ 
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+index 4b60ebd..ed91996 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+@@ -110,6 +110,10 @@ public class HLog implements Syncable {
+   public static final byte [] METAFAMILY = Bytes.toBytes("METAFAMILY");
+   static final byte [] METAROW = Bytes.toBytes("METAROW");
+ 
++  /** File Extension used while splitting an HLog into regions (HBASE-2312) */
++  public static final String SPLITTING_EXT = "-splitting";
++  public static final boolean SPLIT_SKIP_ERRORS_DEFAULT = false;
++
+   /*
+    * Name of directory that holds recovered edits written by the wal log
+    * splitting code, one per region
+@@ -546,7 +550,7 @@ public class HLog implements Syncable {
+       OutputStream nextHdfsOut = null;
+       if (nextWriter instanceof SequenceFileLogWriter) {
+         nextHdfsOut =
+-          ((SequenceFileLogWriter)nextWriter).getDFSCOutputStream();
++          ((SequenceFileLogWriter)nextWriter).getWriterFSDataOutputStream();
+       }
+       // Tell our listeners that a new log was created
+       if (!this.listeners.isEmpty()) {
+@@ -779,14 +783,14 @@ public class HLog implements Syncable {
+    * @return Path to current writer or null if none.
+    * @throws IOException
+    */
+-  private Path cleanupCurrentWriter(final long currentfilenum)
+-  throws IOException {
++  Path cleanupCurrentWriter(final long currentfilenum) throws IOException {
+     Path oldFile = null;
+     if (this.writer != null) {
+       // Close the current writer, get a new one.
+       try {
+         this.writer.close();
+         closeErrorCount.set(0);
++        this.writer = null;
+       } catch (IOException e) {
+         LOG.error("Failed close of HLog writer", e);
+         int errors = closeErrorCount.incrementAndGet();
+@@ -894,7 +898,9 @@ public class HLog implements Syncable {
+         if (LOG.isDebugEnabled()) {
+           LOG.debug("closing hlog writer in " + this.dir.toString());
+         }
+-        this.writer.close();
++        if (this.writer != null) {
++          this.writer.close();
++        }
+       }
+     } finally {
+       cacheFlushLock.unlock();
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+index aa8331d..24efec0 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+@@ -352,7 +352,8 @@ public class HLogSplitter {
+ 
+     boolean progress_failed = false;
+ 
+-    boolean skipErrors = conf.getBoolean("hbase.hlog.split.skip.errors", false);
++    boolean skipErrors = conf.getBoolean("hbase.hlog.split.skip.errors",
++        HLog.SPLIT_SKIP_ERRORS_DEFAULT);
+     int interval = conf.getInt("hbase.splitlog.report.interval.loglines", 1024);
+     // How often to send a progress report (default 1/2 master timeout)
+     int period = conf.getInt("hbase.splitlog.report.period",
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/SequenceFileLogWriter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/SequenceFileLogWriter.java
+index 8dc9a5e..d7a9797 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/SequenceFileLogWriter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/SequenceFileLogWriter.java
+@@ -23,6 +23,7 @@ package org.apache.hadoop.hbase.regionserver.wal;
+ import java.io.IOException;
+ import java.io.OutputStream;
+ import java.lang.reflect.Field;
++import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+ 
+ import org.apache.commons.logging.Log;
+@@ -32,7 +33,9 @@ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.io.SequenceFile;
++import org.apache.hadoop.io.SequenceFile.CompressionType;
+ import org.apache.hadoop.io.SequenceFile.Metadata;
++import org.apache.hadoop.io.compress.CompressionCodec;
+ import org.apache.hadoop.io.compress.DefaultCodec;
+ 
+ /**
+@@ -43,10 +46,12 @@ public class SequenceFileLogWriter implements HLog.Writer {
+   private final Log LOG = LogFactory.getLog(this.getClass());
+   // The sequence file we delegate to.
+   private SequenceFile.Writer writer;
+-  // The dfsclient out stream gotten made accessible or null if not available.
+-  private OutputStream dfsClient_out;
++  // This is the FSDataOutputStream instance that is the 'out' instance
++  // in the SequenceFile.Writer 'writer' instance above.
++  private FSDataOutputStream writer_out;
+   // The syncFs method from hdfs-200 or null if not available.
+   private Method syncFs;
++  private Method hflush;
+ 
+   private Class<? extends HLogKey> keyClass;
+ 
+@@ -76,21 +81,108 @@ public class SequenceFileLogWriter implements HLog.Writer {
+     }
+ 
+     // Create a SF.Writer instance.
+-    this.writer = SequenceFile.createWriter(fs, conf, path,
+-      keyClass, WALEdit.class,
+-      fs.getConf().getInt("io.file.buffer.size", 4096),
+-      (short) conf.getInt("hbase.regionserver.hlog.replication",
+-      fs.getDefaultReplication()),
+-      conf.getLong("hbase.regionserver.hlog.blocksize",
+-      fs.getDefaultBlockSize()),
+-      SequenceFile.CompressionType.NONE,
+-      new DefaultCodec(),
+-      null,
+-      new Metadata());
+-
+-    // Get at the private FSDataOutputStream inside in SequenceFile so we can
+-    // call sync on it.  Make it accessible.  Stash it aside for call up in
+-    // the sync method.
++    try {
++      // reflection for a version of SequenceFile.createWriter that doesn't
++      // automatically create the parent directory (see HBASE-2312)
++      this.writer = (SequenceFile.Writer) SequenceFile.class
++        .getMethod("createWriter", new Class[] {FileSystem.class,
++            Configuration.class, Path.class, Class.class, Class.class,
++            Integer.TYPE, Short.TYPE, Long.TYPE, Boolean.TYPE,
++            CompressionType.class, CompressionCodec.class, Metadata.class})
++        .invoke(null, new Object[] {fs, conf, path, HLog.getKeyClass(conf),
++            WALEdit.class,
++            new Integer(fs.getConf().getInt("io.file.buffer.size", 4096)),
++            new Short((short)
++              conf.getInt("hbase.regionserver.hlog.replication",
++              fs.getDefaultReplication())),
++            new Long(conf.getLong("hbase.regionserver.hlog.blocksize",
++                fs.getDefaultBlockSize())),
++            new Boolean(false) /*createParent*/,
++            SequenceFile.CompressionType.NONE, new DefaultCodec(),
++            new Metadata()
++            });
++    } catch (InvocationTargetException ite) {
++      // function was properly called, but threw it's own exception
++      throw new IOException(ite.getCause());
++    } catch (Exception e) {
++      // ignore all other exceptions. related to reflection failure
++    }
++
++    // if reflection failed, use the old createWriter
++    if (this.writer == null) {
++      LOG.debug("new createWriter -- HADOOP-6840 -- not available");
++      this.writer = SequenceFile.createWriter(fs, conf, path,
++        HLog.getKeyClass(conf), WALEdit.class,
++        fs.getConf().getInt("io.file.buffer.size", 4096),
++        (short) conf.getInt("hbase.regionserver.hlog.replication",
++          fs.getDefaultReplication()),
++        conf.getLong("hbase.regionserver.hlog.blocksize",
++          fs.getDefaultBlockSize()),
++        SequenceFile.CompressionType.NONE,
++        new DefaultCodec(),
++        null,
++        new Metadata());
++    } else {
++      LOG.debug("using new createWriter -- HADOOP-6840");
++    }
++    
++    this.writer_out = getSequenceFilePrivateFSDataOutputStreamAccessible();
++    this.syncFs = getSyncFs();
++    this.hflush = getHFlush();
++    String msg = "Path=" + path +
++      ", syncFs=" + (this.syncFs != null) +
++      ", hflush=" + (this.hflush != null);
++    if (this.syncFs != null || this.hflush != null) {
++      LOG.debug(msg);
++    } else {
++      LOG.warn("No sync support! " + msg);
++    }
++  }
++
++  /**
++   * Now do dirty work to see if syncFs is available on the backing this.writer.
++   * It will be available in branch-0.20-append and in CDH3.
++   * @return The syncFs method or null if not available.
++   * @throws IOException
++   */
++  private Method getSyncFs()
++  throws IOException {
++    Method m = null;
++    try {
++      // function pointer to writer.syncFs() method; present when sync is hdfs-200.
++      m = this.writer.getClass().getMethod("syncFs", new Class<?> []{});
++    } catch (SecurityException e) {
++      throw new IOException("Failed test for syncfs", e);
++    } catch (NoSuchMethodException e) {
++      // Not available
++    }
++    return m;
++  }
++
++  /**
++   * See if hflush (0.21 and 0.22 hadoop) is available.
++   * @return The hflush method or null if not available.
++   * @throws IOException
++   */
++  private Method getHFlush()
++  throws IOException {
++    Method m = null;
++    try {
++      Class<? extends OutputStream> c = getWriterFSDataOutputStream().getClass();
++      m = c.getMethod("hflush", new Class<?> []{});
++    } catch (SecurityException e) {
++      throw new IOException("Failed test for hflush", e);
++    } catch (NoSuchMethodException e) {
++      // Ignore
++    }
++    return m;
++  }
++  
++  // Get at the private FSDataOutputStream inside in SequenceFile so we can
++  // call sync on it.  Make it accessible.
++  private FSDataOutputStream getSequenceFilePrivateFSDataOutputStreamAccessible()
++  throws IOException {
++    FSDataOutputStream out = null;
+     final Field fields [] = this.writer.getClass().getDeclaredFields();
+     final String fieldName = "out";
+     for (int i = 0; i < fields.length; ++i) {
+@@ -98,34 +190,17 @@ public class SequenceFileLogWriter implements HLog.Writer {
+         try {
+           // Make the 'out' field up in SF.Writer accessible.
+           fields[i].setAccessible(true);
+-          FSDataOutputStream out =
+-            (FSDataOutputStream)fields[i].get(this.writer);
+-          this.dfsClient_out = out.getWrappedStream();
++          out = (FSDataOutputStream)fields[i].get(this.writer);
+           break;
+         } catch (IllegalAccessException ex) {
+           throw new IOException("Accessing " + fieldName, ex);
++        } catch (SecurityException e) {
++          // TODO Auto-generated catch block
++          e.printStackTrace();
+         }
+       }
+     }
+-
+-    // Now do dirty work to see if syncFs is available.
+-    // Test if syncfs is available.
+-    Method m = null;
+-    boolean append = conf.getBoolean("dfs.support.append", false);
+-    if (append) {
+-      try {
+-        // function pointer to writer.syncFs()
+-        m = this.writer.getClass().getMethod("syncFs", new Class<?> []{});
+-      } catch (SecurityException e) {
+-        throw new IOException("Failed test for syncfs", e);
+-      } catch (NoSuchMethodException e) {
+-        // Not available
+-      }
+-    }
+-    this.syncFs = m;
+-    LOG.info((this.syncFs != null)?
+-      "Using syncFs -- HDFS-200":
+-      ("syncFs -- HDFS-200 -- not available, dfs.support.append=" + append));
++    return out;
+   }
+ 
+   @Override
+@@ -158,7 +233,7 @@ public class SequenceFileLogWriter implements HLog.Writer {
+    * @return The dfsclient out stream up inside SF.Writer made accessible, or
+    * null if not available.
+    */
+-  public OutputStream getDFSCOutputStream() {
+-    return this.dfsClient_out;
++  public FSDataOutputStream getWriterFSDataOutputStream() {
++    return this.writer_out;
+   }
+ }
+diff --git a/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java b/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
+index 27797a6..7000bd8 100644
+--- a/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
++++ b/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
+@@ -456,15 +456,20 @@ public class ReplicationSource extends Thread
+ 
+             Path deadRsDirectory =
+                 new Path(manager.getLogDir().getParent(), this.deadRegionServers[i]);
+-            Path possibleLogLocation =
+-                new Path(deadRsDirectory, currentPath.getName());
+-            LOG.info("Possible location " + possibleLogLocation.toUri().toString());
+-            if (this.manager.getFs().exists(possibleLogLocation)) {
+-              // We found the right new location
+-              LOG.info("Log " + this.currentPath + " still exists at " +
+-                  possibleLogLocation);
+-              // Breaking here will make us sleep since reader is null
+-              return true;
++            Path[] locs = new Path[] {
++                new Path(deadRsDirectory, currentPath.getName()),
++                new Path(deadRsDirectory.suffix(HLog.SPLITTING_EXT),
++                                          currentPath.getName()),
++            };
++            for (Path possibleLogLocation : locs) {
++              LOG.info("Possible location " + possibleLogLocation.toUri().toString());
++              if (this.manager.getFs().exists(possibleLogLocation)) {
++                // We found the right new location
++                LOG.info("Log " + this.currentPath + " still exists at " +
++                    possibleLogLocation);
++                // Breaking here will make us sleep since reader is null
++                return true;
++              }
+             }
+           }
+           // TODO What happens if the log was missing from every single location?
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestOpenedRegionHandler.java b/src/test/java/org/apache/hadoop/hbase/master/TestOpenedRegionHandler.java
+index 57aafd2..d311a65 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestOpenedRegionHandler.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestOpenedRegionHandler.java
+@@ -130,8 +130,7 @@ public class TestOpenedRegionHandler {
+       assertNotNull(region);
+       AssignmentManager am = Mockito.mock(AssignmentManager.class);
+       when(am.isRegionInTransition(hri)).thenReturn(
+-          new RegionState(region.getRegionInfo(), RegionState.State.OPEN,
+-              System.currentTimeMillis()));
++          new RegionState(region.getRegionInfo(), RegionState.State.OPEN));
+       // create a node with OPENED state
+       zkw = HBaseTestingUtility.createAndForceNodeToOpenedState(TEST_UTIL,
+           region, server.getServerName());
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
+index f333faa..a92c7f4 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestHLogSplit.java
+@@ -45,6 +45,7 @@ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.FileUtil;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.hbase.HBaseTestingUtility;
++import org.apache.hadoop.hbase.HColumnDescriptor;
+ import org.apache.hadoop.hbase.HConstants;
+ import org.apache.hadoop.hbase.HRegionInfo;
+ import org.apache.hadoop.hbase.HTableDescriptor;
+@@ -62,6 +63,7 @@ import org.junit.AfterClass;
+ import org.junit.Assert;
+ import org.junit.Before;
+ import org.junit.BeforeClass;
++import org.junit.Ignore;
+ import org.junit.Test;
+ import org.mockito.Mockito;
+ import org.mockito.invocation.InvocationOnMock;
+@@ -141,6 +143,8 @@ public class TestHLogSplit {
+       assertTrue("Deleting " + dir.getPath(),
+           fs.delete(dir.getPath(), true));
+     }
++    // create the HLog directory because recursive log creates are not allowed
++    fs.mkdirs(hlogDir);
+     seq = 0;
+     regions = new ArrayList<String>();
+     Collections.addAll(regions, "bbb", "ccc");
+@@ -879,7 +883,71 @@ public class TestHLogSplit {
+     assertEquals(regions.size(), outputCounts.size());
+   }
+ 
++  // HBASE-2312: tests the case where a RegionServer enters a GC pause,
++  // comes back online after the master declared it dead and started to split.
++  // Want log rolling after a master split to fail
++  @Test
++  public void testLogRollAfterSplitStart() throws IOException {
++    // set flush interval to a large number so it doesn't interrupt us
++    final String F_INTERVAL = "hbase.regionserver.optionallogflushinterval";
++    long oldFlushInterval = conf.getLong(F_INTERVAL, 1000);
++    conf.setLong(F_INTERVAL, 1000*1000*100);
++    HLog log = null;
++    Path thisTestsDir = new Path(hbaseDir, "testLogRollAfterSplitStart");
+ 
++    try {
++      // put some entries in an HLog
++      byte [] tableName = Bytes.toBytes(this.getClass().getName());
++    HTableDescriptor htd = new HTableDescriptor(tableName);
++    htd.addFamily(new HColumnDescriptor("column"));
++      HRegionInfo regioninfo = new HRegionInfo(htd,
++          HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW);
++      log = new HLog(fs, thisTestsDir, oldLogDir, conf);
++      final int total = 20;
++      for (int i = 0; i < total; i++) {
++        WALEdit kvs = new WALEdit();
++        kvs.add(new KeyValue(Bytes.toBytes(i), tableName, tableName));
++        log.append(regioninfo, tableName, kvs, System.currentTimeMillis());
++      }
++      // Send the data to HDFS datanodes and close the HDFS writer
++      log.sync();
++      log.cleanupCurrentWriter(log.getFilenum());
++
++      /* code taken from ProcessServerShutdown.process()
++       * handles RS shutdowns (as observed by the Master)
++       */
++      // rename the directory so a rogue RS doesn't create more HLogs
++      Path rsSplitDir = new Path(thisTestsDir.getParent(),
++                                 thisTestsDir.getName() + "-splitting");
++      fs.rename(thisTestsDir, rsSplitDir);
++      LOG.debug("Renamed region directory: " + rsSplitDir);
++
++      // Process the old log files
++      HLogSplitter splitter = HLogSplitter.createLogSplitter(conf,
++        hbaseDir, rsSplitDir, oldLogDir, fs);
++      splitter.splitLog();
++
++      // Now, try to roll the HLog and verify failure
++      try {
++        log.rollWriter();
++        Assert.fail("rollWriter() did not throw any exception.");
++      } catch (IOException ioe) {
++        if (ioe.getCause().getMessage().contains("FileNotFound")) {
++          LOG.info("Got the expected exception: ", ioe.getCause());
++        } else {
++          Assert.fail("Unexpected exception: " + ioe);
++        }
++      }
++    } finally {
++      conf.setLong(F_INTERVAL, oldFlushInterval);
++      if (log != null) {
++        log.close();
++      }
++      if (fs.exists(thisTestsDir)) {
++        fs.delete(thisTestsDir, true);
++      }
++    }
++  }
+ 
+   /**
+    * This thread will keep writing to the file after the split process has started
+@@ -1116,6 +1184,7 @@ public class TestHLogSplit {
+ 
+   private void generateHLogs(int writers, int entries, int leaveOpen) throws IOException {
+     makeRegionDirs(fs, regions);
++    fs.mkdirs(hlogDir);
+     for (int i = 0; i < writers; i++) {
+       writer[i] = HLog.createWriter(fs, new Path(hlogDir, HLOG_FILE_PREFIX + i), conf);
+       for (int j = 0; j < entries; j++) {
+-- 
+1.7.0.4
+

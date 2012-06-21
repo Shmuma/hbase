@@ -5,11 +5,11 @@
       Failure to do so will cause you (and us) grief debugging strange errors
       and/or data loss.</p><div class="section" title="1.3.1.1.&nbsp;java"><div class="titlepage"><div><div><h4 class="title"><a name="java"></a>1.3.1.1.&nbsp;java</h4></div></div></div><p>Just like Hadoop, HBase requires java 6 from <a class="link" href="http://www.java.com/download/" target="_top">Oracle</a>. Usually
         you'll want to use the latest version available except the problematic
-        u18 (u24 is the latest version as of this writing).</p></div><div class="section" title="1.3.1.2.&nbsp;hadoop"><div class="titlepage"><div><div><h4 class="title"><a name="hadoop"></a>1.3.1.2.&nbsp;<a class="link" href="http://hadoop.apache.org" target="_top">hadoop</a><a class="indexterm" name="d0e279"></a></h4></div></div></div><p>This version of HBase will only run on <a class="link" href="http://hadoop.apache.org/common/releases.html" target="_top">Hadoop
+        u18 (u24 is the latest version as of this writing).</p></div><div class="section" title="1.3.1.2.&nbsp;hadoop"><div class="titlepage"><div><div><h4 class="title"><a name="hadoop"></a>1.3.1.2.&nbsp;<a class="link" href="http://hadoop.apache.org" target="_top">hadoop</a><a class="indexterm" name="d246e281"></a></h4></div></div></div><p>This version of HBase will only run on <a class="link" href="http://hadoop.apache.org/common/releases.html" target="_top">Hadoop
         0.20.x</a>. It will not run on hadoop 0.21.x (nor 0.22.x). HBase
         will lose data unless it is running on an HDFS that has a durable
         <code class="code">sync</code>. Currently only the <a class="link" href="http://svn.apache.org/viewvc/hadoop/common/branches/branch-0.20-append/" target="_top">branch-0.20-append</a>
-        branch has this attribute<sup>[<a name="d0e293" href="#ftn.d0e293" class="footnote">1</a>]</sup>. No official releases have been made from this branch up
+        branch has this attribute<sup>[<a name="d246e295" href="#ftn.d246e295" class="footnote">1</a>]</sup>. No official releases have been made from this branch up
         to now so you will have to build your own Hadoop from the tip of this
         branch.  Michael Noll has written a detailed blog,
         <a class="link" href="http://www.michael-noll.com/blog/2011/04/14/building-an-hadoop-0-20-x-version-for-hbase-0-90-2/" target="_top">Building
@@ -52,9 +52,9 @@
         <a class="link" href="http://en.wikipedia.org/wiki/Network_Time_Protocol" target="_top">NTP</a>
         on your cluster, or an equivalent.</p><p>If you are having problems querying data, or "weird" cluster
         operations, check system time!</p></div><div class="section" title="1.3.1.6.&nbsp; ulimit and nproc"><div class="titlepage"><div><div><h4 class="title"><a name="ulimit"></a>1.3.1.6.&nbsp;
-          <code class="varname">ulimit</code><a class="indexterm" name="d0e377"></a>
+          <code class="varname">ulimit</code><a class="indexterm" name="d246e379"></a>
             and
-          <code class="varname">nproc</code><a class="indexterm" name="d0e383"></a>
+          <code class="varname">nproc</code><a class="indexterm" name="d246e385"></a>
         </h4></div></div></div><p>HBase is a database.  It uses a lot of files all at the same time.
         The default ulimit -n -- i.e. user file limit -- of 1024 on most *nix systems
         is insufficient (On mac os x its 256). Any significant amount of loading will
@@ -68,15 +68,15 @@
         referenced FAQ for how.  You should also up the hbase users'
         <code class="varname">nproc</code> setting; under load, a low-nproc
         setting could manifest as <code class="classname">OutOfMemoryError</code>
-        <sup>[<a name="d0e401" href="#ftn.d0e401" class="footnote">2</a>]</sup>
-        <sup>[<a name="d0e408" href="#ftn.d0e408" class="footnote">3</a>]</sup>.
+        <sup>[<a name="d246e403" href="#ftn.d246e403" class="footnote">2</a>]</sup>
+        <sup>[<a name="d246e410" href="#ftn.d246e410" class="footnote">3</a>]</sup>.
     </p><p>To be clear, upping the file descriptors and nproc for the user who is
         running the HBase process is an operating system configuration, not an
         HBase configuration. Also, a common mistake is that administrators
         will up the file descriptors for a particular user but for whatever
         reason, HBase will be running as some one else. HBase prints in its
         logs as the first line the ulimit its seeing. Ensure its correct.
-        <sup>[<a name="d0e420" href="#ftn.d0e420" class="footnote">4</a>]</sup></p><div class="section" title="1.3.1.6.1.&nbsp;ulimit on Ubuntu"><div class="titlepage"><div><div><h5 class="title"><a name="ulimit_ubuntu"></a>1.3.1.6.1.&nbsp;<code class="varname">ulimit</code> on Ubuntu</h5></div></div></div><p>If you are on Ubuntu you will need to make the following
+        <sup>[<a name="d246e422" href="#ftn.d246e422" class="footnote">4</a>]</sup></p><div class="section" title="1.3.1.6.1.&nbsp;ulimit on Ubuntu"><div class="titlepage"><div><div><h5 class="title"><a name="ulimit_ubuntu"></a>1.3.1.6.1.&nbsp;<code class="varname">ulimit</code> on Ubuntu</h5></div></div></div><p>If you are on Ubuntu you will need to make the following
           changes:</p><p>In the file <code class="filename">/etc/security/limits.conf</code> add
           a line like: </p><pre class="programlisting">hadoop  -       nofile  32768</pre><p>
           Replace <code class="varname">hadoop</code> with whatever user is running
@@ -86,7 +86,7 @@
           as the last line in the file: </p><pre class="programlisting">session required  pam_limits.so</pre><p>
           Otherwise the changes in <code class="filename">/etc/security/limits.conf</code> won't be
           applied.</p><p>Don't forget to log out and back in again for the changes to
-          take effect!</p></div></div><div class="section" title="1.3.1.7.&nbsp;dfs.datanode.max.xcievers"><div class="titlepage"><div><div><h4 class="title"><a name="dfs.datanode.max.xcievers"></a>1.3.1.7.&nbsp;<code class="varname">dfs.datanode.max.xcievers</code><a class="indexterm" name="d0e463"></a></h4></div></div></div><p>An Hadoop HDFS datanode has an upper bound on the number of
+          take effect!</p></div></div><div class="section" title="1.3.1.7.&nbsp;dfs.datanode.max.xcievers"><div class="titlepage"><div><div><h4 class="title"><a name="dfs.datanode.max.xcievers"></a>1.3.1.7.&nbsp;<code class="varname">dfs.datanode.max.xcievers</code><a class="indexterm" name="d246e465"></a></h4></div></div></div><p>An Hadoop HDFS datanode has an upper bound on the number of
         files that it will serve at any one time. The upper bound parameter is
         called <code class="varname">xcievers</code> (yes, this is misspelled). Again,
         before doing any loading, make sure you have configured Hadoop's
@@ -106,7 +106,7 @@
         blk_XXXXXXXXXXXXXXXXXXXXXX_YYYYYYYY from any node:
         java.io.IOException: No live nodes contain current block. Will get new
         block locations from namenode and retry...</code>
-        <sup>[<a name="d0e486" href="#ftn.d0e486" class="footnote">5</a>]</sup></p></div><div class="section" title="1.3.1.8.&nbsp;Windows"><div class="titlepage"><div><div><h4 class="title"><a name="windows"></a>1.3.1.8.&nbsp;Windows</h4></div></div></div><p>HBase has been little tested running on windows. Running a
+        <sup>[<a name="d246e488" href="#ftn.d246e488" class="footnote">5</a>]</sup></p></div><div class="section" title="1.3.1.8.&nbsp;Windows"><div class="titlepage"><div><div><h4 class="title"><a name="windows"></a>1.3.1.8.&nbsp;Windows</h4></div></div></div><p>HBase has been little tested running on windows. Running a
         production install of HBase on top of windows is not
         recommended.</p><p>If you are running HBase on Windows, you must install <a class="link" href="http://cygwin.com/" target="_top">Cygwin</a> to have a *nix-like
         environment for the shell scripts. The full details are explained in
@@ -131,7 +131,7 @@
         daemons run on a single node -- a.k.a
         <span class="emphasis"><em>pseudo-distributed</em></span>-- and
         <span class="emphasis"><em>fully-distributed</em></span> where the daemons are spread
-        across all nodes in the cluster <sup>[<a name="d0e555" href="#ftn.d0e555" class="footnote">6</a>]</sup>.</p><p>Distributed modes require an instance of the <span class="emphasis"><em>Hadoop
+        across all nodes in the cluster <sup>[<a name="d246e557" href="#ftn.d246e557" class="footnote">6</a>]</sup>.</p><p>Distributed modes require an instance of the <span class="emphasis"><em>Hadoop
         Distributed File System</em></span> (HDFS). See the Hadoop <a class="link" href="http://hadoop.apache.org/common/docs/current/api/overview-summary.html#overview_description" target="_top">
         requirements and instructions</a> for how to set up a HDFS. Before
         proceeding, ensure you have an appropriate, working HDFS.</p><p>Below we describe the different distributed setups. Starting,
@@ -175,7 +175,7 @@
             HBase (it'll create them if you let it).</p></div><div class="note" title="Note" style="margin-left: 0.5in; margin-right: 0.5in;"><h3 class="title">Note</h3><p>Above we bind to <code class="varname">localhost</code>. This means
             that a remote client cannot connect. Amend accordingly, if you
             want to connect from a remote location.</p></div><p>Now skip to <a class="xref" href="notsoquick.html#confirm" title="1.3.2.3.&nbsp;Running and Confirming Your Installation">Section&nbsp;1.3.2.3, &#8220;Running and Confirming Your Installation&#8221;</a> for how to start and verify your
-          pseudo-distributed install. <sup>[<a name="d0e618" href="#ftn.d0e618" class="footnote">7</a>]</sup></p></div><div class="section" title="1.3.2.2.2.&nbsp;Fully-distributed"><div class="titlepage"><div><div><h5 class="title"><a name="fully_dist"></a>1.3.2.2.2.&nbsp;Fully-distributed</h5></div></div></div><p>For running a fully-distributed operation on more than one
+          pseudo-distributed install. <sup>[<a name="d246e620" href="#ftn.d246e620" class="footnote">7</a>]</sup></p></div><div class="section" title="1.3.2.2.2.&nbsp;Fully-distributed"><div class="titlepage"><div><div><h5 class="title"><a name="fully_dist"></a>1.3.2.2.2.&nbsp;Fully-distributed</h5></div></div></div><p>For running a fully-distributed operation on more than one
           host, make the following configurations. In
           <code class="filename">hbase-site.xml</code>, add the property
           <code class="varname">hbase.cluster.distributed</code> and set it to
@@ -211,7 +211,7 @@
             <span class="application">HRegionServer</span>s, one host per line (This
             file in HBase is like the Hadoop <code class="filename">slaves</code>
             file). All servers listed in this file will be started and stopped
-            when HBase cluster start or stop is run.</p></div><div class="section" title="1.3.2.2.2.2.&nbsp;ZooKeeper"><div class="titlepage"><div><div><h6 class="title"><a name="zookeeper"></a>1.3.2.2.2.2.&nbsp;ZooKeeper<a class="indexterm" name="d0e666"></a></h6></div></div></div><p>A distributed HBase depends on a running ZooKeeper cluster.
+            when HBase cluster start or stop is run.</p></div><div class="section" title="1.3.2.2.2.2.&nbsp;ZooKeeper"><div class="titlepage"><div><div><h6 class="title"><a name="zookeeper"></a>1.3.2.2.2.2.&nbsp;ZooKeeper<a class="indexterm" name="d246e668"></a></h6></div></div></div><p>A distributed HBase depends on a running ZooKeeper cluster.
             All participating nodes and clients need to be able to access the
             running ZooKeeper ensemble. HBase by default manages a ZooKeeper
             "cluster" for you. It will start and stop the ZooKeeper ensemble
@@ -236,7 +236,7 @@
             <code class="varname">hbase.zookeeper.property.clientPort</code> property.
             For all default values used by HBase, including ZooKeeper
             configuration, see <a class="xref" href="configuration.html#hbase_default_configurations" title="3.1.1.&nbsp;HBase Default Configuration">Section&nbsp;3.1.1, &#8220;HBase Default Configuration&#8221;</a>. Look for the
-            <code class="varname">hbase.zookeeper.property</code> prefix <sup>[<a name="d0e705" href="#ftn.d0e705" class="footnote">8</a>]</sup></p><p>You must at least list the ensemble servers in
+            <code class="varname">hbase.zookeeper.property</code> prefix <sup>[<a name="d246e707" href="#ftn.d246e707" class="footnote">8</a>]</sup></p><p>You must at least list the ensemble servers in
             <code class="filename">hbase-site.xml</code> using the
             <code class="varname">hbase.zookeeper.quorum</code> property. This property
             defaults to a single ensemble member at
@@ -293,7 +293,7 @@
       &lt;/description&gt;
     &lt;/property&gt;
     ...
-  &lt;/configuration&gt;</pre><div class="section" title="1.3.2.2.2.2.1.&nbsp;Using existing ZooKeeper ensemble"><div class="titlepage"><div><div><h6 class="title"><a name="d0e767"></a>1.3.2.2.2.2.1.&nbsp;Using existing ZooKeeper ensemble</h6></div></div></div><p>To point HBase at an existing ZooKeeper cluster, one that
+  &lt;/configuration&gt;</pre><div class="section" title="1.3.2.2.2.2.1.&nbsp;Using existing ZooKeeper ensemble"><div class="titlepage"><div><div><h6 class="title"><a name="d246e769"></a>1.3.2.2.2.2.1.&nbsp;Using existing ZooKeeper ensemble</h6></div></div></div><p>To point HBase at an existing ZooKeeper cluster, one that
               is not managed by HBase, set <code class="varname">HBASE_MANAGES_ZK</code>
               in <code class="filename">conf/hbase-env.sh</code> to false
               </p><pre class="programlisting">
@@ -361,7 +361,7 @@ stopping hbase...............</pre><p> Shutdown can take a moment to
         complete. It can take longer if your cluster is comprised of many
         machines. If you are running a distributed operation, be sure to wait
         until HBase has shut down completely before stopping the Hadoop
-        daemons.</p></div></div><div class="section" title="1.3.3.&nbsp;Example Configurations"><div class="titlepage"><div><div><h3 class="title"><a name="example_config"></a>1.3.3.&nbsp;Example Configurations</h3></div></div></div><div class="section" title="1.3.3.1.&nbsp;Basic Distributed HBase Install"><div class="titlepage"><div><div><h4 class="title"><a name="d0e911"></a>1.3.3.1.&nbsp;Basic Distributed HBase Install</h4></div></div></div><p>Here is an example basic configuration for a distributed ten
+        daemons.</p></div></div><div class="section" title="1.3.3.&nbsp;Example Configurations"><div class="titlepage"><div><div><h3 class="title"><a name="example_config"></a>1.3.3.&nbsp;Example Configurations</h3></div></div></div><div class="section" title="1.3.3.1.&nbsp;Basic Distributed HBase Install"><div class="titlepage"><div><div><h4 class="title"><a name="d246e913"></a>1.3.3.1.&nbsp;Basic Distributed HBase Install</h4></div></div></div><p>Here is an example basic configuration for a distributed ten
         node cluster. The nodes are named <code class="varname">example0</code>,
         <code class="varname">example1</code>, etc., through node
         <code class="varname">example9</code> in this example. The HBase Master and the
@@ -443,19 +443,19 @@ index e70ebc6..96f8c27 100644
 
     </pre><p>Use <span class="command"><strong>rsync</strong></span> to copy the content of the
           <code class="filename">conf</code> directory to all nodes of the
-          cluster.</p></div></div></div><div class="footnotes"><br><hr width="100" align="left"><div class="footnote"><p><sup>[<a name="ftn.d0e293" href="#d0e293" class="para">1</a>] </sup>See <a class="link" href="http://svn.apache.org/viewvc/hadoop/common/branches/branch-0.20-append/CHANGES.txt" target="_top">CHANGES.txt</a>
+          cluster.</p></div></div></div><div class="footnotes"><br><hr width="100" align="left"><div class="footnote"><p><sup>[<a name="ftn.d246e295" href="#d246e295" class="para">1</a>] </sup>See <a class="link" href="http://svn.apache.org/viewvc/hadoop/common/branches/branch-0.20-append/CHANGES.txt" target="_top">CHANGES.txt</a>
             in branch-0.20-append to see list of patches involved adding
-            append on the Hadoop 0.20 branch.</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e401" href="#d0e401" class="para">2</a>] </sup>See Jack Levin's <a class="link" href="" target="_top">major hdfs issues</a>
-                note up on the user list.</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e408" href="#d0e408" class="para">3</a>] </sup>The requirement that a database requires upping of system limits
+            append on the Hadoop 0.20 branch.</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e403" href="#d246e403" class="para">2</a>] </sup>See Jack Levin's <a class="link" href="" target="_top">major hdfs issues</a>
+                note up on the user list.</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e410" href="#d246e410" class="para">3</a>] </sup>The requirement that a database requires upping of system limits
         is not peculiar to HBase.  See for example the section
         <span class="emphasis"><em>Setting Shell Limits for the Oracle User</em></span> in
         <a class="link" href="http://www.akadia.com/services/ora_linux_install_10g.html" target="_top">
-        Short Guide to install Oracle 10 on Linux</a>.</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e420" href="#d0e420" class="para">4</a>] </sup>A useful read setting config on you hadoop cluster is Aaron
+        Short Guide to install Oracle 10 on Linux</a>.</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e422" href="#d246e422" class="para">4</a>] </sup>A useful read setting config on you hadoop cluster is Aaron
             Kimballs' Configuration
-            Parameters: What can you just ignore?</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e486" href="#d0e486" class="para">5</a>] </sup>See <a class="link" href="http://ccgtech.blogspot.com/2010/02/hadoop-hdfs-deceived-by-xciever.html" target="_top">Hadoop HDFS: Deceived by Xciever</a> for an informative rant on xceivering.</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e555" href="#d0e555" class="para">6</a>] </sup>The pseudo-distributed vs fully-distributed nomenclature
-            comes from Hadoop.</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e618" href="#d0e618" class="para">7</a>] </sup>See <a class="link" href="http://hbase.apache.org/pseudo-distributed.html" target="_top">Pseudo-distributed
+            Parameters: What can you just ignore?</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e488" href="#d246e488" class="para">5</a>] </sup>See <a class="link" href="http://ccgtech.blogspot.com/2010/02/hadoop-hdfs-deceived-by-xciever.html" target="_top">Hadoop HDFS: Deceived by Xciever</a> for an informative rant on xceivering.</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e557" href="#d246e557" class="para">6</a>] </sup>The pseudo-distributed vs fully-distributed nomenclature
+            comes from Hadoop.</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e620" href="#d246e620" class="para">7</a>] </sup>See <a class="link" href="http://hbase.apache.org/pseudo-distributed.html" target="_top">Pseudo-distributed
               mode extras</a> for notes on how to start extra Masters and
-              RegionServers when running pseudo-distributed.</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e705" href="#d0e705" class="para">8</a>] </sup>For the full list of ZooKeeper configurations, see
+              RegionServers when running pseudo-distributed.</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e707" href="#d246e707" class="para">8</a>] </sup>For the full list of ZooKeeper configurations, see
                 ZooKeeper's <code class="filename">zoo.cfg</code>. HBase does not ship
                 with a <code class="filename">zoo.cfg</code> so you will need to browse
                 the <code class="filename">conf</code> directory in an appropriate

@@ -1,0 +1,378 @@
+From 580f55aae5a485a1df277735444872d5b993ba86 Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jmhsieh@apache.org>
+Date: Thu, 26 Apr 2012 22:27:23 +0000
+Subject: [PATCH 095/101] HBASE-5801 [hbck] Hbck should handle case where some regions have different HTD settings in .regioninfo files (0.90 specific) (Jimmy Xiang)
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1331129 13f79535-47bb-0310-9956-ffa450edef68
+
+Reason: Supportability
+Author: Jimmy Xiang
+Ref: CDH-5570
+---
+ .../org/apache/hadoop/hbase/util/HBaseFsck.java    |   79 +++++++++++++++--
+ .../apache/hadoop/hbase/util/HBaseFsckRepair.java  |   54 ++++++++++++
+ .../apache/hadoop/hbase/util/TestHBaseFsck.java    |   92 +++++++++++++++++++-
+ 3 files changed, 214 insertions(+), 11 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+index 50f9128..24e936b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
++++ b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+@@ -165,6 +165,7 @@ public class HBaseFsck {
+   private int maxMerge = DEFAULT_MAX_MERGE; // maximum number of overlapping regions to merge
+   private int maxOverlapsToSideline = DEFAULT_OVERLAPS_TO_SIDELINE; // maximum number of overlapping regions to sideline
+   private boolean sidelineBigOverlaps = false; // sideline overlaps with >maxMerge regions
++  private boolean fixTableDesc = false; // fix table descriptor inconsistency?
+ 
+   private boolean rerun = false; // if we tried to fix something, rerun hbck
+   private static boolean summary = false; // if we want to print less output
+@@ -174,6 +175,7 @@ public class HBaseFsck {
+    * State
+    *********/
+   private ErrorReporter errors = new PrintingErrorReporter();
++  private boolean multiTableDescFound = false; // to record if multi table descriptors found
+   int fixes = 0;
+ 
+   /**
+@@ -263,6 +265,7 @@ public class HBaseFsck {
+     errors.clear();
+     tablesInfo.clear();
+     orphanHdfsDirs.clear();
++    multiTableDescFound = false;
+   }
+ 
+   /**
+@@ -1075,6 +1078,12 @@ public class HBaseFsck {
+     for (java.util.Map.Entry<String, HbckInfo> e: regionInfoMap.entrySet()) {
+       checkRegionConsistency(e.getKey(), e.getValue());
+     }
++    if (shouldFixTableDesc() && isMultiTableDescFound()) {
++      setShouldRerun();  // should re-run to verify it is fixed
++      for (java.util.Map.Entry<String, HbckInfo> e: regionInfoMap.entrySet()) {
++        fixTableDescConsistency(e.getKey(), e.getValue());
++      }
++    }
+   }
+ 
+   /**
+@@ -1208,6 +1217,32 @@ public class HBaseFsck {
+   }
+ 
+   /**
++   * Check a single region for table desc consistency.
++   */
++  private void fixTableDescConsistency(final String key, final HbckInfo hbi)
++        throws IOException, KeeperException, InterruptedException {
++    String tableName = Bytes.toString(hbi.getTableName());
++    TableInfo tableInfo = tablesInfo.get(tableName);
++    Preconditions.checkNotNull("Table " + tableName + "' not present!", tableInfo);
++    if (tableInfo.htds.size() != 1) {
++      HTableDescriptor htd = tableInfo.getHTD();
++      Path sidelineTableDir = new Path(getSidelineDir(), tableName);
++      if (!htd.equals(hbi.getHdfsHRI().getTableDesc())) {
++        if (hbi.deployedOn.size() > 1) {
++          LOG.warn("Region " + hbi.toString() + " is deployed on multiple region servers."
++            + " Please fix the multiple assignments before fixing multiple table desc.");
++        } else {
++          HServerAddress hsa = null;
++          if (hbi.deployedOn.size() == 1) {
++            hsa = hbi.deployedOn.get(0);
++          }
++          HBaseFsckRepair.fixTableDesc(admin, hsa, hbi, htd, sidelineTableDir);
++        }
++      }
++    }
++  }
++
++  /**
+    * Check a single region for consistency and correct deployment.
+    */
+   private void checkRegionConsistency(final String key, final HbckInfo hbi)
+@@ -1492,6 +1527,7 @@ public class HBaseFsck {
+   public class TableInfo {
+     String tableName;
+     TreeSet <HServerAddress> deployedOn;
++    HTableDescriptor htdFromAdmin;
+ 
+     // backwards regions
+     final List<HbckInfo> backwards = new ArrayList<HbckInfo>();
+@@ -1529,6 +1565,7 @@ public class HBaseFsck {
+         if (htds.size() > 1) {
+           LOG.warn("Multiple table descriptors found for table '"
+               + Bytes.toString(hir.getTableName()) + "' regions: " + htds);
++          setMultiTableDescFound(true);
+         } else {
+           LOG.info("Added a table descriptor found in table '"
+               + Bytes.toString(hir.getTableName()) + "' regions: " + htd);
+@@ -1539,14 +1576,17 @@ public class HBaseFsck {
+     /**
+      * @return descriptor common to all regions.  null if are none or multiple!
+      */
+-    private HTableDescriptor getHTD() {
+-      if (htds.size() == 1) {
+-        return (HTableDescriptor)htds.toArray()[0];
+-      } else {
+-        LOG.error("None/Multiple table descriptors found for table '"
+-          + tableName + "' regions: " + htds);
++    private HTableDescriptor getHTD() throws IOException {
++      if (htds.size() != 1) {
++        if (htdFromAdmin == null) {
++          LOG.warn("None/Multiple table descriptors found for table '"
++            + tableName + "' regions: " + htds);
++          htdFromAdmin = admin.getTableDescriptor(Bytes.toBytes(tableName));
++          LOG.warn("Use this one from meta instead" + htdFromAdmin);
++        }
++        return htdFromAdmin;
+       }
+-      return null;
++      return (HTableDescriptor)htds.toArray()[0];
+     }
+ 
+     public void addRegionInfo(HbckInfo hir) {
+@@ -2425,6 +2465,12 @@ public class HBaseFsck {
+    */
+   private void printTableSummary(TreeMap<String, TableInfo> tablesInfo) {
+     System.out.println("Summary:");
++    if (isMultiTableDescFound()) {
++      System.out.println("  Multiple table descriptors were found.\n"
++        + "    You can ignore it if your cluster is working fine.\n"
++        + "    To fix it, please re-run hbck with option -fixTableDesc\n");
++    }
++
+     for (TableInfo tInfo : tablesInfo.values()) {
+       if (errors.tableHasErrors(tInfo)) {
+         System.out.println("Table " + tInfo.getName() + " is inconsistent.");
+@@ -2820,6 +2866,22 @@ public class HBaseFsck {
+     return sidelineBigOverlaps;
+   }
+ 
++  public void setFixTableDesc(boolean ftd) {
++    this.fixTableDesc = ftd;
++  }
++
++  public boolean shouldFixTableDesc() {
++    return fixTableDesc;
++  }
++
++  public void setMultiTableDescFound(boolean multiTableDesc) {
++    multiTableDescFound = multiTableDesc;
++  }
++
++  public boolean isMultiTableDescFound() {
++    return multiTableDescFound;
++  }
++
+   /**
+    * @param mm maximum number of regions to merge into a single region.
+    */
+@@ -2893,6 +2955,7 @@ public class HBaseFsck {
+     System.err.println("");
+     System.err.println("   -repair           Shortcut for -fixAssignments -fixMeta -fixHdfsHoles -fixHdfsOrphans -fixHdfsOverlaps -fixVersionFile -sidelineBigOverlaps");
+     System.err.println("   -repairHoles      Shortcut for -fixAssignments -fixMeta -fixHdfsHoles -fixHdfsOrphans");
++    System.err.println("   -fixTableDesc     Try to fix table descriptor inconsistency");
+ 
+     Runtime.getRuntime().exit(-2);
+   }
+@@ -2958,6 +3021,8 @@ public class HBaseFsck {
+         fsck.setFixVersionFile(true);
+       } else if (cmd.equals("-sidelineBigOverlaps")) {
+         fsck.setSidelineBigOverlaps(true);
++      } else if (cmd.equals("-fixTableDesc")) {
++        fsck.setFixTableDesc(true);
+       } else if (cmd.equals("-repair")) {
+         // this attempts to merge overlapping hdfs regions, needs testing
+         // under load
+diff --git a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsckRepair.java b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsckRepair.java
+index 06d2b73..31f8266 100644
+--- a/src/main/java/org/apache/hadoop/hbase/util/HBaseFsckRepair.java
++++ b/src/main/java/org/apache/hadoop/hbase/util/HBaseFsckRepair.java
+@@ -26,10 +26,13 @@ import java.util.Map;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.hbase.HConstants;
+ import org.apache.hadoop.hbase.HRegionInfo;
+ import org.apache.hadoop.hbase.HServerAddress;
++import org.apache.hadoop.hbase.HTableDescriptor;
+ import org.apache.hadoop.hbase.ZooKeeperConnectionException;
+ import org.apache.hadoop.hbase.client.HBaseAdmin;
+ import org.apache.hadoop.hbase.client.HConnection;
+@@ -190,6 +193,57 @@ public class HBaseFsckRepair {
+   }
+ 
+   /**
++   * Replace the .regioninfo with a new one with the expected table desc,
++   * then re-assign the region.
++   */
++  public static void fixTableDesc(final HBaseAdmin admin, final HServerAddress hsa,
++      final HBaseFsck.HbckInfo hbi, final HTableDescriptor htd, final Path sidelineTableDir)
++          throws IOException, KeeperException, InterruptedException {
++    // at first, sideline the current .regioninfo
++    Path regionDir = hbi.getHdfsRegionDir();
++    Path regioninfoPath = new Path(regionDir, HRegion.REGIONINFO_FILE);
++    Path sidelineRegionDir = new Path(sidelineTableDir, regionDir.getName());
++    Path regioninfoSidelinePath = new Path(sidelineRegionDir, HRegion.REGIONINFO_FILE);
++    FileSystem fs = FileSystem.get(admin.getConfiguration());
++    fs.mkdirs(sidelineRegionDir);
++    boolean success = fs.rename(regioninfoPath, regioninfoSidelinePath);
++    if (!success) {
++      String msg = "Unable to rename file " + regioninfoPath +  " to " + regioninfoSidelinePath;
++      LOG.error(msg);
++      throw new IOException(msg);
++    }
++
++    // then fix the table desc: create a new .regioninfo,
++    //   offline the region and wait till it's assigned again.
++    HRegionInfo hri = hbi.getHdfsHRI();
++    hri.setTableDesc(htd);
++    Path tmpDir = new Path(sidelineRegionDir, ".tmp");
++    Path tmpPath = new Path(tmpDir, HRegion.REGIONINFO_FILE);
++
++    FSDataOutputStream out = fs.create(tmpPath, true);
++    try {
++      hri.write(out);
++      out.write('\n');
++      out.write('\n');
++      out.write(Bytes.toBytes(hri.toString()));
++    } finally {
++      out.close();
++    }
++    if (!fs.rename(tmpPath, regioninfoPath)) {
++      throw new IOException("Unable to rename " + tmpPath + " to " +
++        regioninfoPath);
++    }
++
++    if (hsa != null) {
++      closeRegionSilentlyAndWait(admin, hsa, hri);
++    }
++
++    // Force ZK node to OFFLINE so master assigns
++    forceOfflineInZK(admin, hri);
++    waitUntilAssigned(admin, hri);
++  }
++
++  /**
+    * Creates, flushes, and closes a new hdfs region dir
+    */
+   public static HRegion createHDFSRegionDir(Configuration conf,
+diff --git a/src/test/java/org/apache/hadoop/hbase/util/TestHBaseFsck.java b/src/test/java/org/apache/hadoop/hbase/util/TestHBaseFsck.java
+index 103d8bf..bfca963 100644
+--- a/src/test/java/org/apache/hadoop/hbase/util/TestHBaseFsck.java
++++ b/src/test/java/org/apache/hadoop/hbase/util/TestHBaseFsck.java
+@@ -22,10 +22,7 @@ package org.apache.hadoop.hbase.util;
+ import static org.apache.hadoop.hbase.util.hbck.HbckTestingUtil.assertErrors;
+ import static org.apache.hadoop.hbase.util.hbck.HbckTestingUtil.assertNoErrors;
+ import static org.apache.hadoop.hbase.util.hbck.HbckTestingUtil.doFsck;
+-import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.assertFalse;
+-import static org.junit.Assert.assertTrue;
+-import static org.junit.Assert.fail;
++import static org.junit.Assert.*;
+ 
+ import java.io.IOException;
+ import java.util.ArrayList;
+@@ -38,6 +35,8 @@ import java.util.Map.Entry;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.hbase.Abortable;
+@@ -882,4 +881,89 @@ public class TestHBaseFsck {
+       deleteTable(table);
+     }
+   }
++
++  /**
++   * This creates regions with inconsistent region info.
++   * Test it can be fixed properly.
++   */
++  @Test(timeout=300000)
++  public void testMultipleTableDesc() throws Exception {
++    String table = "MultipleTableDesc";
++    try {
++      setupTable(table);
++
++      HTableDescriptor htd = tbl.getTableDescriptor();
++      Map<HRegionInfo, HServerAddress> hris = tbl.getRegionsInfo();
++      assertTrue(hris.size() > 1);
++
++      // verify everything is fine before messing it up
++      Path rootDir = new Path(conf.get(HConstants.HBASE_DIR));
++      Path tableDir = new Path(rootDir + "/" + htd.getNameAsString());
++      FileSystem fs = rootDir.getFileSystem(conf);
++      int currentBlockSize = htd.getFamily(FAM).getBlocksize();
++      int i = 0;
++      for (HRegionInfo hri: hris.keySet()) {
++        assertEquals(htd, hri.getTableDesc());
++        Path regionDir = new Path(tableDir, hri.getEncodedName());
++        Path hriPath = new Path(regionDir, HRegion.REGIONINFO_FILE);
++        HRegionInfo hriOnFs = new HRegionInfo();
++        FSDataInputStream in = fs.open(hriPath);
++        try {
++          hriOnFs.readFields(in);
++        } finally {
++          in.close();
++        }
++        assertEquals(htd, hriOnFs.getTableDesc());
++
++        // now mess up one .regioninfo file
++        if (++i == 1) {
++          HTableDescriptor newHtd = new HTableDescriptor(htd);
++          int blockSize = currentBlockSize - 512;
++          newHtd.getFamily(FAM).setBlocksize(blockSize);
++          FSDataOutputStream out = fs.create(hriPath, true);
++          try {
++            hri.setTableDesc(newHtd);
++            hri.write(out);
++            out.write('\n');
++            out.write('\n');
++            out.write(Bytes.toBytes(hri.toString()));
++          } finally {
++            out.close();
++          }
++        }
++      }
++
++      HBaseFsck hbck = doFsck(conf, false);
++      assertTrue(hbck.isMultiTableDescFound());
++      // there should be no other issues
++      assertNoErrors(hbck);
++
++      // now fix it.
++      hbck = new HBaseFsck(conf);
++      hbck.setFixTableDesc(true);
++      hbck.connect();
++      hbck.onlineHbck();
++
++      // verify it is fixed
++      hbck = doFsck(conf, false);
++      assertFalse(hbck.isMultiTableDescFound());
++      assertNoErrors(hbck);
++
++      // verify all .regioninfo files on FS
++      for (HRegionInfo hri: hris.keySet()) {
++        Path regionDir = new Path(tableDir, hri.getEncodedName());
++        Path hriPath = new Path(regionDir, HRegion.REGIONINFO_FILE);
++        FSDataInputStream in = fs.open(hriPath);
++        HRegionInfo hriOnFs = new HRegionInfo();
++        try {
++          hriOnFs.readFields(in);
++        } finally {
++          in.close();
++        }
++        assertEquals(htd, hriOnFs.getTableDesc());
++      }
++    } finally {
++      deleteTable(table);
++    }
++  }
+ }
+-- 
+1.7.0.4
+

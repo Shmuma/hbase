@@ -1,5 +1,24 @@
+<%--
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+--%>
 <%@ page contentType="text/html;charset=UTF-8"
-  import="java.util.Map"
+  import="java.util.HashMap"
   import="org.apache.hadoop.io.Writable"
   import="org.apache.hadoop.conf.Configuration"
   import="org.apache.hadoop.hbase.client.HTable"
@@ -136,6 +155,7 @@
 <%  } %>
 </table>
 <%
+  Map<String, Integer> regDistribution = new HashMap<String, Integer>();
   Map<HRegionInfo, HServerAddress> regions = table.getRegionsInfo();
   if(regions != null && regions.size() > 0) { %>
 <%=     tableHeader %>
@@ -153,6 +173,9 @@
         infoPort = info.getInfoPort();
         urlRegionServer =
             "http://" + addr.getHostname().toString() + ":" + infoPort + "/";
+        Integer i = regDistribution.get(urlRegionServer);
+        if (null == i) i = new Integer(0);
+        regDistribution.put(urlRegionServer, i+1);
       }
     }
 %>
@@ -173,6 +196,17 @@
   %>
   <td><%= Bytes.toStringBinary(regionInfo.getStartKey())%></td>
   <td><%= Bytes.toStringBinary(regionInfo.getEndKey())%></td>
+</tr>
+<% } %>
+</table>
+<h2>Regions by Region Server</h2>
+<table><tr><th>Region Server</th><th>Region Count</th></tr>
+<%
+  for (Map.Entry<String, Integer> rdEntry : regDistribution.entrySet()) {
+%>
+<tr>
+  <td><%= rdEntry.getKey()%></td>
+  <td><%= rdEntry.getValue()%></td>
 </tr>
 <% } %>
 </table>

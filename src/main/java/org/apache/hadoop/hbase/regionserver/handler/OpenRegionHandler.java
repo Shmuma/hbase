@@ -27,6 +27,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.executor.EventHandler;
+import org.apache.hadoop.hbase.executor.EventHandler.EventType;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
@@ -83,6 +84,10 @@ public class OpenRegionHandler extends EventHandler {
       if (region != null) {
         LOG.warn("Attempted open of " + name +
           " but already online on this server");
+          
+        //This region should be assigned to another region server by RIT,  
+        //so we need to close it.
+        cleanupFailedOpen(region);
         return;
       }
 
@@ -91,6 +96,7 @@ public class OpenRegionHandler extends EventHandler {
       if (!transitionZookeeperOfflineToOpening(encodedName)) {
         LOG.warn("Region was hijacked? It no longer exists, encodedName=" +
           encodedName);
+        tryTransitionToFailedOpen(regionInfo);
         return;
       }
 
@@ -101,7 +107,6 @@ public class OpenRegionHandler extends EventHandler {
         tryTransitionToFailedOpen(regionInfo);
         return;
       }
-
       boolean failed = true;
       if (tickleOpening("post_region_open")) {
         if (updateMeta(region)) failed = false;
@@ -132,6 +137,35 @@ public class OpenRegionHandler extends EventHandler {
           remove(this.regionInfo.getEncodedNameAsBytes());
     }
   }
+  /**
+   * @param  Region we're working on.
+   * This is not guaranteed to succeed, we just do our best.
+   * @return whether znode is successfully transitioned to FAILED_OPEN state.
+   */
+  private boolean tryTransitionToFailedOpen(final HRegionInfo hri) {
+    boolean result = false;
+    final String name = hri.getRegionNameAsString();
+    try {
+      LOG.info("Opening of region " + hri
+          + " failed, marking as FAILED_OPEN in ZK");
+      if (ZKAssign.transitionNode(
+          this.server.getZooKeeper(), hri,
+          this.server.getServerName(),
+          EventType.RS_ZK_REGION_OPENING,
+          EventType.RS_ZK_REGION_FAILED_OPEN,
+          this.version) == -1) {
+        LOG.warn("Unable to mark region " + hri + " as FAILED_OPEN. " +
+            "It's likely that the master already timed out this open " +
+            "attempt, and thus another RS already has the region.");
+      } else {
+        result = true;
+      }
+    } catch (KeeperException e) {
+      LOG.error("Failed transitioning node " + name +
+        " from OPENING to FAILED_OPEN", e);
+    }
+    return result;
+  }
 
   /**
    * Update ZK, ROOT or META.  This can take a while if for example the
@@ -161,13 +195,14 @@ public class OpenRegionHandler extends EventHandler {
     // regions-in-transition timeout period.
     long period = Math.max(1, assignmentTimeout/ 3);
     long lastUpdate = now;
+    boolean tickleOpening = true;
     while (!signaller.get() && t.isAlive() && !this.server.isStopped() &&
         !this.rsServices.isStopping() && (endTime > now)) {
       long elapsed = now - lastUpdate;
       if (elapsed > period) {
         // Only tickle OPENING if postOpenDeployTasks is taking some time.
         lastUpdate = now;
-        tickleOpening("post_open_deploy");
+        tickleOpening = tickleOpening("post_open_deploy");
       }
       synchronized (signaller) {
         try {
@@ -195,8 +230,9 @@ public class OpenRegionHandler extends EventHandler {
       }
     }
     // Was there an exception opening the region?  This should trigger on
-    // InterruptedException too.  If so, we failed.
-    return !t.interrupted() && t.getException() == null;
+    // InterruptedException too.  If so, we failed. If tickle opening fails
+    // it is a failure
+    return !t.interrupted() && t.getException() == null && tickleOpening;
   }
 
   /**
@@ -268,35 +304,6 @@ public class OpenRegionHandler extends EventHandler {
     } catch (KeeperException e) {
       LOG.error("Failed transitioning node " + name +
         " from OPENING to OPENED -- closing region", e);
-    }
-    return result;
-  }
-  
-  /**
-   * @param  Region we're working on.
-   * This is not guaranteed to succeed, we just do our best.
-   * @return Transition znode to CLOSED state.
-   */
-  private boolean tryTransitionToFailedOpen(final HRegionInfo hri) {
-    boolean result = false;
-    final String name = hri.getRegionNameAsString();
-    try {
-      LOG.info("Opening of region " + hri + " failed, marking as FAILED_OPEN in ZK");
-      if (ZKAssign.transitionNode(
-          this.server.getZooKeeper(), hri,
-          this.server.getServerName(),
-          EventType.RS_ZK_REGION_OPENING,
-          EventType.RS_ZK_REGION_FAILED_OPEN,
-          this.version) == -1) {
-        LOG.warn("Unable to mark region " + hri + " as FAILED_OPEN. " +
-            "It's likely that the master already timed out this open " +
-            "attempt, and thus another RS already has the region.");
-      } else {
-        result = true;
-      }
-    } catch (KeeperException e) {
-      LOG.error("Failed transitioning node " + name +
-        " from OPENING to FAILED_OPEN", e);
     }
     return result;
   }

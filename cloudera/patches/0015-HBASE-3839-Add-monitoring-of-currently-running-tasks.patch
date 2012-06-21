@@ -1,0 +1,128 @@
+From 10e378893707bb05394f74a2eb64d7674416291e Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Tue, 3 May 2011 19:09:20 +0000
+Subject: [PATCH 015/101] HBASE-3839 Add monitoring of currently running tasks to the master and RS web UIs
+
+Reason: Supportability.  Aids in debugging of HBase master and RS.
+Author: Todd Lipcon
+Ref: CDH-3353
+---
+ .../apache/hbase/tmpl/common/TaskMonitorTmpl.jamon |   59 ++++++++++++++++++++
+ .../hbase/tmpl/master/MasterStatusTmpl.jamon       |    3 +
+ .../hbase/tmpl/regionserver/RSStatusTmpl.jamon     |    2 +
+ src/main/resources/hbase-webapps/static/hbase.css  |    8 +++
+ 4 files changed, 72 insertions(+), 0 deletions(-)
+ create mode 100644 src/main/jamon/org/apache/hbase/tmpl/common/TaskMonitorTmpl.jamon
+
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/common/TaskMonitorTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/common/TaskMonitorTmpl.jamon
+new file mode 100644
+index 0000000..f96d4a2
+--- /dev/null
++++ b/src/main/jamon/org/apache/hbase/tmpl/common/TaskMonitorTmpl.jamon
+@@ -0,0 +1,59 @@
++<%doc>
++Copyright 2011 The Apache Software Foundation
++
++Licensed to the Apache Software Foundation (ASF) under one
++or more contributor license agreements.  See the NOTICE file
++distributed with this work for additional information
++regarding copyright ownership.  The ASF licenses this file
++to you under the Apache License, Version 2.0 (the
++"License"); you may not use this file except in compliance
++with the License.  You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++</%doc>
++<%import>
++java.util.*;
++org.apache.hadoop.hbase.monitoring.*;
++</%import>
++<%args>
++TaskMonitor taskMonitor = TaskMonitor.get();
++</%args>
++<%java>
++long now = System.currentTimeMillis();
++List<MonitoredTask> tasks = taskMonitor.getTasks();
++Collections.reverse(tasks);
++
++</%java>
++<h2>Currently running tasks</h2>
++
++<%if tasks.isEmpty()%>
++No tasks currently running on this node.
++<%else>
++
++<table>
++<tr>
++  <th>Description</th>
++  <th>Status</th>
++  <th>Age</th>
++</tr>
++<%for MonitoredTask task : tasks %>
++<tr class="task-monitor-<% task.getState() %>">
++  <td><% task.getDescription() %></td>
++  </td>
++  <td><% task.getStatus() %></td>
++  <td><% (int)((now - task.getStartTime())/1000) %>s  
++  <%if task.getCompletionTimestamp() != -1%>
++  (Completed <% (now - task.getCompletionTimestamp())/1000 %>s ago)
++  </%if>
++  </td>
++</tr>
++</%for>
++</table>
++
++</%if>
+\ No newline at end of file
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+index e2b6650..9e76deb 100644
+--- a/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
++++ b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+@@ -89,6 +89,9 @@ org.apache.hadoop.hbase.HTableDescriptor;
+ </%if>
+ <tr><td>Zookeeper Quorum</td><td><% master.getZooKeeperWatcher().getQuorum() %></td><td>Addresses of all registered ZK servers. For more, see <a href="/zk.jsp">zk dump</a>.</td></tr>
+ </table>
++
++<& ../common/TaskMonitorTmpl &>
++
+ <%if (rootLocation != null) %>
+ <& catalogTables &>
+ </%if>
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon
+index 6e8a862..97a4584 100644
+--- a/src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon
++++ b/src/main/jamon/org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon
+@@ -68,6 +68,8 @@ org.apache.hadoop.hbase.HRegionInfo;
+ <tr><td>Zookeeper Quorum</td><td><% regionServer.getZooKeeper().getQuorum() %></td><td>Addresses of all registered ZK servers</td></tr>
+ </table>
+ 
++<& ../common/TaskMonitorTmpl &>
++
+ <h2>Online Regions</h2>
+ <%if (onlineRegions != null && onlineRegions.size() > 0) %>
+ <table>
+diff --git a/src/main/resources/hbase-webapps/static/hbase.css b/src/main/resources/hbase-webapps/static/hbase.css
+index f458641..3df4cac 100644
+--- a/src/main/resources/hbase-webapps/static/hbase.css
++++ b/src/main/resources/hbase-webapps/static/hbase.css
+@@ -34,3 +34,11 @@ div.warning {
+ td.undeployed-region {
+   background-color: #faa;
+ }
++
++tr.task-monitor-COMPLETE td {
++  background-color: #afa;
++}
++
++tr.task-monitor-ABORTED td {
++  background-color: #ffa;
++}
+-- 
+1.7.0.4
+

@@ -37,11 +37,11 @@ org.apache.hadoop.hbase.rest.protobuf.generated
 org.apache.hadoop.hbase.rest.provider
 org.apache.hadoop.hbase.rest.provider.consumer
 org.apache.hadoop.hbase.rest.provider.producer
-org.apache.hadoop.hbase.rest.transform
 org.apache.hadoop.hbase.security
 org.apache.hadoop.hbase.thrift
 org.apache.hadoop.hbase.thrift.generated
 org.apache.hadoop.hbase.util
+org.apache.hadoop.hbase.util.hbck
 org.apache.hadoop.hbase.zookeeper
 org.apache.hbase.tmpl.common
 org.apache.hbase.tmpl.master

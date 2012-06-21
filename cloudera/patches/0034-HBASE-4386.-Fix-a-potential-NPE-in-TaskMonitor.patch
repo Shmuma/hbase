@@ -1,0 +1,39 @@
+From 4de8dc80dd82d0c58316f2a6013e6c3ec38944a1 Mon Sep 17 00:00:00 2001
+From: Todd Lipcon <todd@cloudera.com>
+Date: Thu, 6 Oct 2011 15:43:22 -0700
+Subject: [PATCH 034/101] HBASE-4386. Fix a potential NPE in TaskMonitor
+
+Reason: fix rare but possible NPE
+Ref: CDH-3667
+Author: Todd Lipcon
+---
+ .../hadoop/hbase/monitoring/TaskMonitor.java       |    6 ++++--
+ 1 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java b/src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java
+index 5379146..1de1053 100644
+--- a/src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java
++++ b/src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java
+@@ -73,7 +73,9 @@ public class TaskMonitor {
+         new PassthroughInvocationHandler<MonitoredTask>(stat));
+ 
+     TaskAndWeakRefPair pair = new TaskAndWeakRefPair(stat, proxy);
+-    tasks.add(pair);
++    synchronized (this) {
++      tasks.add(pair);
++    }
+     return proxy;
+   }
+   
+@@ -125,7 +127,7 @@ public class TaskMonitor {
+   public void dumpAsText(PrintWriter out) {
+     long now = System.currentTimeMillis();
+     
+-    List<MonitoredTask> tasks = TaskMonitor.get().getTasks();
++    List<MonitoredTask> tasks = getTasks();
+     for (MonitoredTask task : tasks) {
+       out.println("Task: " + task.getDescription());
+       out.println("Status: " + task.getState() + ":" + task.getStatus());
+-- 
+1.7.0.4
+

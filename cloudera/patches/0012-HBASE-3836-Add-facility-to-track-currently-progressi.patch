@@ -1,0 +1,1563 @@
+From a498c7a925f857573ccea66412aae99921e1ccce Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 21 Mar 2012 13:40:59 -0700
+Subject: [PATCH 012/101] HBASE-3836 Add facility to track currently progressing actions/workflows
+
+Coprocessors and Distributed Log Splitting is a 0.92 feature not in 0.90.x so:
+- Exclude SplitLogManager (distributed log splitting)
+- Exclude HLogSplitter ZK-related changes (distributed log splitting)
+- Exclude HMaster ZK-related changes (distributed log splitting)
+- Exclude HRegion coprocessor related hooks
+
+Reason: Supportability.  Prerequisite for HBASE-3839.
+Author: Todd Lipcon
+Ref: CDH-3353
+---
+ .../hadoop/hbase/master/ActiveMasterManager.java   |   22 ++-
+ .../org/apache/hadoop/hbase/master/HMaster.java    |   32 +++-
+ .../apache/hadoop/hbase/master/ServerManager.java  |   25 ++--
+ .../hadoop/hbase/monitoring/MonitoredTask.java     |   53 ++++++
+ .../hadoop/hbase/monitoring/MonitoredTaskImpl.java |  102 +++++++++++
+ .../hadoop/hbase/monitoring/TaskMonitor.java       |  176 ++++++++++++++++++++
+ .../apache/hadoop/hbase/regionserver/HRegion.java  |  138 ++++++++++++----
+ .../apache/hadoop/hbase/regionserver/Store.java    |   23 ++-
+ .../hadoop/hbase/regionserver/StoreFlusher.java    |    4 +-
+ .../hbase/regionserver/wal/HLogSplitter.java       |   50 +++++-
+ .../hbase/master/TestActiveMasterManager.java      |   13 +-
+ .../hadoop/hbase/monitoring/TestTaskMonitor.java   |  101 +++++++++++
+ .../hadoop/hbase/regionserver/TestStore.java       |    4 +-
+ .../hbase/regionserver/wal/TestWALReplay.java      |    9 +-
+ 14 files changed, 669 insertions(+), 83 deletions(-)
+ create mode 100644 src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTask.java
+ create mode 100644 src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTaskImpl.java
+ create mode 100644 src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java
+ create mode 100644 src/test/java/org/apache/hadoop/hbase/monitoring/TestTaskMonitor.java
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/ActiveMasterManager.java b/src/main/java/org/apache/hadoop/hbase/master/ActiveMasterManager.java
+index ae31fb0..159a6df 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/ActiveMasterManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/ActiveMasterManager.java
+@@ -25,6 +25,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.hbase.HServerAddress;
+ import org.apache.hadoop.hbase.Server;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+ import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperListener;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+@@ -114,17 +115,20 @@ class ActiveMasterManager extends ZooKeeperListener {
+    *
+    * This also makes sure that we are watching the master znode so will be
+    * notified if another master dies.
++   * @param startupStatus
+    * @return True if no issue becoming active master else false if another
+    * master was running or if some other problem (zookeeper, stop flag has been
+    * set on this Master)
+    */
+-  boolean blockUntilBecomingActiveMaster() {
++  boolean blockUntilBecomingActiveMaster(MonitoredTask startupStatus) {
++    startupStatus.setStatus("Trying to register in ZK as active master");
+     boolean cleanSetOfActiveMaster = true;
+     // Try to become the active master, watch if there is another master
+     try {
+       if (ZKUtil.setAddressAndWatch(this.watcher,
+           this.watcher.masterAddressZNode, this.address)) {
+         // We are the master, return
++        startupStatus.setStatus("Successfully registered as active master.");
+         this.clusterHasActiveMaster.set(true);
+         LOG.info("Master=" + this.address);
+         return cleanSetOfActiveMaster;
+@@ -137,13 +141,17 @@ class ActiveMasterManager extends ZooKeeperListener {
+       HServerAddress currentMaster =
+         ZKUtil.getDataAsAddress(this.watcher, this.watcher.masterAddressZNode);
+       if (currentMaster != null && currentMaster.equals(this.address)) {
+-        LOG.info("Current master has this master's address, " + currentMaster +
+-          "; master was restarted?  Waiting on znode to expire...");
++        String msg = "Current master has this master's address, " + currentMaster +
++          "; master was restarted?  Waiting on znode to expire...";
++        LOG.info(msg);
++        startupStatus.setStatus(msg);
+         // Hurry along the expiration of the znode.
+         ZKUtil.deleteNode(this.watcher, this.watcher.masterAddressZNode);
+       } else {
+-        LOG.info("Another master is the active master, " + currentMaster +
+-          "; waiting to become the next active master");
++        String msg = "Another master is the active master, " + currentMaster +
++        "; waiting to become the next active master";
++        LOG.info(msg);
++        startupStatus.setStatus(msg);
+       }
+     } catch (KeeperException ke) {
+       master.abort("Received an unexpected KeeperException, aborting", ke);
+@@ -162,7 +170,7 @@ class ActiveMasterManager extends ZooKeeperListener {
+         return cleanSetOfActiveMaster;
+       }
+       // Try to become active master again now that there is no active master
+-      blockUntilBecomingActiveMaster();
++      blockUntilBecomingActiveMaster(startupStatus);
+     }
+     return cleanSetOfActiveMaster;
+   }
+@@ -197,4 +205,4 @@ class ActiveMasterManager extends ZooKeeperListener {
+       LOG.error(this.watcher.prefix("Error deleting our own master address node"), e);
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index b66722a..5886194 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -52,7 +52,6 @@ import org.apache.hadoop.hbase.UnknownRegionException;
+ import org.apache.hadoop.hbase.catalog.CatalogTracker;
+ import org.apache.hadoop.hbase.catalog.MetaEditor;
+ import org.apache.hadoop.hbase.catalog.MetaReader;
+-import org.apache.hadoop.hbase.client.HConnectionManager;
+ import org.apache.hadoop.hbase.client.MetaScanner;
+ import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
+ import org.apache.hadoop.hbase.client.Result;
+@@ -73,6 +72,8 @@ import org.apache.hadoop.hbase.master.handler.TableAddFamilyHandler;
+ import org.apache.hadoop.hbase.master.handler.TableDeleteFamilyHandler;
+ import org.apache.hadoop.hbase.master.handler.TableModifyFamilyHandler;
+ import org.apache.hadoop.hbase.master.metrics.MasterMetrics;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
++import org.apache.hadoop.hbase.monitoring.TaskMonitor;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.replication.regionserver.Replication;
+ import org.apache.hadoop.hbase.security.User;
+@@ -261,6 +262,9 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+    */
+   @Override
+   public void run() {
++    MonitoredTask startupStatus =
++      TaskMonitor.get().createStatus("Master startup");
++    startupStatus.setDescription("Master startup");
+     try {
+       /*
+        * Block on becoming the active master.
+@@ -272,18 +276,21 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+        * now wait until it dies to try and become the next active master.  If we
+        * do not succeed on our first attempt, this is no longer a cluster startup.
+        */
+-      this.activeMasterManager = new ActiveMasterManager(zooKeeper, address, this);
++      this.activeMasterManager = new ActiveMasterManager(zooKeeper, address,
++          this);
+       this.zooKeeper.registerListener(activeMasterManager);
+       stallIfBackupMaster(this.conf, this.activeMasterManager);
+-      this.activeMasterManager.blockUntilBecomingActiveMaster();
++      this.activeMasterManager.blockUntilBecomingActiveMaster(startupStatus);
+       // We are either the active master or we were asked to shutdown
+       if (!this.stopped) {
+-        finishInitialization();
++        finishInitialization(startupStatus);
+         loop();
+       }
+     } catch (Throwable t) {
+       abort("Unhandled exception. Starting shutdown.", t);
+     } finally {
++      startupStatus.cleanup();
++      
+       stopChores();
+       // Wait for all the remaining region servers to report in IFF we were
+       // running a cluster shutdown AND we were NOT aborting.
+@@ -329,7 +336,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+    * @throws InterruptedException
+    * @throws KeeperException
+    */
+-  private void finishInitialization()
++  private void finishInitialization(MonitoredTask status)
+   throws IOException, InterruptedException, KeeperException {
+ 
+     isActiveMaster = true;
+@@ -340,12 +347,14 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+      * below after we determine if cluster startup or failover.
+      */
+ 
++    status.setStatus("Initializing Master file system");
+     // TODO: Do this using Dependency Injection, using PicoContainer, Guice or Spring.
+     this.fileSystemManager = new MasterFileSystem(this, metrics);
+     this.executorService = new ExecutorService(getServerName());
+ 
+     this.serverManager = new ServerManager(this, this, metrics);
+ 
++    status.setStatus("Initializing ZK system trackers");
+     this.catalogTracker = new CatalogTracker(this.zooKeeper, this.conf,
+       this, conf.getInt("hbase.master.catalog.timeout", Integer.MAX_VALUE));
+     this.catalogTracker.start();
+@@ -372,17 +381,19 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+       ", cluster-up flag was=" + wasUp);
+ 
+     // start up all service threads.
++    status.setStatus("Initializing master service threads");
+     startServiceThreads();
+ 
+     // Wait for region servers to report in.  Returns count of regions.
+-    int regionCount = this.serverManager.waitForRegionServers();
++    int regionCount = this.serverManager.waitForRegionServers(status);
+ 
+     // TODO: Should do this in background rather than block master startup
++    status.setStatus("Splitting logs after master startup");
+     this.fileSystemManager.
+       splitLogAfterStartup(this.serverManager.getOnlineServers());
+ 
+     // Make sure root and meta assigned before proceeding.
+-    assignRootAndMeta();
++    assignRootAndMeta(status);
+ 
+     // Is this fresh start with no regions assigned or are we a master joining
+     // an already-running cluster?  If regionsCount == 0, then for sure a
+@@ -403,10 +414,12 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+ 
+     // Start balancer and meta catalog janitor after meta and regions have
+     // been assigned.
++    status.setStatus("Starting balancer and catalog janitor");
+     this.balancerChore = getAndStartBalancerChore(this);
+     this.catalogJanitorChore =
+       Threads.setDaemonThreadRunning(new CatalogJanitor(this, this));
+ 
++    status.markComplete("Initialization successful");
+     LOG.info("Master has completed initialization");
+     initialized = true;
+   }
+@@ -419,12 +432,13 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+    * @throws KeeperException
+    * @return Count of regions we assigned.
+    */
+-  int assignRootAndMeta()
++  int assignRootAndMeta(MonitoredTask status)
+   throws InterruptedException, IOException, KeeperException {
+     int assigned = 0;
+     long timeout = this.conf.getLong("hbase.catalog.verification.timeout", 1000);
+ 
+     // Work on ROOT region.  Is it in zk in transition?
++    status.setStatus("Assigning ROOT region");
+     boolean rit = this.assignmentManager.
+       processRegionInTransitionAndBlockUntilAssigned(HRegionInfo.ROOT_REGIONINFO);
+     if (!catalogTracker.verifyRootRegionLocation(timeout)) {
+@@ -441,6 +455,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+       ", location=" + catalogTracker.getRootLocation());
+ 
+     // Work on meta region
++    status.setStatus("Assigning META region");
+     rit = this.assignmentManager.
+       processRegionInTransitionAndBlockUntilAssigned(HRegionInfo.FIRST_META_REGIONINFO);
+     if (!this.catalogTracker.verifyMetaRegionLocation(timeout)) {
+@@ -456,6 +471,7 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+     enableCatalogTables(Bytes.toString(HConstants.META_TABLE_NAME));
+     LOG.info(".META. assigned=" + assigned + ", rit=" + rit +
+       ", location=" + catalogTracker.getMetaLocation());
++    status.setStatus("META and ROOT assigned.");
+     return assigned;
+   }
+ 
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java b/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
+index cd9af77..014f56b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
+@@ -51,6 +51,9 @@ import org.apache.hadoop.hbase.master.handler.ServerShutdownHandler;
+ import org.apache.hadoop.hbase.master.metrics.MasterMetrics;
+ import org.apache.hadoop.hbase.regionserver.Leases.LeaseStillHeldException;
+ 
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
++
++
+ /**
+  * The ServerManager class manages info about region servers - HServerInfo,
+  * load numbers, dying servers, etc.
+@@ -635,7 +638,8 @@ public class ServerManager {
+    * @return Count of regions out on cluster
+    * @throws InterruptedException
+    */
+-  public int waitForRegionServers()
++  public int waitForRegionServers(MonitoredTask status)
++
+   throws InterruptedException {
+     long interval = this.master.getConfiguration().
+       getLong("hbase.master.wait.on.regionservers.interval", 1500);
+@@ -653,21 +657,16 @@ public class ServerManager {
+       Thread.sleep(interval);
+       slept += interval;
+       count = countOfRegionServers();
+-      if (count == oldcount && count >= minToStart && slept >= timeout) {
+-        LOG.info("Finished waiting for regionserver count to settle; " +
+-            "count=" + count + ", sleptFor=" + slept);
+-        break;
+-      }
+-      if (count >= maxToStart) {
+-        LOG.info("At least the max configured number of regionserver(s) have " +
+-            "checked in: " + count);
+-        break;
+-      }
++      if (count == oldcount && count > 0) break;
++
++      String msg;
+       if (count == 0) {
+-        LOG.info("Waiting on regionserver(s) to checkin");
++        msg = "Waiting on regionserver(s) to checkin";
+       } else {
+-        LOG.info("Waiting on regionserver(s) count to settle; currently=" + count);
++        msg = "Waiting on regionserver(s) count to settle; currently=" + count;
+       }
++      LOG.info(msg);
++      status.setStatus(msg);
+       oldcount = count;
+     }
+     // Count how many regions deployed out on cluster.  If fresh start, it'll
+diff --git a/src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTask.java b/src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTask.java
+new file mode 100644
+index 0000000..ecbe4c2
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTask.java
+@@ -0,0 +1,53 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.monitoring;
++
++public interface MonitoredTask {
++  enum State {
++    RUNNING,
++    COMPLETE,
++    ABORTED;
++  }
++
++  public abstract long getStartTime();
++
++  public abstract String getDescription();
++
++  public abstract String getStatus();
++
++  public abstract State getState();
++
++  public abstract long getCompletionTimestamp();
++
++  public abstract void markComplete(String msg);
++  public abstract void abort(String msg);
++
++  public abstract void setStatus(String status);
++
++  public abstract void setDescription(String description);
++
++  /**
++   * Explicitly mark this status as able to be cleaned up,
++   * even though it might not be complete.
++   */
++  public abstract void cleanup();
++
++
++}
+\ No newline at end of file
+diff --git a/src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTaskImpl.java b/src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTaskImpl.java
+new file mode 100644
+index 0000000..b0edfdc
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/monitoring/MonitoredTaskImpl.java
+@@ -0,0 +1,102 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.monitoring;
++
++import com.google.common.annotations.VisibleForTesting;
++
++class MonitoredTaskImpl implements MonitoredTask {
++  private long startTime;
++  private long completionTimestamp = -1;
++  
++  private String status;
++  private String description;
++  
++  private State state = State.RUNNING;
++  
++  public MonitoredTaskImpl() {
++    startTime = System.currentTimeMillis();
++  }
++
++  @Override
++  public long getStartTime() {
++    return startTime;
++  }
++  
++  @Override
++  public String getDescription() {
++    return description;
++  }
++
++  @Override
++  public String getStatus() {
++    return status;
++  }
++  
++  @Override
++  public State getState() {
++    return state;
++  }
++  
++  @Override
++  public long getCompletionTimestamp() {
++    return completionTimestamp;
++  }
++  
++  @Override
++  public void markComplete(String status) {
++    state = State.COMPLETE;
++    setStatus(status);
++    completionTimestamp = System.currentTimeMillis();
++  }
++
++  @Override
++  public void abort(String msg) {
++    setStatus(msg);
++    state = State.ABORTED;
++    completionTimestamp = System.currentTimeMillis();
++  }
++  
++  @Override
++  public void setStatus(String status) {
++    this.status = status;
++  }
++
++  @Override
++  public void setDescription(String description) {
++    this.description = description;
++  }
++
++  @Override
++  public void cleanup() {
++    if (state == State.RUNNING) {
++      state = State.ABORTED;
++      completionTimestamp = System.currentTimeMillis();
++    }
++  }
++
++  /**
++   * Force the completion timestamp backwards so that
++   * it expires now.
++   */
++  @VisibleForTesting
++  void expireNow() {
++    completionTimestamp -= 180 * 1000;
++  }
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java b/src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java
+new file mode 100644
+index 0000000..45d5f31
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/monitoring/TaskMonitor.java
+@@ -0,0 +1,176 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.monitoring;
++
++import java.lang.ref.WeakReference;
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.util.ArrayList;
++import java.util.Iterator;
++import java.util.List;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++
++import com.google.common.annotations.VisibleForTesting;
++import com.google.common.collect.Lists;
++
++/**
++ * Singleton which keeps track of tasks going on in this VM.
++ * A Task here is anything which takes more than a few seconds
++ * and the user might want to inquire about the status
++ */
++public class TaskMonitor {
++  private static final Log LOG = LogFactory.getLog(TaskMonitor.class);
++
++  // Don't keep around any tasks that have completed more than
++  // 60 seconds ago
++  private static final long EXPIRATION_TIME = 60*1000;
++
++  @VisibleForTesting
++  static final int MAX_TASKS = 1000;
++  
++  private static TaskMonitor instance;
++  private List<TaskAndWeakRefPair> tasks =
++    Lists.newArrayList();
++
++  /**
++   * Get singleton instance.
++   * TODO this would be better off scoped to a single daemon
++   */
++  public static synchronized TaskMonitor get() {
++    if (instance == null) {
++      instance = new TaskMonitor();
++    }
++    return instance;
++  }
++  
++  public MonitoredTask createStatus(String description) {
++    MonitoredTask stat = new MonitoredTaskImpl();
++    stat.setDescription(description);
++    MonitoredTask proxy = (MonitoredTask) Proxy.newProxyInstance(
++        stat.getClass().getClassLoader(),
++        new Class<?>[] { MonitoredTask.class },
++        new PassthroughInvocationHandler<MonitoredTask>(stat));
++
++    TaskAndWeakRefPair pair = new TaskAndWeakRefPair(stat, proxy);
++    tasks.add(pair);
++    return proxy;
++  }
++  
++  private synchronized void purgeExpiredTasks() {
++    int size = 0;
++    
++    for (Iterator<TaskAndWeakRefPair> it = tasks.iterator();
++         it.hasNext();) {
++      TaskAndWeakRefPair pair = it.next();
++      MonitoredTask stat = pair.get();
++      
++      if (pair.isDead()) {
++        // The class who constructed this leaked it. So we can
++        // assume it's done.
++        if (stat.getState() == MonitoredTaskImpl.State.RUNNING) {
++          LOG.warn("Status " + stat + " appears to have been leaked");
++          stat.cleanup();
++        }
++      }
++      
++      if (canPurge(stat)) {
++        it.remove();
++      } else {
++        size++;
++      }
++    }
++    
++    if (size > MAX_TASKS) {
++      LOG.warn("Too many actions in action monitor! Purging some.");
++      tasks = tasks.subList(size - MAX_TASKS, size);
++    }
++  }
++
++  public synchronized List<MonitoredTask> getTasks() {
++    purgeExpiredTasks();
++    ArrayList<MonitoredTask> ret = Lists.newArrayListWithCapacity(tasks.size());
++    for (TaskAndWeakRefPair pair : tasks) {
++      ret.add(pair.get());
++    }
++    return ret;
++  }
++
++  private boolean canPurge(MonitoredTask stat) {
++    long cts = stat.getCompletionTimestamp();
++    return (cts > 0 && System.currentTimeMillis() - cts > EXPIRATION_TIME);
++  }
++  
++  /**
++   * This class encapsulates an object as well as a weak reference to a proxy
++   * that passes through calls to that object. In art form:
++   * <code>
++   *     Proxy  <------------------
++   *       |                       \
++   *       v                        \
++   * PassthroughInvocationHandler   |  weak reference
++   *       |                       /
++   * MonitoredTaskImpl            /
++   *       |                     /
++   * StatAndWeakRefProxy  ------/
++   *
++   * Since we only return the Proxy to the creator of the MonitorableStatus,
++   * this means that they can leak that object, and we'll detect it
++   * since our weak reference will go null. But, we still have the actual
++   * object, so we can log it and display it as a leaked (incomplete) action.
++   */
++  private static class TaskAndWeakRefPair {
++    private MonitoredTask impl;
++    private WeakReference<MonitoredTask> weakProxy;
++    
++    public TaskAndWeakRefPair(MonitoredTask stat,
++        MonitoredTask proxy) {
++      this.impl = stat;
++      this.weakProxy = new WeakReference<MonitoredTask>(proxy);
++    }
++    
++    public MonitoredTask get() {
++      return impl;
++    }
++    
++    public boolean isDead() {
++      return weakProxy.get() == null;
++    }
++  }
++  
++  /**
++   * An InvocationHandler that simply passes through calls to the original object.
++   */
++  private static class PassthroughInvocationHandler<T> implements InvocationHandler {
++    private T delegatee;
++    
++    public PassthroughInvocationHandler(T delegatee) {
++      this.delegatee = delegatee;
++    }
++
++    @Override
++    public Object invoke(Object proxy, Method method, Object[] args)
++        throws Throwable {
++      return method.invoke(delegatee, args);
++    }
++  }
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index e8f017f..edb2781 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -58,12 +58,12 @@ import org.apache.hadoop.hbase.DroppedSnapshotException;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+ import org.apache.hadoop.hbase.HColumnDescriptor;
+ import org.apache.hadoop.hbase.HConstants;
++import org.apache.hadoop.hbase.HConstants.OperationStatusCode;
+ import org.apache.hadoop.hbase.HRegionInfo;
+ import org.apache.hadoop.hbase.HTableDescriptor;
+ import org.apache.hadoop.hbase.KeyValue;
+ import org.apache.hadoop.hbase.NotServingRegionException;
+ import org.apache.hadoop.hbase.UnknownScannerException;
+-import org.apache.hadoop.hbase.HConstants.OperationStatusCode;
+ import org.apache.hadoop.hbase.client.Delete;
+ import org.apache.hadoop.hbase.client.Get;
+ import org.apache.hadoop.hbase.client.Increment;
+@@ -77,6 +77,8 @@ import org.apache.hadoop.hbase.filter.IncompatibleFilterException;
+ import org.apache.hadoop.hbase.io.HeapSize;
+ import org.apache.hadoop.hbase.io.TimeRange;
+ import org.apache.hadoop.hbase.io.hfile.BlockCache;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
++import org.apache.hadoop.hbase.monitoring.TaskMonitor;
+ import org.apache.hadoop.hbase.regionserver.wal.HLog;
+ import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
+ import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+@@ -335,16 +337,21 @@ public class HRegion implements HeapSize { // , Writable{
+    */
+   public long initialize(final CancelableProgressable reporter)
+   throws IOException {
++    MonitoredTask status = TaskMonitor.get().createStatus(
++        "Initializing region " + this);
+ 
+     // Write HRI to a file in case we need to recover .META.
++    status.setStatus("Writing region info on filesystem");
+     checkRegioninfoOnFilesystem();
+ 
+     // Remove temporary data left over from old regions
++    status.setStatus("Cleaning up temporary data from old regions");
+     cleanupTmpDir();
+ 
+     // Load in all the HStores.  Get maximum seqid.
+     long maxSeqId = -1;
+     for (HColumnDescriptor c : this.regionInfo.getTableDesc().getFamilies()) {
++      status.setStatus("Instantiating store for column family " + c);
+       Store store = instantiateHStore(this.tableDir, c);
+       this.stores.put(c.getName(), store);
+       long storeSeqId = store.getMaxSequenceId();
+@@ -353,8 +360,10 @@ public class HRegion implements HeapSize { // , Writable{
+       }
+     }
+     // Recover any edits if available.
+-    maxSeqId = replayRecoveredEditsIfAny(this.regiondir, maxSeqId, reporter);
++    maxSeqId = replayRecoveredEditsIfAny(
++        this.regiondir, maxSeqId, reporter, status);
+ 
++    status.setStatus("Cleaning up detritus from prior splits");
+     // Get rid of any splits or merges that were lost in-progress.  Clean out
+     // these directories here on open.  We may be opening a region that was
+     // being split but we crashed in the middle of it all.
+@@ -370,9 +379,12 @@ public class HRegion implements HeapSize { // , Writable{
+     // (particularly if no recovered edits, seqid will be -1).
+     long nextSeqid = maxSeqId + 1;
+     LOG.info("Onlined " + this.toString() + "; next sequenceid=" + nextSeqid);
++
+     // A region can be reopened if failed a split; reset flags
+     this.closing.set(false);
+     this.closed.set(false);
++
++    status.markComplete("Region opened successfully");
+     return nextSeqid;
+   }
+ 
+@@ -497,17 +509,29 @@ public class HRegion implements HeapSize { // , Writable{
+   public List<StoreFile> close(final boolean abort) throws IOException {
+     // Only allow one thread to close at a time. Serialize them so dual
+     // threads attempting to close will run up against each other.
+-    synchronized (closeLock) {
+-      return doClose(abort);
++    MonitoredTask status = TaskMonitor.get().createStatus(
++        "Closing region " + this +
++        (abort ? " due to abort" : ""));
++    
++    status.setStatus("Waiting for close lock");
++    try {
++      synchronized (closeLock) {
++        return doClose(abort, status);
++      }
++    } finally {
++      status.cleanup();
+     }
+   }
+ 
+-  private List<StoreFile> doClose(final boolean abort)
++  private List<StoreFile> doClose(
++      final boolean abort, MonitoredTask status)
+   throws IOException {
+     if (isClosed()) {
+       LOG.warn("Region " + this + " already closed");
+       return null;
+     }
++
++    status.setStatus("Disabling compacts and flushes for region");
+     boolean wasFlushing = false;
+     synchronized (writestate) {
+       // Disable compacting and flushing by background threads for this
+@@ -532,20 +556,24 @@ public class HRegion implements HeapSize { // , Writable{
+     // that will clear out of the bulk of the memstore before we put up
+     // the close flag?
+     if (!abort && !wasFlushing && worthPreFlushing()) {
++      status.setStatus("Pre-flushing region before close");
+       LOG.info("Running close preflush of " + this.getRegionNameAsString());
+-      internalFlushcache();
++      internalFlushcache(status);
+     }
++
+     this.closing.set(true);
++    status.setStatus("Disabling writes for close");
+     lock.writeLock().lock();
+     try {
+       if (this.isClosed()) {
++        status.abort("Already got closed by another process");
+         // SplitTransaction handles the null
+         return null;
+       }
+       LOG.debug("Updates disabled for region " + this);
+       // Don't flush the cache if we are aborting
+       if (!abort) {
+-        internalFlushcache();
++        internalFlushcache(status);
+       }
+ 
+       List<StoreFile> result = new ArrayList<StoreFile>();
+@@ -553,6 +581,7 @@ public class HRegion implements HeapSize { // , Writable{
+         result.addAll(store.close());
+       }
+       this.closed.set(true);
++      status.markComplete("Closed");
+       LOG.info("Closed " + this);
+       return result;
+     } finally {
+@@ -744,12 +773,14 @@ public class HRegion implements HeapSize { // , Writable{
+     }
+     lock.readLock().lock();
+     this.lastCompactInfo = null;
++    byte [] splitRow = null;
++    MonitoredTask status = TaskMonitor.get().createStatus(
++        "Compacting stores in " + this);
+     try {
+       if (this.closed.get()) {
+         LOG.debug("Skipping compaction on " + this + " because closed");
+         return null;
+       }
+-      byte [] splitRow = null;
+       if (this.closed.get()) {
+         return splitRow;
+       }
+@@ -758,10 +789,12 @@ public class HRegion implements HeapSize { // , Writable{
+           if (!writestate.compacting && writestate.writesEnabled) {
+             writestate.compacting = true;
+           } else {
+-            LOG.info("NOT compacting region " + this +
++            String msg = "NOT compacting region " + this +
+                 ": compacting=" + writestate.compacting + ", writesEnabled=" +
+-                writestate.writesEnabled);
+-              return splitRow;
++                writestate.writesEnabled;
++            LOG.info(msg);
++            status.abort(msg);
++            return splitRow;
+           }
+         }
+         LOG.info("Starting" + (majorCompaction? " major " : " ") +
+@@ -773,6 +806,7 @@ public class HRegion implements HeapSize { // , Writable{
+         boolean completed = false;
+         try {
+           for (Store store: stores.values()) {
++            status.setStatus("Compacting store " + store);
+             final Store.StoreSize ss = store.compact(majorCompaction);
+             lastCompactSize += store.getLastCompactSize();
+             if (ss != null && ss.getSize() > maxSize) {
+@@ -791,6 +825,9 @@ public class HRegion implements HeapSize { // , Writable{
+           if (completed) {
+             this.lastCompactInfo =
+               new Pair<Long,Long>((now - startTime) / 1000, lastCompactSize);
++            status.setStatus("Compaction complete: " +
++                StringUtils.humanReadableInt(lastCompactSize) + " in " +
++                (now - startTime) + "ms");
+           }
+         }
+       } finally {
+@@ -803,8 +840,10 @@ public class HRegion implements HeapSize { // , Writable{
+         assert splitPoint == null || Bytes.equals(splitRow, splitPoint);
+         this.splitPoint = null; // clear the split point (if set)
+       }
++      status.markComplete("Compaction complete");
+       return splitRow;
+     } finally {
++      status.cleanup();
+       lock.readLock().unlock();
+     }
+   }
+@@ -835,12 +874,16 @@ public class HRegion implements HeapSize { // , Writable{
+       LOG.debug("Skipping flush on " + this + " because closing");
+       return false;
+     }
++    MonitoredTask status = TaskMonitor.get().createStatus("Flushing " + this);
++    status.setStatus("Acquiring readlock on region");
+     lock.readLock().lock();
+     try {
+       if (this.closed.get()) {
+         LOG.debug("Skipping flush on " + this + " because closed");
++        status.abort("Skipped: closed");
+         return false;
+       }
++
+       try {
+         synchronized (writestate) {
+           if (!writestate.flushing && writestate.writesEnabled) {
+@@ -852,10 +895,15 @@ public class HRegion implements HeapSize { // , Writable{
+                   writestate.flushing + ", writesEnabled=" +
+                   writestate.writesEnabled);
+             }
++            status.abort("Not flushing since " +
++                (writestate.flushing ? "already flushing" : "writes not enabled"));
+             return false;
+           }
+         }
+-        return internalFlushcache();
++
++        boolean result = internalFlushcache(status);
++        status.markComplete("Flush successful");
++        return result;
+       } finally {
+         synchronized (writestate) {
+           writestate.flushing = false;
+@@ -865,6 +913,7 @@ public class HRegion implements HeapSize { // , Writable{
+       }
+     } finally {
+       lock.readLock().unlock();
++      status.cleanup();
+     }
+   }
+ 
+@@ -895,6 +944,7 @@ public class HRegion implements HeapSize { // , Writable{
+    * routes.
+    *
+    * <p> This method may block for some time.
++   * @param status
+    *
+    * @return true if the region needs compacting
+    *
+@@ -902,19 +952,21 @@ public class HRegion implements HeapSize { // , Writable{
+    * @throws DroppedSnapshotException Thrown when replay of hlog is required
+    * because a Snapshot was not properly persisted.
+    */
+-  protected boolean internalFlushcache() throws IOException {
+-    return internalFlushcache(this.log, -1);
++  protected boolean internalFlushcache(MonitoredTask status) throws IOException {
++    return internalFlushcache(this.log, -1, status);
+   }
+ 
+   /**
+    * @param wal Null if we're NOT to go via hlog/wal.
+    * @param myseqid The seqid to use if <code>wal</code> is null writing out
+    * flush file.
++   * @param status
+    * @return true if the region needs compacting
+    * @throws IOException
+    * @see #internalFlushcache()
+    */
+-  protected boolean internalFlushcache(final HLog wal, final long myseqid)
++  protected boolean internalFlushcache(
++      final HLog wal, final long myseqid, MonitoredTask status)
+   throws IOException {
+     final long startTime = EnvironmentEdgeManager.currentTimeMillis();
+     // Clear flush flag.
+@@ -944,7 +996,9 @@ public class HRegion implements HeapSize { // , Writable{
+     // We have to take a write lock during snapshot, or else a write could
+     // end up in both snapshot and memstore (makes it difficult to do atomic
+     // rows then)
++    status.setStatus("Obtaining lock to block concurrent updates");
+     this.updatesLock.writeLock().lock();
++    status.setStatus("Preparing to flush by snapshotting stores");
+     final long currentMemStoreSize = this.memstoreSize.get();
+     List<StoreFlusher> storeFlushers = new ArrayList<StoreFlusher>(stores.size());
+     try {
+@@ -963,6 +1017,7 @@ public class HRegion implements HeapSize { // , Writable{
+     } finally {
+       this.updatesLock.writeLock().unlock();
+     }
++    status.setStatus("Flushing stores");
+ 
+     LOG.debug("Finished snapshotting, commencing flushing stores");
+ 
+@@ -977,7 +1032,7 @@ public class HRegion implements HeapSize { // , Writable{
+       // just-made new flush store file.
+ 
+       for (StoreFlusher flusher : storeFlushers) {
+-        flusher.flushCache();
++        flusher.flushCache(status);
+       }
+       // Switch snapshot (in memstore) -> new hfile (thus causing
+       // all the store scanners to reset/reseek).
+@@ -1004,6 +1059,7 @@ public class HRegion implements HeapSize { // , Writable{
+       DroppedSnapshotException dse = new DroppedSnapshotException("region: " +
+           Bytes.toStringBinary(getRegionName()));
+       dse.initCause(t);
++      status.abort("Flush failed: " + StringUtils.stringifyException(t));
+       throw dse;
+     }
+ 
+@@ -1027,13 +1083,13 @@ public class HRegion implements HeapSize { // , Writable{
+     }
+ 
+     long time = EnvironmentEdgeManager.currentTimeMillis() - startTime;
+-    if (LOG.isDebugEnabled()) {
+-      LOG.info("Finished memstore flush of ~" +
++    String msg = "Finished memstore flush of ~" +
+         StringUtils.humanReadableInt(currentMemStoreSize) + " for region " +
+         this + " in " + time + "ms, sequenceid=" + sequenceId +
+         ", compaction requested=" + compactionRequested +
+-        ((wal == null)? "; wal=null": ""));
+-    }
++        ((wal == null)? "; wal=null": "");
++    LOG.info(msg);
++    status.setStatus(msg);
+     this.recentFlushes.add(new Pair<Long,Long>(time/1000,currentMemStoreSize));
+ 
+     return compactionRequested;
+@@ -1843,7 +1899,8 @@ public class HRegion implements HeapSize { // , Writable{
+    * @throws IOException
+    */
+   protected long replayRecoveredEditsIfAny(final Path regiondir,
+-      final long minSeqId, final CancelableProgressable reporter)
++      final long minSeqId, final CancelableProgressable reporter,
++      final MonitoredTask status)
+   throws UnsupportedEncodingException, IOException {
+     long seqid = minSeqId;
+     NavigableSet<Path> files = HLog.getSplitEditFilesSorted(this.fs, regiondir);
+@@ -1869,7 +1926,7 @@ public class HRegion implements HeapSize { // , Writable{
+     }
+     if (seqid > minSeqId) {
+       // Then we added some edits to memory. Flush and cleanup split edit files.
+-      internalFlushcache(null, seqid);
++      internalFlushcache(null, seqid, status);
+     }
+     // Now delete the content of recovered edits.  We're done w/ them.
+     for (Path file: files) {
+@@ -1894,7 +1951,11 @@ public class HRegion implements HeapSize { // , Writable{
+   private long replayRecoveredEdits(final Path edits,
+       final long minSeqId, final CancelableProgressable reporter)
+     throws IOException {
+-    LOG.info("Replaying edits from " + edits + "; minSequenceid=" + minSeqId);
++    String msg = "Replaying edits from " + edits + "; minSequenceid=" + minSeqId;
++    LOG.info(msg);
++    MonitoredTask status = TaskMonitor.get().createStatus(msg);
++    
++    status.setStatus("Opening logs");
+     HLog.Reader reader = HLog.getReader(this.fs, edits, conf);
+     try {
+     long currentEditSeqId = minSeqId;
+@@ -1926,10 +1987,14 @@ public class HRegion implements HeapSize { // , Writable{
+             intervalEdits = 0;
+             long cur = EnvironmentEdgeManager.currentTimeMillis();
+             if (lastReport + period <= cur) {
++              status.setStatus("Replaying edits..." +
++                  " skipped=" + skippedEdits +
++                  " edits=" + editsCount);
+               // Timeout reached
+               if(!reporter.progress()) {
+-                String msg = "Progressable reporter failed, stopping replay";
++                msg = "Progressable reporter failed, stopping replay";
+                 LOG.warn(msg);
++                status.abort(msg);
+                 throw new IOException(msg);
+               }
+               lastReport = cur;
+@@ -1972,34 +2037,43 @@ public class HRegion implements HeapSize { // , Writable{
+           flush = restoreEdit(store, kv);
+           editsCount++;
+         }
+-        if (flush) internalFlushcache(null, currentEditSeqId);
++        if (flush) internalFlushcache(null, currentEditSeqId, status);
+       }
+     } catch (EOFException eof) {
+       Path p = HLog.moveAsideBadEditsFile(fs, edits);
+-      LOG.warn("Encountered EOF. Most likely due to Master failure during " +
++      msg = "Encountered EOF. Most likely due to Master failure during " +
+           "log spliting, so we have this data in another edit.  " +
+-          "Continuing, but renaming " + edits + " as " + p, eof);
++          "Continuing, but renaming " + edits + " as " + p;
++      LOG.warn(msg, eof);
++      status.abort(msg);
+     } catch (IOException ioe) {
+       // If the IOE resulted from bad file format,
+       // then this problem is idempotent and retrying won't help
+       if (ioe.getCause() instanceof ParseException) {
+         Path p = HLog.moveAsideBadEditsFile(fs, edits);
+-        LOG.warn("File corruption encountered!  " +
+-            "Continuing, but renaming " + edits + " as " + p, ioe);
++        msg = "File corruption encountered!  " +
++            "Continuing, but renaming " + edits + " as " + p;
++        LOG.warn(msg, ioe);
++        status.setStatus(msg);
+       } else {
++        status.abort(StringUtils.stringifyException(ioe));
+         // other IO errors may be transient (bad network connection,
+         // checksum exception on one datanode, etc).  throw & retry
+         throw ioe;
+       }
+     }
++    
++    msg = "Applied " + editsCount + ", skipped " + skippedEdits +
++    ", firstSequenceidInLog=" + firstSeqIdInLog +
++    ", maxSequenceidInLog=" + currentEditSeqId;
++    status.markComplete(msg);
+     if (LOG.isDebugEnabled()) {
+-      LOG.debug("Applied " + editsCount + ", skipped " + skippedEdits +
+-          ", firstSequenceidInLog=" + firstSeqIdInLog +
+-          ", maxSequenceidInLog=" + currentEditSeqId);
++      LOG.debug(msg);
+     }
+     return currentEditSeqId;
+     } finally {
+       reader.close();
++      status.cleanup();
+     }
+   }
+ 
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java b/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
+index 0b9acbf..ab7457d 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
+@@ -48,6 +48,7 @@ import org.apache.hadoop.hbase.io.hfile.Compression;
+ import org.apache.hadoop.hbase.io.hfile.HFile;
+ import org.apache.hadoop.hbase.io.hfile.HFileScanner;
+ import org.apache.hadoop.hbase.io.hfile.InvalidHFileException;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.ClassSize;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+@@ -487,11 +488,13 @@ public class Store implements HeapSize {
+    */
+   private StoreFile flushCache(final long logCacheFlushId,
+       SortedSet<KeyValue> snapshot,
+-      TimeRangeTracker snapshotTimeRangeTracker) throws IOException {
++      TimeRangeTracker snapshotTimeRangeTracker,
++      MonitoredTask status) throws IOException {
+     // If an exception happens flushing, we let it out without clearing
+     // the memstore snapshot.  The old snapshot will be returned when we say
+     // 'snapshot', the next time flush comes around.
+-    return internalFlushCache(snapshot, logCacheFlushId, snapshotTimeRangeTracker);
++    return internalFlushCache(
++        snapshot, logCacheFlushId, snapshotTimeRangeTracker, status);
+   }
+ 
+   /*
+@@ -502,7 +505,8 @@ public class Store implements HeapSize {
+    */
+   private StoreFile internalFlushCache(final SortedSet<KeyValue> set,
+       final long logCacheFlushId,
+-      TimeRangeTracker snapshotTimeRangeTracker)
++      TimeRangeTracker snapshotTimeRangeTracker,
++      MonitoredTask status)
+       throws IOException {
+     StoreFile.Writer writer = null;
+     long flushed = 0;
+@@ -515,6 +519,7 @@ public class Store implements HeapSize {
+     // flush to list of store files.  Add cleanup of anything put on filesystem
+     // if we fail.
+     synchronized (flushLock) {
++      status.setStatus("Flushing " + this + ": creating writer");
+       // A. Write the map out to the disk
+       writer = createWriterInTmp(set.size());
+       writer.setTimeRangeTracker(snapshotTimeRangeTracker);
+@@ -530,18 +535,23 @@ public class Store implements HeapSize {
+       } finally {
+         // Write out the log sequence number that corresponds to this output
+         // hfile.  The hfile is current up to and including logCacheFlushId.
++        status.setStatus("Flushing " + this + ": appending metadata");
+         writer.appendMetadata(logCacheFlushId, false);
++        status.setStatus("Flushing " + this + ": closing flushed file");
+         writer.close();
+       }
+     }
+ 
+     // Write-out finished successfully, move into the right spot
+     Path dstPath = StoreFile.getUniqueFile(fs, homedir);
+-    LOG.info("Renaming flushed file at " + writer.getPath() + " to " + dstPath);
++    String msg = "Renaming flushed file at " + writer.getPath() + " to " + dstPath;
++    LOG.info(msg);
++    status.setStatus("Flushing " + this + ": " + msg);
+     if (!fs.rename(writer.getPath(), dstPath)) {
+       LOG.warn("Unable to rename " + writer.getPath() + " to " + dstPath);
+     }
+ 
++    status.setStatus("Flushing " + this + ": reopening flushed file");
+     StoreFile sf = new StoreFile(this.fs, dstPath, blockcache,
+       this.conf, this.family.getBloomFilterType(), this.inMemory);
+     StoreFile.Reader r = sf.createReader();
+@@ -1562,8 +1572,9 @@ public class Store implements HeapSize {
+     }
+ 
+     @Override
+-    public void flushCache() throws IOException {
+-      storeFile = Store.this.flushCache(cacheFlushId, snapshot, snapshotTimeRangeTracker);
++    public void flushCache(MonitoredTask status) throws IOException {
++      storeFile = Store.this.flushCache(
++          cacheFlushId, snapshot, snapshotTimeRangeTracker, status);
+     }
+ 
+     @Override
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFlusher.java b/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFlusher.java
+index 8706e65..c84ba05 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFlusher.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFlusher.java
+@@ -21,6 +21,8 @@ package org.apache.hadoop.hbase.regionserver;
+ 
+ import java.io.IOException;
+ 
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
++
+ /**
+  * A package protected interface for a store flushing.
+  * A store flusher carries the state required to prepare/flush/commit the
+@@ -45,7 +47,7 @@ interface StoreFlusher {
+    *
+    * @throws IOException in case the flush fails
+    */
+-  void flushCache() throws IOException;
++  void flushCache(MonitoredTask status) throws IOException;
+ 
+   /**
+    * Commit the flush - add the store file to the store and clear the
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+index 41d969b..972bfd9 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+@@ -47,12 +47,15 @@ import org.apache.hadoop.hbase.HConstants;
+ import org.apache.hadoop.hbase.HTableDescriptor;
+ import org.apache.hadoop.hbase.RemoteExceptionHandler;
+ import org.apache.hadoop.hbase.io.HeapSize;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
++import org.apache.hadoop.hbase.monitoring.TaskMonitor;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.regionserver.wal.HLog.Entry;
+ import org.apache.hadoop.hbase.regionserver.wal.HLog.Reader;
+ import org.apache.hadoop.hbase.regionserver.wal.HLog.Writer;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.ClassSize;
++import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+ import org.apache.hadoop.io.MultipleIOException;
+ 
+ import com.google.common.base.Preconditions;
+@@ -64,7 +67,6 @@ import com.google.common.collect.Lists;
+  * region to replay on startup. Delete the old log files when finished.
+  */
+ public class HLogSplitter {
+-
+   private static final String LOG_SPLITTER_IMPL = "hbase.hlog.splitter.impl";
+ 
+   /**
+@@ -100,6 +102,8 @@ public class HLogSplitter {
+   // Wait/notify for when data has been produced by the reader thread,
+   // consumed by the reader thread, or an exception occurred
+   Object dataAvailable = new Object();
++  
++  private MonitoredTask status;
+ 
+   
+   /**
+@@ -172,10 +176,16 @@ public class HLogSplitter {
+         "An HLogSplitter instance may only be used once");
+     hasSplit = true;
+ 
+-    long startTime = System.currentTimeMillis();
++    status = TaskMonitor.get().createStatus(
++        "Splitting logs in " + srcDir);
++    
++    long startTime = EnvironmentEdgeManager.currentTimeMillis();
++    
++    status.setStatus("Determining files to split...");
+     List<Path> splits = null;
+     if (!fs.exists(srcDir)) {
+       // Nothing to do
++      status.markComplete("No log directory existed to split.");
+       return splits;
+     }
+     FileStatus[] logfiles = fs.listStatus(srcDir);
+@@ -183,16 +193,21 @@ public class HLogSplitter {
+       // Nothing to do
+       return splits;
+     }
+-    LOG.info("Splitting " + logfiles.length + " hlog(s) in "
+-        + srcDir.toString());
++    logAndReport("Splitting " + logfiles.length + " hlog(s) in "
++    + srcDir.toString());
+     splits = splitLog(logfiles);
+-    
+-    splitTime = System.currentTimeMillis() - startTime;
+-    LOG.info("hlog file splitting completed in " + splitTime +
++
++    splitTime = EnvironmentEdgeManager.currentTimeMillis() - startTime;
++    logAndReport("hlog file splitting completed in " + splitTime +
+         " ms for " + srcDir.toString());
+     return splits;
+   }
+   
++  private void logAndReport(String msg) {
++    status.setStatus(msg);
++    LOG.info(msg);
++  }
++
+   /**
+    * @return time that this split took
+    */
+@@ -245,6 +260,7 @@ public class HLogSplitter {
+ 
+     boolean skipErrors = conf.getBoolean("hbase.hlog.split.skip.errors", true);
+ 
++    long totalBytesToSplit = countTotalBytes(logfiles);
+     splitSize = 0;
+ 
+     outputSink.startWriterThreads(entryBuffers);
+@@ -255,7 +271,7 @@ public class HLogSplitter {
+        Path logPath = log.getPath();
+         long logLength = log.getLen();
+         splitSize += logLength;
+-        LOG.debug("Splitting hlog " + (i++ + 1) + " of " + logfiles.length
++        logAndReport("Splitting hlog " + (i++ + 1) + " of " + logfiles.length
+             + ": " + logPath + ", length=" + logLength);
+         try {
+           recoverFileLease(fs, logPath, conf);
+@@ -289,21 +305,37 @@ public class HLogSplitter {
+           }
+         }
+       }
++      status.setStatus("Log splits complete. Checking for orphaned logs.");
++      
+       if (fs.listStatus(srcDir).length > processedLogs.size()
+           + corruptedLogs.size()) {
+         throw new OrphanHLogAfterSplitException(
+             "Discovered orphan hlog after split. Maybe the "
+             + "HRegionServer was not dead when we started");
+       }
+-           
+     } finally {
++      status.setStatus("Finishing writing output logs and closing down.");
+       splits = outputSink.finishWritingAndClose();
+     }
++
++    status.setStatus("Archiving logs after completed split");
+     archiveLogs(srcDir, corruptedLogs, processedLogs, oldLogDir, fs, conf); 
+     return splits;
+   }
+ 
+   /**
++   * @return the total size of the passed list of files.
++   */
++  private static long countTotalBytes(FileStatus[] logfiles) {
++    long ret = 0;
++    for (FileStatus stat : logfiles) {
++      ret += stat.getLen();
++    }
++    return ret;
++  }
++
++
++  /**
+    * Moves processed logs to a oldLogDir after successful processing Moves
+    * corrupted logs (any log that couldn't be successfully parsed to corruptDir
+    * (.corrupt) for later investigation
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestActiveMasterManager.java b/src/test/java/org/apache/hadoop/hbase/master/TestActiveMasterManager.java
+index 1a19941..2c59cfc 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestActiveMasterManager.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestActiveMasterManager.java
+@@ -33,6 +33,7 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
+ import org.apache.hadoop.hbase.HServerAddress;
+ import org.apache.hadoop.hbase.Server;
+ import org.apache.hadoop.hbase.catalog.CatalogTracker;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+ import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperListener;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+@@ -40,6 +41,7 @@ import org.apache.zookeeper.KeeperException;
+ import org.junit.AfterClass;
+ import org.junit.BeforeClass;
+ import org.junit.Test;
++import org.mockito.Mockito;
+ 
+ /**
+  * Test the {@link ActiveMasterManager}.
+@@ -76,7 +78,8 @@ public class TestActiveMasterManager {
+     assertFalse(activeMasterManager.clusterHasActiveMaster.get());
+ 
+     // First test becoming the active master uninterrupted
+-    activeMasterManager.blockUntilBecomingActiveMaster();
++    MonitoredTask status = Mockito.mock(MonitoredTask.class);
++    activeMasterManager.blockUntilBecomingActiveMaster(status);
+     assertTrue(activeMasterManager.clusterHasActiveMaster.get());
+     assertMaster(zk, master);
+ 
+@@ -86,7 +89,7 @@ public class TestActiveMasterManager {
+       master, secondDummyMaster);
+     zk.registerListener(secondActiveMasterManager);
+     assertFalse(secondActiveMasterManager.clusterHasActiveMaster.get());
+-    activeMasterManager.blockUntilBecomingActiveMaster();
++    activeMasterManager.blockUntilBecomingActiveMaster(status);
+     assertTrue(activeMasterManager.clusterHasActiveMaster.get());
+     assertMaster(zk, master);
+   }
+@@ -117,7 +120,8 @@ public class TestActiveMasterManager {
+     assertFalse(activeMasterManager.clusterHasActiveMaster.get());
+ 
+     // First test becoming the active master uninterrupted
+-    activeMasterManager.blockUntilBecomingActiveMaster();
++    activeMasterManager.blockUntilBecomingActiveMaster(
++        Mockito.mock(MonitoredTask.class));
+     assertTrue(activeMasterManager.clusterHasActiveMaster.get());
+     assertMaster(zk, firstMasterAddress);
+ 
+@@ -197,7 +201,8 @@ public class TestActiveMasterManager {
+ 
+     @Override
+     public void run() {
+-      manager.blockUntilBecomingActiveMaster();
++      manager.blockUntilBecomingActiveMaster(
++          Mockito.mock(MonitoredTask.class));
+       LOG.info("Second master has become the active master!");
+       isActiveMaster = true;
+     }
+diff --git a/src/test/java/org/apache/hadoop/hbase/monitoring/TestTaskMonitor.java b/src/test/java/org/apache/hadoop/hbase/monitoring/TestTaskMonitor.java
+new file mode 100644
+index 0000000..1a445cb
+--- /dev/null
++++ b/src/test/java/org/apache/hadoop/hbase/monitoring/TestTaskMonitor.java
+@@ -0,0 +1,101 @@
++/**
++ * Copyright 2011 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.monitoring;
++
++import static org.junit.Assert.*;
++
++import java.util.concurrent.atomic.AtomicBoolean;
++
++import org.junit.Test;
++
++public class TestTaskMonitor {
++
++  @Test
++  public void testTaskMonitorBasics() {
++    TaskMonitor tm = new TaskMonitor();
++    assertTrue("Task monitor should start empty",
++        tm.getTasks().isEmpty());
++    
++    // Make a task and fetch it back out
++    MonitoredTask task = tm.createStatus("Test task");
++    MonitoredTask taskFromTm = tm.getTasks().get(0);
++    
++    // Make sure the state is reasonable.
++    assertEquals(task.getDescription(), taskFromTm.getDescription());
++    assertEquals(-1, taskFromTm.getCompletionTimestamp());
++    assertEquals(MonitoredTask.State.RUNNING, taskFromTm.getState());
++    
++    // Mark it as finished
++    task.markComplete("Finished!");
++    assertEquals(MonitoredTask.State.COMPLETE, taskFromTm.getState());
++    
++    // It should still show up in the TaskMonitor list
++    assertEquals(1, tm.getTasks().size());
++    
++    // If we mark its completion time back a few minutes, it should get gced
++    ((MonitoredTaskImpl)taskFromTm).expireNow();
++    assertEquals(0, tm.getTasks().size());
++  }
++  
++  @Test
++  public void testTasksGetAbortedOnLeak() throws InterruptedException {
++    final TaskMonitor tm = new TaskMonitor();
++    assertTrue("Task monitor should start empty",
++        tm.getTasks().isEmpty());
++    
++    final AtomicBoolean threadSuccess = new AtomicBoolean(false);
++    // Make a task in some other thread and leak it
++    Thread t = new Thread() {
++      @Override
++      public void run() {
++        MonitoredTask task = tm.createStatus("Test task");
++        assertEquals(MonitoredTask.State.RUNNING, task.getState());
++        threadSuccess.set(true);
++      }
++    };
++    t.start();
++    t.join();
++    // Make sure the thread saw the correct state
++    assertTrue(threadSuccess.get());
++    
++    // Make sure the leaked reference gets cleared
++    System.gc();
++    System.gc();
++    System.gc();
++    
++    // Now it should be aborted
++    MonitoredTask taskFromTm = tm.getTasks().get(0);
++    assertEquals(MonitoredTask.State.ABORTED, taskFromTm.getState());
++  }
++  
++  @Test
++  public void testTaskLimit() throws Exception {
++    TaskMonitor tm = new TaskMonitor();
++    for (int i = 0; i < TaskMonitor.MAX_TASKS + 10; i++) {
++      tm.createStatus("task " + i);
++    }
++    // Make sure it was limited correctly
++    assertEquals(TaskMonitor.MAX_TASKS, tm.getTasks().size());
++    // Make sure we culled the earlier tasks, not later
++    // (i.e. tasks 0 through 9 should have been deleted)
++    assertEquals("task 10", tm.getTasks().get(0).getDescription());
++  }
++
++}
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java
+index de6f097..585da2f 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestStore.java
+@@ -50,6 +50,7 @@ import org.apache.hadoop.hbase.HRegionInfo;
+ import org.apache.hadoop.hbase.HTableDescriptor;
+ import org.apache.hadoop.hbase.KeyValue;
+ import org.apache.hadoop.hbase.client.Get;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+ import org.apache.hadoop.hbase.regionserver.wal.HLog;
+ import org.apache.hadoop.hbase.security.User;
+ import org.apache.hadoop.hbase.util.Bytes;
+@@ -57,6 +58,7 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
+ import org.apache.hadoop.hbase.util.IncrementingEnvironmentEdge;
+ import org.apache.hadoop.hbase.util.ManualEnvironmentEdge;
++import org.mockito.Mockito;
+ 
+ import com.google.common.base.Joiner;
+ 
+@@ -552,7 +554,7 @@ public class TestStore extends TestCase {
+   private static void flushStore(Store store, long id) throws IOException {
+     StoreFlusher storeFlusher = store.getStoreFlusher(id);
+     storeFlusher.prepare();
+-    storeFlusher.flushCache();
++    storeFlusher.flushCache(Mockito.mock(MonitoredTask.class));
+     storeFlusher.commit();
+   }
+ 
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestWALReplay.java b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestWALReplay.java
+index 3e4cf9e..437cb0a 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestWALReplay.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/wal/TestWALReplay.java
+@@ -44,6 +44,7 @@ import org.apache.hadoop.hbase.client.Get;
+ import org.apache.hadoop.hbase.client.Put;
+ import org.apache.hadoop.hbase.client.Result;
+ import org.apache.hadoop.hbase.io.hfile.HFile;
++import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+ import org.apache.hadoop.hbase.regionserver.FlushRequester;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.regionserver.Store;
+@@ -57,6 +58,7 @@ import org.junit.AfterClass;
+ import org.junit.Before;
+ import org.junit.BeforeClass;
+ import org.junit.Test;
++import org.mockito.Mockito;
+ 
+ /**
+  * Test replay of edits out of a WAL split.
+@@ -395,9 +397,12 @@ public class TestWALReplay {
+         try {
+           final HRegion region = new HRegion(basedir, newWal, newFS, newConf, hri,
+               null) {
+-            protected boolean internalFlushcache(HLog wal, long myseqid)
++            @Override
++            protected boolean internalFlushcache(HLog wal, long myseqid,
++                MonitoredTask status)
+             throws IOException {
+-              boolean b = super.internalFlushcache(wal, myseqid);
++              boolean b = super.internalFlushcache(wal, myseqid,
++                  Mockito.mock(MonitoredTask.class));
+               flushcount.incrementAndGet();
+               return b;
+             };
+-- 
+1.7.0.4
+

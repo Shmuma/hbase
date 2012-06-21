@@ -1,0 +1,78 @@
+From d6482e622b6fc5b3f0cdcb403f93aae1f62ce035 Mon Sep 17 00:00:00 2001
+From: David S. Wang <dsw@cloudera.com>
+Date: Wed, 21 Mar 2012 11:40:21 -0700
+Subject: [PATCH 077/101] HBASE-5593 Reverse DNS resolution in regionServerStartup() does not strip trailing dot. REAPPLICATION
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/branches/0.90@1303178 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 2ae2f4e423ccb0e22c10a07d27d39952076b9968)
+
+    Reason: Bug
+    Author: David S. Wang
+    Ref: CDH-4962
+---
+ .../org/apache/hadoop/hbase/master/HMaster.java    |    3 +-
+ .../org/apache/hadoop/hbase/util/TestStrings.java  |   38 ++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 1 deletions(-)
+ create mode 100644 src/test/java/org/apache/hadoop/hbase/util/TestStrings.java
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index 7621350..c132826 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -686,7 +686,8 @@ implements HMasterInterface, HMasterRegionInterface, MasterServices, Server {
+     // Everafter, the HSI combination 'server name' is what uniquely identifies
+     // the incoming RegionServer.
+     InetSocketAddress address = new InetSocketAddress(
+-        HBaseServer.getRemoteIp().getHostName(),
++        Strings.domainNamePointerToHostName(
++          HBaseServer.getRemoteIp().getHostName()),
+         serverInfo.getServerAddress().getPort());
+     serverInfo.setServerAddress(new HServerAddress(address));
+ 
+diff --git a/src/test/java/org/apache/hadoop/hbase/util/TestStrings.java b/src/test/java/org/apache/hadoop/hbase/util/TestStrings.java
+new file mode 100644
+index 0000000..193eef4
+--- /dev/null
++++ b/src/test/java/org/apache/hadoop/hbase/util/TestStrings.java
+@@ -0,0 +1,38 @@
++/*
++ * Copyright The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.util;
++
++import org.junit.Test;
++
++import static junit.framework.Assert.assertEquals;
++
++import org.apache.hadoop.hbase.util.Strings;
++
++/**
++ * Tests functions in the Strings util class
++ */
++public class TestStrings {
++
++  @Test
++  public void testDomainNamePointerToHostName() {
++    assertEquals(Strings.domainNamePointerToHostName("hbase.apache.org."), 
++                 "hbase.apache.org");
++  }
++}
+-- 
+1.7.0.4
+

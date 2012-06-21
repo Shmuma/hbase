@@ -19,8 +19,10 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.lang.reflect.UndeclaredThrowableException;
 import java.net.SocketTimeoutException;
 import java.util.Arrays;
 import java.util.List;
@@ -43,6 +45,7 @@ import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.RegionException;
 import org.apache.hadoop.hbase.RemoteExceptionHandler;
 import org.apache.hadoop.hbase.TableExistsException;
+import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.catalog.CatalogTracker;
@@ -65,10 +68,10 @@ import org.apache.hadoop.util.StringUtils;
  * <p>Currently HBaseAdmin instances are not expected to be long-lived.  For
  * example, an HBaseAdmin instance will not ride over a Master restart.
  */
-public class HBaseAdmin implements Abortable {
+public class HBaseAdmin implements Abortable, Closeable {
   private final Log LOG = LogFactory.getLog(this.getClass().getName());
 //  private final HConnection connection;
-  final HConnection connection;
+  private HConnection connection;
   private volatile Configuration conf;
   private final long pause;
   private final int numRetries;
@@ -91,7 +94,32 @@ public class HBaseAdmin implements Abortable {
     this.pause = this.conf.getLong("hbase.client.pause", 1000);
     this.numRetries = this.conf.getInt("hbase.client.retries.number", 10);
     this.retryLongerMultiplier = this.conf.getInt("hbase.client.retries.longer.multiplier", 10);
-    this.connection.getMaster();
+    int tries = 0;
+    for (; tries < numRetries; ++tries) {
+      try {
+        this.connection.getMaster();
+        break;
+      } catch (MasterNotRunningException mnre) {
+        HConnectionManager.deleteStaleConnection(this.connection);
+        this.connection = HConnectionManager.getConnection(this.conf);
+      } catch (UndeclaredThrowableException ute) {
+        HConnectionManager.deleteStaleConnection(this.connection);
+        this.connection = HConnectionManager.getConnection(this.conf);
+      }
+      try { // Sleep
+        Thread.sleep(ConnectionUtils.getPauseTime(this.pause, tries));
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        // we should delete connection between client and zookeeper
+        HConnectionManager.deleteStaleConnection(this.connection);
+        throw new MasterNotRunningException("Interrupted");
+      }
+    }
+    if (tries >= numRetries) {
+      // we should delete connection between client and zookeeper
+      HConnectionManager.deleteStaleConnection(this.connection);
+      throw new MasterNotRunningException("Retried " + numRetries + " times");
+    }
   }
 
   /**
@@ -105,9 +133,7 @@ public class HBaseAdmin implements Abortable {
   throws ZooKeeperConnectionException, IOException {
     CatalogTracker ct = null;
     try {
-      HConnection connection =
-        HConnectionManager.getConnection(this.conf);
-      ct = new CatalogTracker(connection);
+      ct = new CatalogTracker(this.conf);
       ct.start();
     } catch (InterruptedException e) {
       // Let it out as an IOE for now until we redo all so tolerate IEs
@@ -204,14 +230,6 @@ public class HBaseAdmin implements Abortable {
     return this.connection.getHTableDescriptor(tableName);
   }
 
-  private long getPauseTime(int tries) {
-    int triesCount = tries;
-    if (triesCount >= HConstants.RETRY_BACKOFF.length) {
-      triesCount = HConstants.RETRY_BACKOFF.length - 1;
-    }
-    return this.pause * HConstants.RETRY_BACKOFF[triesCount];
-  }
-
   /**
    * Creates a new table.
    * Synchronous operation.
@@ -273,9 +291,7 @@ public class HBaseAdmin implements Abortable {
   /**
    * Creates a new table with an initial set of empty regions defined by the
    * specified split keys.  The total number of regions created will be the
-   * number of split keys plus one (the first region has a null start key and
-   * the last region has a null end key).
-   * Synchronous operation.
+   * number of split keys plus one. Synchronous operation.
    *
    * @param desc table descriptor for table
    * @param splitKeys array of split keys for the initial regions of the table
@@ -333,7 +349,7 @@ public class HBaseAdmin implements Abortable {
               " of " + numRegs + " regions are online; retries exhausted.");
         }
         try { // Sleep
-          Thread.sleep(getPauseTime(tries));
+          Thread.sleep(ConnectionUtils.getPauseTime(this.pause, tries));
         } catch (InterruptedException e) {
           throw new InterruptedIOException("Interrupted when opening" +
               " regions; " + actualRegCount.get() + " of " + numRegs + 
@@ -351,7 +367,9 @@ public class HBaseAdmin implements Abortable {
 
   /**
    * Creates a new table but does not block and wait for it to come online.
-   * Asynchronous operation.
+   * Asynchronous operation.  To check if the table exists, use
+   * {@link: #isTableAvailable} -- it is not safe to create an HTable
+   * instance to this table before it is available.
    *
    * @param desc table descriptor for table
    *
@@ -446,7 +464,7 @@ public class HBaseAdmin implements Abortable {
         }
       }
       try {
-        Thread.sleep(getPauseTime(tries));
+        Thread.sleep(ConnectionUtils.getPauseTime(this.pause, tries));
       } catch (InterruptedException e) {
         // continue
       }
@@ -481,7 +499,7 @@ public class HBaseAdmin implements Abortable {
       if (enabled) {
         break;
       }
-      long sleep = getPauseTime(tries);
+      long sleep = ConnectionUtils.getPauseTime(this.pause, tries);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Sleeping= " + sleep + "ms, waiting for all regions to be " +
           "enabled in " + Bytes.toString(tableName));
@@ -577,7 +595,7 @@ public class HBaseAdmin implements Abortable {
       if (disabled) {
         break;
       }
-      long sleep = getPauseTime(tries);
+      long sleep = ConnectionUtils.getPauseTime(this.pause, tries);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Sleeping= " + sleep + "ms, waiting for all regions to be " +
           "disabled in " + Bytes.toString(tableName));
@@ -826,6 +844,44 @@ public class HBaseAdmin implements Abortable {
       cleanupCatalogTracker(ct);
     }
   }
+  /**
+   * For expert-admins. Runs close on the regionserver. Closes a region based on
+   * the encoded region name. The region server name is mandatory. If the
+   * servername is provided then based on the online regions in the specified
+   * regionserver the specified region will be closed. The master will not be
+   * informed of the close. Note that the regionname is the encoded regionname.
+   * 
+   * @param encodedRegionName
+   *          The encoded region name; i.e. the hash that makes up the region
+   *          name suffix: e.g. if regionname is
+   *          <code>TestTable,0094429456,1289497600452.527db22f95c8a9e0116f0cc13c680396.</code>
+   *          , then the encoded region name is:
+   *          <code>527db22f95c8a9e0116f0cc13c680396</code>.
+   * @param serverName
+   *          The servername of the regionserver. A server name is made of host
+   *          and port. This is mandatory. Here is an example:
+   *          <code> host187.example.com:60020</code>
+   * @return true if the region was closed, false if not.
+   * @throws IOException
+   *           if a remote or network exception occurs
+   */
+  public boolean closeRegionWithEncodedRegionName(
+      final String encodedRegionName, final String serverName)
+      throws IOException {
+    byte[] encodedRegionNameInBytes = Bytes.toBytes(encodedRegionName);
+    if (null == serverName || ("").equals(serverName.trim())) {
+      throw new IllegalArgumentException(
+          "The servername cannot be null or empty.");
+    }
+    HServerAddress hsa = new HServerAddress(serverName);
+    HRegionInterface rs = this.connection.getHRegionConnection(hsa, true);
+    // Close the region without updating zk state.
+    boolean regionClosed = rs.closeRegion(encodedRegionNameInBytes, false);
+    if (false == regionClosed) {
+      LOG.error("Not able to close the region " + encodedRegionName + ".");
+    }
+    return regionClosed;
+  }
 
   public void closeRegion(final HServerAddress hsa, final HRegionInfo hri)
   throws IOException {
@@ -857,8 +913,8 @@ public class HBaseAdmin implements Abortable {
    */
   public void flush(final byte [] tableNameOrRegionName)
   throws IOException, InterruptedException {
-    boolean isRegionName = isRegionName(tableNameOrRegionName);
     CatalogTracker ct = getCatalogTracker();
+    boolean isRegionName = isRegionName(tableNameOrRegionName, ct);
     try {
       if (isRegionName) {
         Pair<HRegionInfo, HServerAddress> pair =
@@ -870,9 +926,10 @@ public class HBaseAdmin implements Abortable {
           flush(pair.getSecond(), pair.getFirst());
         }
       } else {
+        final String tableName = tableNameString(tableNameOrRegionName, ct);
         List<Pair<HRegionInfo, HServerAddress>> pairs =
           MetaReader.getTableRegionsAndLocations(ct,
-              Bytes.toString(tableNameOrRegionName));
+              tableName);
         for (Pair<HRegionInfo, HServerAddress> pair: pairs) {
           if (pair.getFirst().isOffline()) continue;
           if (pair.getSecond() == null) continue;
@@ -962,7 +1019,7 @@ public class HBaseAdmin implements Abortable {
   throws IOException, InterruptedException {
     CatalogTracker ct = getCatalogTracker();
     try {
-      if (isRegionName(tableNameOrRegionName)) {
+      if (isRegionName(tableNameOrRegionName, ct)) {
         Pair<HRegionInfo, HServerAddress> pair =
           MetaReader.getRegion(ct, tableNameOrRegionName);
         if (pair == null || pair.getSecond() == null) {
@@ -972,9 +1029,10 @@ public class HBaseAdmin implements Abortable {
           compact(pair.getSecond(), pair.getFirst(), major);
         }
       } else {
+        final String tableName = tableNameString(tableNameOrRegionName, ct);
         List<Pair<HRegionInfo, HServerAddress>> pairs =
           MetaReader.getTableRegionsAndLocations(ct,
-              Bytes.toString(tableNameOrRegionName));
+              tableName);
         for (Pair<HRegionInfo, HServerAddress> pair: pairs) {
           if (pair.getFirst().isOffline()) continue;
           if (pair.getSecond() == null) continue;
@@ -1041,7 +1099,8 @@ public class HBaseAdmin implements Abortable {
    * @param regionName Region to unassign. Will clear any existing RegionPlan
    * if one found.
    * @param force If true, force unassign (Will remove region from
-   * regions-in-transition too if present).
+   * regions-in-transition too if present. If results in double assignment
+   * use hbck -fix to resolve. To be used by experts).
    * @throws MasterNotRunningException
    * @throws ZooKeeperConnectionException
    * @throws IOException
@@ -1111,7 +1170,7 @@ public class HBaseAdmin implements Abortable {
       final byte [] splitPoint) throws IOException, InterruptedException {
     CatalogTracker ct = getCatalogTracker();
     try {
-      if (isRegionName(tableNameOrRegionName)) {
+      if (isRegionName(tableNameOrRegionName, ct)) {
         // Its a possible region name.
         Pair<HRegionInfo, HServerAddress> pair =
           MetaReader.getRegion(ct, tableNameOrRegionName);
@@ -1122,9 +1181,10 @@ public class HBaseAdmin implements Abortable {
           split(pair.getSecond(), pair.getFirst(), splitPoint);
         }
       } else {
+        final String tableName = tableNameString(tableNameOrRegionName, ct);
         List<Pair<HRegionInfo, HServerAddress>> pairs =
           MetaReader.getTableRegionsAndLocations(ct,
-              Bytes.toString(tableNameOrRegionName));
+              tableName);
         for (Pair<HRegionInfo, HServerAddress> pair: pairs) {
           // May not be a server for a particular row
           if (pair.getSecond() == null) continue;
@@ -1172,17 +1232,38 @@ public class HBaseAdmin implements Abortable {
 
   /**
    * @param tableNameOrRegionName Name of a table or name of a region.
-   * @return True if <code>tableNameOrRegionName</code> is *possibly* a region
-   * name else false if a verified tablename (we call {@link #tableExists(byte[])};
-   * else we throw an exception.
-   * @throws IOException 
+   * @param ct A {@link #CatalogTracker} instance (caller of this method usually has one).
+   * @return True if <code>tableNameOrRegionName</code> is a verified region
+   * name (we call {@link #MetaReader.getRegion(CatalogTracker catalogTracker,
+   * byte [] regionName)};) else false.
+   * Throw an exception if <code>tableNameOrRegionName</code> is null.
+   * @throws IOException
    */
-  private boolean isRegionName(final byte [] tableNameOrRegionName)
+  private boolean isRegionName(final byte[] tableNameOrRegionName,
+      CatalogTracker ct)
   throws IOException {
     if (tableNameOrRegionName == null) {
       throw new IllegalArgumentException("Pass a table name or region name");
     }
-    return !tableExists(tableNameOrRegionName);
+    return (MetaReader.getRegion(ct, tableNameOrRegionName) != null);
+  }
+
+  /**
+   * Convert the table name byte array into a table name string and check if table
+   * exists or not.
+   * @param tableNameBytes Name of a table.
+   * @param ct A {@link #CatalogTracker} instance (caller of this method usually has one).
+   * @return tableName in string form.
+   * @throws IOException if a remote or network exception occurs.
+   * @throws TableNotFoundException if table does not exist.
+   */
+  private String tableNameString(final byte[] tableNameBytes, CatalogTracker ct)
+      throws IOException {
+    String tableNameString = Bytes.toString(tableNameBytes);
+    if (!MetaReader.tableExists(ct, tableNameString)) {
+      throw new TableNotFoundException(tableNameString);
+    }
+    return tableNameString;
   }
 
   /**
@@ -1255,6 +1336,13 @@ public class HBaseAdmin implements Abortable {
   throws MasterNotRunningException, ZooKeeperConnectionException {
     Configuration copyOfConf = HBaseConfiguration.create(conf);
     copyOfConf.setInt("hbase.client.retries.number", 1);
-    new HBaseAdmin(copyOfConf);
+    HBaseAdmin admin = new HBaseAdmin(copyOfConf);
+    HConnectionManager.deleteConnection(admin.getConfiguration(), false);
+  }
+
+  public void close() throws IOException {
+    if (this.connection != null) {
+      this.connection.close();
+    }
   }
 }

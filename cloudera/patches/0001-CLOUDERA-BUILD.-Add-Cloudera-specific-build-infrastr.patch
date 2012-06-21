@@ -1,7 +1,7 @@
-From 1170358c166394ae31eff8ba06aec91b80154b17 Mon Sep 17 00:00:00 2001
+From 966b77b06f61dc66e9ec016ed0bb93d727f46f6b Mon Sep 17 00:00:00 2001
 From: Todd Lipcon <todd@cloudera.com>
 Date: Tue, 14 Jun 2011 11:02:00 -0700
-Subject: [PATCH 01/50] CLOUDERA-BUILD. Add Cloudera-specific build infrastructure.
+Subject: [PATCH 001/101] CLOUDERA-BUILD. Add Cloudera-specific build infrastructure.
 
 Major changes:
 * Add scripts in cloudera/ directory used for installation from within
@@ -20,9 +20,9 @@ Major changes:
  cloudera/do-release-build |   22 ++++++++
  cloudera/hbase.1          |   73 ++++++++++++++++++++++++++
  cloudera/install_hbase.sh |  124 +++++++++++++++++++++++++++++++++++++++++++++
- pom.xml                   |   63 +++++++++++++++++++----
+ pom.xml                   |   78 ++++++++++++++++++----------
  src/assembly/all.xml      |    3 +
- 8 files changed, 290 insertions(+), 10 deletions(-)
+ 8 files changed, 288 insertions(+), 27 deletions(-)
  create mode 100644 cloudera/README.cloudera
  create mode 100755 cloudera/do-release-build
  create mode 100644 cloudera/hbase.1
@@ -309,13 +309,29 @@ index 0000000..bab39d4
 +
 +install -d -m 0755 $PREFIX/usr/bin
 diff --git a/pom.xml b/pom.xml
-index 2dd48c9..f440976 100644
+index 3dd00c9..86b0a77 100644
 --- a/pom.xml
 +++ b/pom.xml
-@@ -1,17 +1,35 @@
+@@ -1,36 +1,35 @@
  <?xml version="1.0" encoding="UTF-8"?>
--<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
-+<!--
+ <!--
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
 +   Licensed to the Apache Software Foundation (ASF) under one or more
 +   contributor license agreements.  See the NOTICE file distributed with
 +   this work for additional information regarding copyright ownership.
@@ -330,7 +346,8 @@ index 2dd48c9..f440976 100644
 +   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 +   See the License for the specific language governing permissions and
 +   limitations under the License.
-+-->
+ -->
+-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
 +<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 +         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
    <modelVersion>4.0.0</modelVersion>
@@ -341,31 +358,31 @@ index 2dd48c9..f440976 100644
 -    <version>8</version>
 +    <groupId>com.cloudera.cdh</groupId>
 +    <artifactId>cdh-root</artifactId>
-+    <version>3.0-u2-SNAPSHOT</version>
++    <version>3.0-u4-SNAPSHOT</version>
 +    <relativePath>../../../pom.xml</relativePath>
    </parent>
  
    <groupId>org.apache.hbase</groupId>
    <artifactId>hbase</artifactId>
    <packaging>jar</packaging>
--  <version>0.90.4</version>
-+  <version>0.90.4-cdh3u2-SNAPSHOT</version>
+-  <version>0.90.6</version>
++  <version>0.90.6-cdh3u4-SNAPSHOT</version>
    <name>HBase</name>
    <description>
      HBase is the &amp;lt;a href="http://hadoop.apache.org"&amp;rt;Hadoop&lt;/a&amp;rt; database. Use it when you need
-@@ -22,9 +40,8 @@
+@@ -41,9 +40,8 @@
    <url>http://hbase.apache.org</url>
  
    <scm>
--    <connection>scm:svn:http://svn.apache.org/repos/asf/hbase/tags/0.90.2RC0</connection>
--    <developerConnection>scm:svn:https://svn.apache.org/repos/asf/hbase/tags/0.90.2RC0</developerConnection>
--    <url>http://svn.apache.org/viewvc/hbase/tags/0.90.2RC0</url>
+-    <connection>scm:svn:http://svn.apache.org/repos/asf/hbase/tags/0.90.6RC0</connection>
+-    <developerConnection>scm:svn:https://svn.apache.org/repos/asf/hbase/tags/0.90.6RC0</developerConnection>
+-    <url>http://svn.apache.org/viewvc/hbase/tags/0.90.6RC0</url>
 +    <connection>scm:git:git@git.sf.cloudera.com:hbase.git</connection>
 +    <url>git@git.sf.cloudera.com:hbase.git</url>
    </scm>
  
    <issueManagement>
-@@ -135,6 +152,22 @@
+@@ -154,6 +152,22 @@
  
    <repositories>
      <repository>
@@ -388,7 +405,7 @@ index 2dd48c9..f440976 100644
        <id>temp-thrift</id>
        <name>Thrift 0.2.0</name>
        <url>http://people.apache.org/~rawson/repo/</url>
-@@ -293,6 +326,15 @@
+@@ -331,6 +345,15 @@
              <descriptor>src/assembly/all.xml</descriptor>
            </descriptors>
          </configuration>
@@ -404,7 +421,7 @@ index 2dd48c9..f440976 100644
        </plugin>
  
        <!-- Run with -Dmaven.test.skip.exec=true to build -tests.jar without running tests (this is needed for upstream projects whose tests need this jar simply for compilation)-->
-@@ -326,6 +368,7 @@
+@@ -364,6 +387,7 @@
        <plugin>
          <groupId>org.apache.maven.plugins</groupId>
          <artifactId>maven-source-plugin</artifactId>
@@ -412,7 +429,7 @@ index 2dd48c9..f440976 100644
          <executions>
            <execution>
              <id>attach-sources</id>
-@@ -452,7 +495,7 @@
+@@ -490,7 +514,7 @@
      at revision 1034499 with this hdfs-895 patch:
      https://issues.apache.org/jira/secure/attachment/12459473/hdfs-895-branch-20-append.txt
      -->
@@ -421,7 +438,7 @@ index 2dd48c9..f440976 100644
      <jasper.version>5.5.23</jasper.version>
      <jaxb-api.version>2.1</jaxb-api.version>
      <jetty.version>6.1.26</jetty.version>
-@@ -467,7 +510,7 @@
+@@ -505,7 +529,7 @@
      <slf4j.version>1.5.8</slf4j.version><!-- newer version available -->
      <stax-api.version>1.0.1</stax-api.version>
      <thrift.version>0.2.0</thrift.version><!-- newer version available -->
@@ -431,10 +448,10 @@ index 2dd48c9..f440976 100644
      <!-- For flaky tests exclusion -->
      <test.exclude />
 diff --git a/src/assembly/all.xml b/src/assembly/all.xml
-index 5ed824a..a072c8a 100644
+index cbd5fb3..28cb5e4 100644
 --- a/src/assembly/all.xml
 +++ b/src/assembly/all.xml
-@@ -31,6 +31,9 @@
+@@ -50,6 +50,9 @@
        <fileMode>755</fileMode>
      </fileSet>
      <fileSet>

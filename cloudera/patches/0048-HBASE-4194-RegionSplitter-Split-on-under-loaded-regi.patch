@@ -1,0 +1,65 @@
+From e0c2f56f1ddb35c6d9a607c86025e17aee520918 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 10 Nov 2011 09:10:38 -0800
+Subject: [PATCH 048/101] HBASE-4194  RegionSplitter: Split on under-loaded region servers first
+
+Reason: Bug
+Author: Zhihong Yu
+Ref: CDH-3791
+---
+ .../apache/hadoop/hbase/util/RegionSplitter.java   |   31 +++++++++++++++++--
+ 1 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/util/RegionSplitter.java b/src/main/java/org/apache/hadoop/hbase/util/RegionSplitter.java
+index 8a5b2c5..e42b049 100644
+--- a/src/main/java/org/apache/hadoop/hbase/util/RegionSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/util/RegionSplitter.java
+@@ -21,7 +21,11 @@ package org.apache.hadoop.hbase.util;
+ 
+ import java.io.IOException;
+ import java.math.BigInteger;
++import java.util.Collections;
++import java.util.Comparator;
+ import java.util.LinkedList;
++import java.util.List;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.TreeMap;
+ 
+@@ -395,10 +399,29 @@ public class RegionSplitter {
+       while (!daughterRegions.isEmpty()) {
+         LOG.debug(daughterRegions.size() + " RS have regions to splt.");
+ 
+-        // round-robin through the RS list
+-        for (HServerAddress rsLoc = daughterRegions.firstKey();
+-             rsLoc != null;
+-             rsLoc = daughterRegions.higherKey(rsLoc)) {
++        // Get RegionServer : region count mapping
++        final TreeMap<HServerAddress, Integer> rsSizes = Maps.newTreeMap();
++        Map<HRegionInfo, HServerAddress> regionsInfo = table.getRegionsInfo();
++        for (HServerAddress rs : regionsInfo.values()) {
++          if (rsSizes.containsKey(rs)) {
++            rsSizes.put(rs, rsSizes.get(rs) + 1);
++          } else {
++            rsSizes.put(rs, 1);
++          }
++        }
++
++        // sort the RS by the number of regions they have
++        List<HServerAddress> serversLeft = Lists.newArrayList(daughterRegions
++            .keySet());
++        Collections.sort(serversLeft, new Comparator<HServerAddress>() {
++          public int compare(HServerAddress o1, HServerAddress o2) {
++            return rsSizes.get(o1).compareTo(rsSizes.get(o2));
++          }
++        });
++
++        // round-robin through the RS list. Choose the lightest-loaded servers
++        // first to keep the master from load-balancing regions as we split.
++        for (HServerAddress rsLoc : serversLeft) {
+           Pair<byte[], byte[]> dr = null;
+ 
+           // find a region in the RS list that hasn't been moved
+-- 
+1.7.0.4
+

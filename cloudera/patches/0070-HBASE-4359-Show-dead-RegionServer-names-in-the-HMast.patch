@@ -1,0 +1,143 @@
+From 327c57703571a68281b95b57c3fbf02ff33fb1d2 Mon Sep 17 00:00:00 2001
+From: dsw <dsw@cloudera.com>
+Date: Wed, 18 Jan 2012 13:35:56 -0800
+Subject: [PATCH 070/101] HBASE-4359 Show dead RegionServer names in the HMaster info page
+
+Reason: Improvement
+Author: Harsh
+Ref: CDH-3563
+---
+ .../hbase/tmpl/master/MasterStatusTmpl.jamon       |   44 ++++++++++++++++++++
+ .../hadoop/hbase/master/MasterStatusServlet.java   |    3 +
+ .../hbase/master/TestMasterStatusServlet.java      |    7 +++
+ 3 files changed, 54 insertions(+), 0 deletions(-)
+
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+index cb9425b..86d4e65 100644
+--- a/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
++++ b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+@@ -24,6 +24,7 @@ Map<String, Integer> frags = null;
+ HServerAddress rootLocation = null;
+ HServerAddress  metaLocation = null;
+ Map<String, HServerInfo> servers = null;
++Set<String> deadServers = null;
+ boolean showAppendWarning = false;
+ int interval = 1;
+ </%args>
+@@ -106,6 +107,9 @@ org.apache.hadoop.hbase.HTableDescriptor;
+ <%if (servers != null) %>
+ <& regionServers &>
+ </%if>
++<%if (deadServers != null) %>
++<& deadRegionServers &>
++</%if>
+ 
+ <& AssignmentManagerStatusTmpl; assignmentManager=master.getAssignmentManager()&>
+ 
+@@ -205,3 +209,43 @@ org.apache.hadoop.hbase.HTableDescriptor;
+ <p>Load is requests per second and count of regions loaded</p>
+ </%if>
+ </%def>
++
++<%def deadRegionServers>
++<h2>Dead Region Servers</h2>
++<%if (deadServers != null && deadServers.size() > 0)%>
++
++<table>
++<tr><th rowspan="<% deadServers.size() + 1%>"></th><th>Address</th><th>Start Code</th></tr>
++<%java>
++   String [] deadServerNames = deadServers.toArray(new String[deadServers.size()]);
++   int infoPort = master.getConfiguration().getInt("hbase.regionserver.info.port", 60030);
++   Arrays.sort(deadServerNames);
++   for (String deadServerName: deadServerNames) {
++     String hostname;
++     Long startcode;
++     // First, try parsing names like "hbase.apache.org,9454,1327103687194"
++     String delims = ",";
++     String[] tokens = deadServerName.split(delims);
++     if (tokens.length == 3) {
++       hostname = tokens[0] + ":" + infoPort;
++       startcode = Long.parseLong(tokens[2]);
++     } else {
++       // Then, try parsing names like "localhost:23569"
++       delims = ":";
++       tokens = deadServerName.split(delims);
++       if (tokens.length == 2) {
++         hostname = tokens[0] + ":" + infoPort;
++       } else {
++         hostname = deadServerName;
++       }
++       startcode = (long)-1;
++     }
++</%java>
++<tr><td><% hostname %></td><td><% startcode %></td></tr>
++<%java>
++   }
++</%java>
++<tr><th>Total: </th><td>servers: <% deadServers.size() %></td></tr>
++</table>
++</%if>
++</%def>
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java b/src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java
+index b7c56df..3060e3f 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/MasterStatusServlet.java
+@@ -22,6 +22,7 @@ package org.apache.hadoop.hbase.master;
+ import java.io.IOException;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import javax.servlet.http.HttpServlet;
+ import javax.servlet.http.HttpServletRequest;
+@@ -59,6 +60,7 @@ public class MasterStatusServlet extends HttpServlet {
+     HServerAddress rootLocation = getRootLocationOrNull(master);
+     HServerAddress metaLocation = master.getCatalogTracker().getMetaLocation();
+     Map<String,HServerInfo> servers= master.getServerManager().getOnlineServers();
++    Set<String> deadServers = master.getServerManager().getDeadServers();
+ 
+     int interval = conf.getInt("hbase.regionserver.msginterval", 1000)/1000;
+     if (interval == 0) {
+@@ -72,6 +74,7 @@ public class MasterStatusServlet extends HttpServlet {
+       .setRootLocation(rootLocation)
+       .setMetaLocation(metaLocation)
+       .setServers(servers)
++      .setDeadServers(deadServers)
+       .setInterval(interval)
+       .render(response.getWriter(),
+           master, admin);
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+index dc1d2fa..71554b7 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+@@ -23,9 +23,11 @@ import static org.junit.Assert.*;
+ 
+ import java.io.IOException;
+ import java.io.StringWriter;
++import java.util.HashSet;
+ import java.util.HashMap;
+ import java.util.Map;
+ import java.util.NavigableMap;
++import java.util.Set;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+ 
+@@ -136,10 +138,15 @@ public class TestMasterStatusServlet {
+     servers.put("rootserver", new HServerInfo(new HServerAddress("localhost:12345"), HConstants.DEFAULT_REGIONSERVER_INFOPORT, null));
+     servers.put("metaserver", new HServerInfo(new HServerAddress("localhost:12345"), HConstants.DEFAULT_REGIONSERVER_INFOPORT, null));
+ 
++    Set<String> deadServers = new HashSet<String>();
++    deadServers.add("localhost:23569");
++    deadServers.add("hbase.apache.org,9454,1327103687194");
++
+     new MasterStatusTmpl()
+     .setRootLocation(new HServerAddress("localhost:12345"))
+     .setMetaLocation(new HServerAddress("localhost:12345"))
+       .setServers(servers)
++      .setDeadServers(deadServers)
+       .render(new StringWriter(),
+         master, admin);
+   }
+-- 
+1.7.0.4
+

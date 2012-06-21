@@ -4,14 +4,14 @@
     the local filesystem. It leads you through creating a table, inserting
     rows via the HBase <span class="command"><strong>shell</strong></span>, and then cleaning
     up and shutting down your standalone HBase instance. The below exercise
-    should take no more than ten minutes (not including download time).</p><div class="section" title="1.2.1.&nbsp;Download and unpack the latest stable release."><div class="titlepage"><div><div><h3 class="title"><a name="d0e95"></a>1.2.1.&nbsp;Download and unpack the latest stable release.</h3></div></div></div><p>Choose a download site from this list of <a class="link" href="http://www.apache.org/dyn/closer.cgi/hbase/" target="_top">Apache Download
+    should take no more than ten minutes (not including download time).</p><div class="section" title="1.2.1.&nbsp;Download and unpack the latest stable release."><div class="titlepage"><div><div><h3 class="title"><a name="d246e97"></a>1.2.1.&nbsp;Download and unpack the latest stable release.</h3></div></div></div><p>Choose a download site from this list of <a class="link" href="http://www.apache.org/dyn/closer.cgi/hbase/" target="_top">Apache Download
       Mirrors</a>. Click on suggested top link. This will take you to a
       mirror of <span class="emphasis"><em>HBase Releases</em></span>. Click on the folder named
       <code class="filename">stable</code> and then download the file that ends in
       <code class="filename">.tar.gz</code> to your local filesystem; e.g.
-      <code class="filename">hbase-0.90.4-cdh3u2.tar.gz</code>.</p><p>Decompress and untar your download and then change into the
-      unpacked directory.</p><pre class="programlisting">$ tar xfz hbase-0.90.4-cdh3u2.tar.gz
-$ cd hbase-0.90.4-cdh3u2
+      <code class="filename">hbase-0.90.6-cdh3u4.tar.gz</code>.</p><p>Decompress and untar your download and then change into the
+      unpacked directory.</p><pre class="programlisting">$ tar xfz hbase-0.90.6-cdh3u4.tar.gz
+$ cd hbase-0.90.6-cdh3u4
 </pre><p>At this point, you are ready to start HBase. But before starting
       it, you might want to edit <code class="filename">conf/hbase-site.xml</code> and
       set the directory you want HBase to write to,
@@ -83,7 +83,7 @@ cf:a        timestamp=1288380727188, value=value1
 0 row(s) in 1.0930 seconds
 hbase(main):013:0&gt; drop 'test'
 0 row(s) in 0.0770 seconds </pre><p>Exit the shell by typing exit.</p><pre class="programlisting">hbase(main):014:0&gt; exit</pre></div><div class="section" title="1.2.4.&nbsp;Stopping HBase"><div class="titlepage"><div><div><h3 class="title"><a name="stopping"></a>1.2.4.&nbsp;Stopping HBase</h3></div></div></div><p>Stop your hbase instance by running the stop script.</p><pre class="programlisting">$ ./bin/stop-hbase.sh
-stopping hbase...............</pre></div><div class="section" title="1.2.5.&nbsp;Where to go next"><div class="titlepage"><div><div><h3 class="title"><a name="d0e252"></a>1.2.5.&nbsp;Where to go next</h3></div></div></div><p>The above described standalone setup is good for testing and
+stopping hbase...............</pre></div><div class="section" title="1.2.5.&nbsp;Where to go next"><div class="titlepage"><div><div><h3 class="title"><a name="d246e254"></a>1.2.5.&nbsp;Where to go next</h3></div></div></div><p>The above described standalone setup is good for testing and
           experiments only. Next move on to <a class="xref" href="notsoquick.html" title="1.3.&nbsp;Not-so-quick Start Guide">Section&nbsp;1.3, &#8220;Not-so-quick Start Guide&#8221;</a> where we'll go into
       depth on the different HBase run modes, requirements and critical
       configurations needed setting up a distributed HBase deploy.</p></div></div><div class="navfooter"><hr><table width="100%" summary="Navigation footer"><tr><td width="40%" align="left"><a accesskey="p" href="getting_started.html">Prev</a>&nbsp;</td><td width="20%" align="center"><a accesskey="u" href="getting_started.html">Up</a></td><td width="40%" align="right">&nbsp;<a accesskey="n" href="notsoquick.html">Next</a></td></tr><tr><td width="40%" align="left" valign="top">Chapter&nbsp;1.&nbsp;Getting Started&nbsp;</td><td width="20%" align="center"><a accesskey="h" href="book.html">Home</a></td><td width="40%" align="right" valign="top">&nbsp;1.3.&nbsp;Not-so-quick Start Guide</td></tr></table></div></body></html>

@@ -205,7 +205,7 @@ public class KeyValue implements Writable, HeapSize {
   private int length = 0;
 
   // the row cached
-  private byte [] rowCache = null;
+  private volatile byte [] rowCache = null;
 
 
   /** Here be dragons **/
@@ -892,8 +892,11 @@ public class KeyValue implements Writable, HeapSize {
     if (rowCache == null) {
       int o = getRowOffset();
       short l = getRowLength();
-      rowCache = new byte[l];
-      System.arraycopy(getBuffer(), o, rowCache, 0, l);
+      // initialize and copy the data into a local variable
+      // in case multiple threads race here.
+      byte local[] = new byte[l];
+      System.arraycopy(getBuffer(), o, local, 0, l);
+      rowCache = local; // volatile assign
     }
     return rowCache;
   }
@@ -1152,7 +1155,7 @@ public class KeyValue implements Writable, HeapSize {
     int o = getFamilyOffset(rl);
     int fl = getFamilyLength(o);
     int ql = getQualifierLength(rl,fl);
-    if (Bytes.compareTo(family, 0, family.length, this.bytes, o, family.length)
+    if (Bytes.compareTo(family, 0, family.length, this.bytes, o, fl)
         != 0) {
       return false;
     }
@@ -1293,12 +1296,16 @@ public class KeyValue implements Writable, HeapSize {
     return index;
   }
 
+  /**
+   * This function is only used in Meta key comparisons so its error message 
+   * is specific for meta key errors.
+   */
   static int getRequiredDelimiterInReverse(final byte [] b,
       final int offset, final int length, final int delimiter) {
     int index = getDelimiterInReverse(b, offset, length, delimiter);
     if (index < 0) {
-      throw new IllegalArgumentException("No " + delimiter + " in <" +
-        Bytes.toString(b) + ">" + ", length=" + length + ", offset=" + offset);
+      throw new IllegalArgumentException(".META. key must have two '" + (char)delimiter + "' "
+        + "delimiters and have the following format: '<table>,<key>,<etc>'");
     }
     return index;
   }

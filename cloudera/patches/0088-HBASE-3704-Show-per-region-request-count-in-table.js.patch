@@ -1,0 +1,65 @@
+From 190b7fb313dda4238b1b803f6ef5cb5ec2e8f800 Mon Sep 17 00:00:00 2001
+From: David S. Wang <dsw@cloudera.com>
+Date: Fri, 27 Apr 2012 09:43:33 -0700
+Subject: [PATCH 088/101] HBASE-3704 Show per region request count in table.jsp
+ (partial backport to avoid pulling in incompatible dependencies)
+
+Reason: Improvement
+Author: Ted Yu
+Ref: CDH-3664
+---
+ src/main/resources/hbase-webapps/master/table.jsp |   17 ++++++++++++++++-
+ 1 files changed, 16 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/resources/hbase-webapps/master/table.jsp b/src/main/resources/hbase-webapps/master/table.jsp
+index f7edce6..0eb7cc1 100644
+--- a/src/main/resources/hbase-webapps/master/table.jsp
++++ b/src/main/resources/hbase-webapps/master/table.jsp
+@@ -18,7 +18,7 @@
+  */
+ --%>
+ <%@ page contentType="text/html;charset=UTF-8"
+-  import="java.util.Map"
++  import="java.util.HashMap"
+   import="org.apache.hadoop.io.Writable"
+   import="org.apache.hadoop.conf.Configuration"
+   import="org.apache.hadoop.hbase.client.HTable"
+@@ -155,6 +155,7 @@
+ <%  } %>
+ </table>
+ <%
++  Map<String, Integer> regDistribution = new HashMap<String, Integer>();
+   Map<HRegionInfo, HServerAddress> regions = table.getRegionsInfo();
+   if(regions != null && regions.size() > 0) { %>
+ <%=     tableHeader %>
+@@ -172,6 +173,9 @@
+         infoPort = info.getInfoPort();
+         urlRegionServer =
+             "http://" + addr.getHostname().toString() + ":" + infoPort + "/";
++        Integer i = regDistribution.get(urlRegionServer);
++        if (null == i) i = new Integer(0);
++        regDistribution.put(urlRegionServer, i+1);
+       }
+     }
+ %>
+@@ -195,6 +199,17 @@
+ </tr>
+ <% } %>
+ </table>
++<h2>Regions by Region Server</h2>
++<table><tr><th>Region Server</th><th>Region Count</th></tr>
++<%
++  for (Map.Entry<String, Integer> rdEntry : regDistribution.entrySet()) {
++%>
++<tr>
++  <td><%= rdEntry.getKey()%></td>
++  <td><%= rdEntry.getValue()%></td>
++</tr>
++<% } %>
++</table>
+ <% }
+ } catch(Exception ex) {
+   ex.printStackTrace(System.err);
+-- 
+1.7.0.4
+

@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -51,6 +52,7 @@ import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdge;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+import org.apache.hadoop.hbase.util.Pair;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -195,7 +197,9 @@ public class TestWALReplay {
     byte [] row = Bytes.toBytes(tableNameStr);
     writer.append(new KeyValue(row, family, family, row));
     writer.close();
-    region.bulkLoadHFile(f.toString(), family);
+    List <Pair<byte[],String>>  hfs= new ArrayList<Pair<byte[],String>>(1);
+    hfs.add(Pair.newPair(family, f.toString()));
+    region.bulkLoadHFiles(hfs);
     // Add an edit so something in the WAL
     region.put((new Put(row)).add(family, family, family));
     wal.sync();
@@ -354,7 +358,7 @@ public class TestWALReplay {
     }
 
     // Add a cache flush, shouldn't have any effect
-    long logSeqId = wal.startCacheFlush();
+    long logSeqId = wal.startCacheFlush(regionName);
     wal.completeCacheFlush(regionName, tableName, logSeqId, hri.isMetaRegion());
 
     // Add an edit to another family, should be skipped.

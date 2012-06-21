@@ -1,0 +1,351 @@
+From 5bf60c89cac5d6f80d01359bd734de41a1e60e94 Mon Sep 17 00:00:00 2001
+From: Jonathan Hsieh <jon@cloudera.com>
+Date: Fri, 19 Aug 2011 15:52:03 -0700
+Subject: [PATCH 018/101] HBASE-3837 Expose regionsInTransition on master UI
+
+Regions in transition displayed to help debug situations where regions get stuck in transition.  The original
+version uses ServerName which is a class in 0.92 but not in 0.90.x.  We instead replace this field with a String
+version of the RegionServer name
+
+Reason: Supportability.  Aids in debugging of HBase master.
+Author: Todd Lipcon
+Ref: CDH-3353
+---
+ .../tmpl/master/AssignmentManagerStatusTmpl.jamon  |   42 ++++++++++++++
+ .../hbase/tmpl/master/MasterStatusTmpl.jamon       |    3 +
+ .../hadoop/hbase/master/AssignmentManager.java     |   58 +++++++++++++-------
+ .../hadoop/hbase/master/TestMasterFailover.java    |    4 +-
+ .../hbase/master/TestMasterStatusServlet.java      |   20 +++++++
+ 5 files changed, 106 insertions(+), 21 deletions(-)
+ create mode 100644 src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
+
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
+new file mode 100644
+index 0000000..f527904
+--- /dev/null
++++ b/src/main/jamon/org/apache/hbase/tmpl/master/AssignmentManagerStatusTmpl.jamon
+@@ -0,0 +1,42 @@
++<%doc>
++Copyright 2011 The Apache Software Foundation
++
++Licensed to the Apache Software Foundation (ASF) under one
++or more contributor license agreements.  See the NOTICE file
++distributed with this work for additional information
++regarding copyright ownership.  The ASF licenses this file
++to you under the Apache License, Version 2.0 (the
++"License"); you may not use this file except in compliance
++with the License.  You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++</%doc>
++<%import>
++org.apache.hadoop.hbase.master.AssignmentManager;
++org.apache.hadoop.hbase.master.AssignmentManager.RegionState;
++java.util.Map;
++</%import>
++<%args>
++AssignmentManager assignmentManager;
++</%args>
++<%java>
++Map<String, RegionState> rit = assignmentManager.getRegionsInTransition();
++</%java>
++
++<h2>Regions in Transition</h2>
++<%if rit.isEmpty() %>
++No regions in transition.
++<%else>
++	<table>
++		<tr><th>Region</th><th>State</th></tr>
++		<%for Map.Entry<String, RegionState> entry : rit.entrySet() %>
++		<tr><td><% entry.getKey() %></td><td><% entry.getValue() %></td>
++		</%for>
++	</table>
++</%if>
+\ No newline at end of file
+diff --git a/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+index 9e76deb..6877976 100644
+--- a/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
++++ b/src/main/jamon/org/apache/hbase/tmpl/master/MasterStatusTmpl.jamon
+@@ -101,6 +101,9 @@ org.apache.hadoop.hbase.HTableDescriptor;
+ <%if (servers != null) %>
+ <& regionServers &>
+ </%if>
++
++<& AssignmentManagerStatusTmpl; assignmentManager=master.getAssignmentManager()&>
++
+ </body>
+ </html>
+ 
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index 0bc6203..a08065e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -346,7 +346,8 @@ public class AssignmentManager extends ZooKeeperListener {
+           // Just insert region into RIT.
+           // If this never updates the timeout will trigger new assignment
+           regionsInTransition.put(encodedRegionName, new RegionState(
+-            regionInfo, RegionState.State.CLOSING, data.getStamp()));
++            regionInfo, RegionState.State.CLOSING, data.getStamp(),
++            data.getServerName()));
+         }
+         break;
+ 
+@@ -368,14 +369,16 @@ public class AssignmentManager extends ZooKeeperListener {
+         // Just insert region into RIT
+         // If this never updates the timeout will trigger new assignment
+         regionsInTransition.put(encodedRegionName, new RegionState(
+-            regionInfo, RegionState.State.OPENING, data.getStamp()));
++            regionInfo, RegionState.State.OPENING,
++            data.getStamp(), data.getServerName()));
+         break;
+ 
+       case RS_ZK_REGION_OPENED:
+         // Region is opened, insert into RIT and handle it
+-        regionsInTransition.put(encodedRegionName, new RegionState(
+-            regionInfo, RegionState.State.OPEN, data.getStamp()));
+         String sn = data.getServerName();
++        regionsInTransition.put(encodedRegionName, new RegionState(
++            regionInfo, RegionState.State.OPEN, data.getStamp(), sn));
++
+         // hsi could be null if this server is no longer online.  If
+         // that the case, just let this RIT timeout; it'll be assigned
+         // to new server then.
+@@ -434,7 +437,7 @@ public class AssignmentManager extends ZooKeeperListener {
+   private void addToRITandCallClose(final HRegionInfo hri,
+       final RegionState.State state, final RegionTransitionData oldData) {
+     this.regionsInTransition.put(hri.getEncodedName(),
+-      new RegionState(hri, state, oldData.getStamp()));
++      new RegionState(hri, state, oldData.getStamp(), oldData.getServerName()));
+     new ClosedRegionHandler(this.master, this, hri).process();
+   }
+ 
+@@ -512,7 +515,8 @@ public class AssignmentManager extends ZooKeeperListener {
+             return;
+           }
+           // Transition to CLOSING (or update stamp if already CLOSING)
+-          regionState.update(RegionState.State.CLOSING, data.getStamp());
++          regionState.update(RegionState.State.CLOSING,
++              data.getStamp(), data.getServerName());
+           break;
+ 
+         case RS_ZK_REGION_CLOSED:
+@@ -528,7 +532,8 @@ public class AssignmentManager extends ZooKeeperListener {
+           // Handle CLOSED by assigning elsewhere or stopping if a disable
+           // If we got here all is good.  Need to update RegionState -- else
+           // what follows will fail because not in expected state.
+-          regionState.update(RegionState.State.CLOSED, data.getStamp());
++          regionState.update(RegionState.State.CLOSED,
++              data.getStamp(), data.getServerName());
+           this.executorService.submit(new ClosedRegionHandler(master,
+             this, regionState.getRegion()));
+           break;
+@@ -546,7 +551,8 @@ public class AssignmentManager extends ZooKeeperListener {
+             return;
+           }
+           // Transition to OPENING (or update stamp if already OPENING)
+-          regionState.update(RegionState.State.OPENING, data.getStamp());
++          regionState.update(RegionState.State.OPENING,
++              data.getStamp(), data.getServerName());
+           break;
+         case RS_ZK_REGION_FAILED_OPEN:
+         if (regionState == null
+@@ -575,7 +581,8 @@ public class AssignmentManager extends ZooKeeperListener {
+             return;
+           }
+           // Handle OPENED by removing from transition and deleted zk node
+-          regionState.update(RegionState.State.OPEN, data.getStamp());
++          regionState.update(RegionState.State.OPEN,
++              data.getStamp(), data.getServerName());
+           this.executorService.submit(
+             new OpenedRegionHandler(master, this, regionState.getRegion(),
+               this.serverManager.getServerInfo(
+@@ -792,7 +799,7 @@ public class AssignmentManager extends ZooKeeperListener {
+       }
+       if (rs == null) continue;
+       synchronized (rs) {
+-        rs.update(rs.getState());
++        rs.updateTimestampToNow();
+       }
+     }
+   }
+@@ -1029,7 +1036,7 @@ public class AssignmentManager extends ZooKeeperListener {
+       // Async exists to set a watcher so we'll get triggered when
+       // unassigned node changes.
+       this.zkw.getZooKeeper().exists(path, this.zkw,
+-        new ExistsUnassignedAsyncCallback(this.counter), ctx);
++        new ExistsUnassignedAsyncCallback(this.counter, destination.getServerName()), ctx);
+     }
+   }
+ 
+@@ -1040,9 +1047,11 @@ public class AssignmentManager extends ZooKeeperListener {
+   static class ExistsUnassignedAsyncCallback implements AsyncCallback.StatCallback {
+     private final Log LOG = LogFactory.getLog(ExistsUnassignedAsyncCallback.class);
+     private final AtomicInteger counter;
++    private String destination;
+ 
+-    ExistsUnassignedAsyncCallback(final AtomicInteger counter) {
++    ExistsUnassignedAsyncCallback(final AtomicInteger counter, String destination) {
+       this.counter = counter;
++      this.destination = destination;
+     }
+ 
+     @Override
+@@ -1060,7 +1069,7 @@ public class AssignmentManager extends ZooKeeperListener {
+       // yet sent out the actual open but putting this state change after the
+       // call to open risks our writing PENDING_OPEN after state has been moved
+       // to OPENING by the regionserver.
+-      state.update(RegionState.State.PENDING_OPEN);
++      state.update(RegionState.State.PENDING_OPEN, System.currentTimeMillis(), destination);
+       this.counter.addAndGet(1);
+     }
+   }
+@@ -1120,7 +1129,8 @@ public class AssignmentManager extends ZooKeeperListener {
+           "Assigning region " + state.getRegion().getRegionNameAsString() +
+           " to " + plan.getDestination().getServerName());
+         // Transition RegionState to PENDING_OPEN
+-        state.update(RegionState.State.PENDING_OPEN);
++        state.update(RegionState.State.PENDING_OPEN, System.currentTimeMillis(),
++            plan.getDestination().getServerName());
+         // Send OPEN RPC. This can fail if the server on other end is is not up.
+         serverManager.sendRegionOpen(plan.getDestination(), state.getRegion());
+         break;
+@@ -2315,27 +2325,35 @@ public class AssignmentManager extends ZooKeeperListener {
+ 
+     private State state;
+     private long stamp;
++    private String serverName;
+ 
+     public RegionState() {}
+ 
+     RegionState(HRegionInfo region, State state) {
+-      this(region, state, System.currentTimeMillis());
++      this(region, state, System.currentTimeMillis(), null);
+     }
+ 
+-    RegionState(HRegionInfo region, State state, long stamp) {
++    RegionState(HRegionInfo region, State state, long stamp, String serverName) {
+       this.region = region;
+       this.state = state;
+       this.stamp = stamp;
++      this.serverName = serverName;
+     }
+ 
+-    public void update(State state, long stamp) {
++    public void update(State state, long stamp, String serverName) {
+       this.state = state;
+       this.stamp = stamp;
++      this.serverName = serverName;
+     }
+ 
+     public void update(State state) {
+       this.state = state;
+       this.stamp = System.currentTimeMillis();
++      this.serverName = null;
++    }
++
++    public void updateTimestampToNow() {
++      this.stamp = System.currentTimeMillis();
+     }
+ 
+     public State getState() {
+@@ -2380,8 +2398,10 @@ public class AssignmentManager extends ZooKeeperListener {
+ 
+     @Override
+     public String toString() {
+-      return region.getRegionNameAsString() + " state=" + state +
+-        ", ts=" + stamp;
++      return region.getRegionNameAsString()
++        + " state=" + state
++        + ", ts=" + stamp
++        + ", server=" + serverName;
+     }
+ 
+     @Override
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java b/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java
+index 2407b6b..abc5cb3 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMasterFailover.java
+@@ -888,13 +888,13 @@ public class TestMasterFailover {
+     region = enabledRegions.remove(0);
+     regionsThatShouldBeOnline.add(region);
+     master.assignmentManager.regionsInTransition.put(region.getEncodedName(),
+-        new RegionState(region, RegionState.State.PENDING_OPEN, 0));
++        new RegionState(region, RegionState.State.PENDING_OPEN, 0, null));
+     ZKAssign.createNodeOffline(zkw, region, master.getServerName());
+     // PENDING_OPEN and disabled
+     region = disabledRegions.remove(0);
+     regionsThatShouldBeOffline.add(region);
+     master.assignmentManager.regionsInTransition.put(region.getEncodedName(),
+-        new RegionState(region, RegionState.State.PENDING_OPEN, 0));
++        new RegionState(region, RegionState.State.PENDING_OPEN, 0,null));
+     ZKAssign.createNodeOffline(zkw, region, master.getServerName());
+     // This test is bad.  It puts up a PENDING_CLOSE but doesn't say what
+     // server we were PENDING_CLOSE against -- i.e. an entry in
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+index 7b4b07d..7c2421d 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestMasterStatusServlet.java
+@@ -23,20 +23,26 @@ import java.io.IOException;
+ import java.io.StringWriter;
+ import java.util.HashMap;
+ import java.util.Map;
++import java.util.NavigableMap;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+ import org.apache.hadoop.hbase.HConstants;
++import org.apache.hadoop.hbase.HRegionInfo;
+ import org.apache.hadoop.hbase.HServerAddress;
+ import org.apache.hadoop.hbase.HServerInfo;
+ import org.apache.hadoop.hbase.HTableDescriptor;
+ import org.apache.hadoop.hbase.client.HBaseAdmin;
++import org.apache.hadoop.hbase.master.AssignmentManager.RegionState;
++import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+ import org.apache.hbase.tmpl.master.MasterStatusTmpl;
+ import org.junit.Before;
+ import org.junit.Test;
+ import org.mockito.Mockito;
+ 
++import com.google.common.collect.Maps;
++
+ /**
+  * Tests for the master status page and its template.
+  */
+@@ -46,6 +52,11 @@ public class TestMasterStatusServlet {
+   private Configuration conf;
+   private HBaseAdmin admin;
+ 
++  static final HTableDescriptor FAKE_TABLE =
++    new HTableDescriptor("mytable");
++  static final HRegionInfo FAKE_REGION =
++    new HRegionInfo(FAKE_TABLE, Bytes.toBytes("a"), Bytes.toBytes("b"));
++  
+   @Before
+   public void setupBasicMocks() {
+     conf = HBaseConfiguration.create();
+@@ -60,6 +71,15 @@ public class TestMasterStatusServlet {
+     Mockito.doReturn(1.0).when(serverManager).getAverageLoad();
+     Mockito.doReturn(serverManager).when(master).getServerManager();
+ 
++    // Fake AssignmentManager and RIT
++    AssignmentManager am = Mockito.mock(AssignmentManager.class);
++    NavigableMap<String, RegionState> regionsInTransition =
++      Maps.newTreeMap();
++    regionsInTransition.put("r1",
++        new RegionState(FAKE_REGION, RegionState.State.CLOSING, 12345L, "localhost"));
++    Mockito.doReturn(regionsInTransition).when(am).getRegionsInTransition();
++    Mockito.doReturn(am).when(master).getAssignmentManager();
++    
+     // Fake ZKW
+     ZooKeeperWatcher zkw = Mockito.mock(ZooKeeperWatcher.class);
+     Mockito.doReturn("fakequorum").when(zkw).getQuorum();
+-- 
+1.7.0.4
+

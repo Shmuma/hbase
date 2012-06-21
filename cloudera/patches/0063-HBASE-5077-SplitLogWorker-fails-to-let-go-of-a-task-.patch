@@ -1,0 +1,35 @@
+From 9efdffbb217ce15df7aa78e6fb2828da922de970 Mon Sep 17 00:00:00 2001
+From: Michael Stack <stack@apache.org>
+Date: Wed, 21 Dec 2011 04:05:12 +0000
+Subject: [PATCH 063/101] HBASE-5077 SplitLogWorker fails to let go of a task, kills the RS
+
+Reason: Bug
+Author: Michael Stack
+Ref: CDH-4008
+---
+ .../hbase/regionserver/wal/HLogSplitter.java       |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+index 9ca2cc8..e7d0d30 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLogSplitter.java
+@@ -455,12 +455,12 @@ public class HLogSplitter {
+       }
+       String msg = "Processed " + editsCount + " edits across " + n + " regions" +
+         " threw away edits for " + (logWriters.size() - n) + " regions" +
+-        "; log file=" + logPath +
+-        ", corrupted=" + isCorrupted;
++        "; log file=" + logPath + " is corrupted = " + isCorrupted +
++        " progress failed = " + progress_failed);
+       LOG.info(msg);
+       status.markComplete(msg);
+     }
+-    return true;
++    return !progress_failed;
+   }
+ 
+   /**
+-- 
+1.7.0.4
+

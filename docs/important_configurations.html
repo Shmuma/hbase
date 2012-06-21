@@ -54,7 +54,7 @@
           machine types that people might want to test with. If you have larger
           machines -- HBase has 8G and larger heap -- you might the following configuration options helpful.
           TODO.
-        </p></div><div class="section" title="3.4.2.4.&nbsp;LZO compression"><div class="titlepage"><div><div><h4 class="title"><a name="lzo"></a>3.4.2.4.&nbsp;LZO compression<a class="indexterm" name="d0e1959"></a></h4></div></div></div><p>You should consider enabling LZO compression.  Its
+        </p></div><div class="section" title="3.4.2.4.&nbsp;LZO compression"><div class="titlepage"><div><div><h4 class="title"><a name="lzo"></a>3.4.2.4.&nbsp;LZO compression<a class="indexterm" name="d246e1996"></a></h4></div></div></div><p>You should consider enabling LZO compression.  Its
       near-frictionless and in most all cases boosts performance.
       </p><p>Unfortunately, HBase cannot ship with LZO because of
       the licensing issues; HBase is Apache-licensed, LZO is GPL.
@@ -66,7 +66,7 @@
       add a machine to the cluster only they'll have forgotten to do the LZO
       fixup on the new machine.  In versions since HBase 0.90.0, we should
       fail in a way that makes it plain what the problem is, but maybe not.
-      Remember you read this paragraph<sup>[<a name="d0e1971" href="#ftn.d0e1971" class="footnote">11</a>]</sup>.
+      Remember you read this paragraph<sup>[<a name="d246e2008" href="#ftn.d246e2008" class="footnote">11</a>]</sup>.
       </p><p>See also <a class="xref" href="compression.html" title="Appendix&nbsp;B.&nbsp;Compression In HBase">Appendix&nbsp;B, <i>Compression In HBase</i></a>
       at the tail of this book.</p></div><div class="section" title="3.4.2.5.&nbsp;Bigger Regions"><div class="titlepage"><div><div><h4 class="title"><a name="bigger.regions"></a>3.4.2.5.&nbsp;Bigger Regions</h4></div></div></div><p>
       Consider going to larger regions to cut down on the total number of regions
@@ -78,7 +78,7 @@
       <code class="code">hbase.hregion.max.filesize</code> in your <code class="filename">hbase-site.xml</code>.
       </p></div><div class="section" title="3.4.2.6.&nbsp;Managed Splitting"><div class="titlepage"><div><div><h4 class="title"><a name="disable.splitting"></a>3.4.2.6.&nbsp;Managed Splitting</h4></div></div></div><p>
       Rather than let HBase auto-split your Regions, manage the splitting manually
-      <sup>[<a name="d0e1997" href="#ftn.d0e1997" class="footnote">12</a>]</sup>.
+      <sup>[<a name="d246e2034" href="#ftn.d246e2034" class="footnote">12</a>]</sup>.
  With growing amounts of data, splits will continually be needed. Since
  you always know exactly what regions you have, long-term debugging and
  profiling is much easier with manual splits. It is hard to trace the logs to
@@ -115,13 +115,13 @@ interval by configuring <code class="varname">HConstants.MAJOR_COMPACTION_PERIOD
 grows too large, use the (post-0.90.0 HBase) <code class="classname">org.apache.hadoop.hbase.util.RegionSplitter</code>
 script to perform a network IO safe rolling split
 of all regions.
-</p></div></div><div class="footnotes"><br><hr width="100" align="left"><div class="footnote"><p><sup>[<a name="ftn.d0e1971" href="#d0e1971" class="para">11</a>] </sup>See
+</p></div></div><div class="footnotes"><br><hr width="100" align="left"><div class="footnote"><p><sup>[<a name="ftn.d246e2008" href="#d246e2008" class="para">11</a>] </sup>See
               <a class="xref" href="hbase.regionserver.codecs.html" title="B.2.&nbsp; hbase.regionserver.codecs">Section&nbsp;B.2, &#8220;
     <code class="varname">
     hbase.regionserver.codecs
     </code>
     &#8221;</a>
-      for a feature to help protect against failed LZO install</p></div><div class="footnote"><p><sup>[<a name="ftn.d0e1997" href="#d0e1997" class="para">12</a>] </sup>What follows is taken from the javadoc at the head of
+      for a feature to help protect against failed LZO install</p></div><div class="footnote"><p><sup>[<a name="ftn.d246e2034" href="#d246e2034" class="para">12</a>] </sup>What follows is taken from the javadoc at the head of
       the <code class="classname">org.apache.hadoop.hbase.util.RegionSplitter</code> tool
       added to HBase post-0.90.0 release.
       </p></div></div></div><div class="navfooter"><hr><table width="100%" summary="Navigation footer"><tr><td width="40%" align="left"><a accesskey="p" href="log4j.html">Prev</a>&nbsp;</td><td width="20%" align="center"><a accesskey="u" href="configuration.html">Up</a></td><td width="40%" align="right">&nbsp;<a accesskey="n" href="client_dependencies.html">Next</a></td></tr><tr><td width="40%" align="left" valign="top">3.3.&nbsp;<code class="filename">log4j.properties</code>&nbsp;</td><td width="20%" align="center"><a accesskey="h" href="book.html">Home</a></td><td width="40%" align="right" valign="top">&nbsp;3.5.&nbsp;Client configuration and dependencies connecting to an HBase cluster</td></tr></table></div></body></html>

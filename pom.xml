@@ -22,14 +22,14 @@
   <parent>
     <groupId>com.cloudera.cdh</groupId>
     <artifactId>cdh-root</artifactId>
-    <version>3.0-u2</version>
+    <version>3.0-u4</version>
     <relativePath>../../../pom.xml</relativePath>
   </parent>
 
   <groupId>org.apache.hbase</groupId>
   <artifactId>hbase</artifactId>
   <packaging>jar</packaging>
-  <version>0.90.4-cdh3u2</version>
+  <version>0.90.6-cdh3u4</version>
   <name>HBase</name>
   <description>
     HBase is the &amp;lt;a href="http://hadoop.apache.org"&amp;rt;Hadoop&lt;/a&amp;rt; database. Use it when you need
@@ -237,11 +237,30 @@
             </filesets>
           </configuration>
         </plugin>
-        <plugin>
-          <groupId>org.apache.rat</groupId>
-          <artifactId>apache-rat-plugin</artifactId>
-          <version>0.6</version>
+        <plugin> <!-- in plugin management section so excludes can be inherited -->
+        <groupId>org.apache.rat</groupId>
+          <artifactId>apache-rat-plugin</artifactId>	  
+          <version>0.8</version>
+          <configuration>
+            <excludes>
+              <exclude>**/.*</exclude>
+              <exclude>**/.git/**</exclude>
+              <exclude>**/target/**</exclude>
+              <exclude>**/CHANGES.txt</exclude>
+              <exclude>**/generated/**</exclude>
+              <exclude>**/conf/*</exclude>
+              <exclude>**/*.avpr</exclude>
+              <exclude>**/*.svg</exclude> <!-- vector graphics --> 
+              <exclude>**/*.vm</exclude> <!-- apache doxia generated -->
+              <exclude>**/control</exclude>
+              <exclude>**/conffile</exclude>
+              <exclude>docs/*</exclude> <!-- auto-gen docs -->
+              <!--It don't like freebsd license-->
+              <exclude>**/src/site/resources/css/freebsd_docbook.css</exclude>
+            </excludes>
+          </configuration>
         </plugin>
+
         <plugin>
           <groupId>org.apache.avro</groupId>
           <artifactId>avro-maven-plugin</artifactId>
@@ -932,6 +951,26 @@
 
   -->
   <profiles>
+    <!-- this profile should be activated for release builds -->
+    <profile>
+      <id>release</id>
+      <build>
+       <plugins>
+          <plugin>
+            <groupId>org.apache.rat</groupId>
+            <artifactId>apache-rat-plugin</artifactId>
+            <executions>
+              <execution>
+                <phase>package</phase>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
     <profile>
       <id>os.linux</id>
       <activation>
@@ -1004,7 +1043,7 @@
       </build>
     </profile>
   </profiles>
- 
+
   <!-- See http://jira.codehaus.org/browse/MSITE-443 why the settings need to be here and not in pluginManagement. -->
   <reporting>
     <plugins>
@@ -1134,7 +1173,7 @@
       <plugin>
         <groupId>org.apache.rat</groupId>
         <artifactId>apache-rat-plugin</artifactId>
-        <version>0.6</version>
+        <version>0.8</version>
       </plugin>
     </plugins>
   </reporting>

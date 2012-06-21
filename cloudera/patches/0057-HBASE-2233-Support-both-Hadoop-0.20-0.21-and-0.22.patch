@@ -1,0 +1,140 @@
+From eeaf9486bf1c6608554bbe650ec9a8710ac9e640 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 21 Mar 2012 14:25:04 -0700
+Subject: [PATCH 057/101] HBASE-2233 Support both Hadoop 0.20, 0.21, and 0.22
+
+NOTE: This is only a partial backport that takes parts dealing with the HLog to prevent data loss in
+HBase.
+
+Reason: Bug
+Author: Michael Stack
+Ref: CDH-3816
+---
+ .../apache/hadoop/hbase/regionserver/wal/HLog.java |   51 ++++++++++++-------
+ 1 files changed, 32 insertions(+), 19 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+index ed91996..de44e96 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/wal/HLog.java
+@@ -49,6 +49,7 @@ import java.util.regex.Pattern;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+@@ -143,17 +144,13 @@ public class HLog implements Syncable {
+     HLog.logReaderClass = null;
+   }
+ 
+-  private OutputStream hdfs_out;     // OutputStream associated with the current SequenceFile.writer
+-  
+   // Minimum tolerable replicas, if the actual value is lower than it, 
+   // rollWriter will be triggered
+   private int minTolerableReplication; 
++  private FSDataOutputStream hdfs_out;     // OutputStream associated with the current SequenceFile.writer
+   private Method getNumCurrentReplicas; // refers to DFSOutputStream.getNumCurrentReplicas
+   final static Object [] NO_ARGS = new Object []{};
+ 
+-  // used to indirectly tell syncFs to force the sync
+-  private boolean forceSync = false;
+-
+   public interface Reader {
+     void init(FileSystem fs, Path path, Configuration c) throws IOException;
+     void close() throws IOException;
+@@ -403,34 +400,44 @@ public class HLog implements Syncable {
+     rollWriter();
+ 
+     // handle the reflection necessary to call getNumCurrentReplicas()
+-    this.getNumCurrentReplicas = null;
++    this.getNumCurrentReplicas = getGetNumCurrentReplicas(this.hdfs_out);
++
++    logSyncerThread = new LogSyncer(this.optionalFlushInterval);
++    Threads.setDaemonThreadRunning(logSyncerThread,
++        Thread.currentThread().getName() + ".logSyncer");
++  }
++
++  /**
++   * Find the 'getNumCurrentReplicas' on the passed <code>os</code> stream.
++   * @return Method or null.
++   */
++  private Method getGetNumCurrentReplicas(final FSDataOutputStream os) {
++    Method m = null;
+     Exception exception = null;
+-    if (this.hdfs_out != null) {
++    if (os != null) {
+       try {
+-        this.getNumCurrentReplicas = this.hdfs_out.getClass().
++        m = os.getWrappedStream().getClass().
+           getMethod("getNumCurrentReplicas", new Class<?> []{});
+-        this.getNumCurrentReplicas.setAccessible(true);
++        m.setAccessible(true);
+       } catch (NoSuchMethodException e) {
+         // Thrown if getNumCurrentReplicas() function isn't available
+         exception = e;
+       } catch (SecurityException e) {
+         // Thrown if we can't get access to getNumCurrentReplicas()
+         exception = e;
+-        this.getNumCurrentReplicas = null; // could happen on setAccessible()
++        m = null; // could happen on setAccessible()
+       }
+     }
+-    if (this.getNumCurrentReplicas != null) {
++    if (m != null) {
+       LOG.info("Using getNumCurrentReplicas--HDFS-826");
+     } else {
+       LOG.info("getNumCurrentReplicas--HDFS-826 not available; hdfs_out=" +
+-        this.hdfs_out + ", exception=" + exception.getMessage());
++        os + ", exception=" + exception.getMessage());
+     }
+-
+-    logSyncerThread = new LogSyncer(this.optionalFlushInterval);
+-    Threads.setDaemonThreadRunning(logSyncerThread,
+-        Thread.currentThread().getName() + ".logSyncer");
++    return m;
+   }
+ 
++  
+   public void registerWALActionsListener (final WALObserver listener) {
+     this.listeners.add(listener);
+   }
+@@ -470,9 +477,15 @@ public class HLog implements Syncable {
+     return logSeqNum.get();
+   }
+ 
++  /**
++   * Method used internal to this class and for tests only.
++   * @return The wrapped stream our writer is using; its not the
++   * writer's 'out' FSDatoOutputStream but the stream that this 'out' wraps
++   * (In hdfs its an instance of DFSDataOutputStream).
++   */
+   // usage: see TestLogRolling.java
+   OutputStream getOutputStream() {
+-    return this.hdfs_out;
++    return this.hdfs_out.getWrappedStream();
+   }
+ 
+   /**
+@@ -547,7 +560,7 @@ public class HLog implements Syncable {
+       // Can we get at the dfsclient outputstream?  If an instance of
+       // SFLW, it'll have done the necessary reflection to get at the
+       // protected field name.
+-      OutputStream nextHdfsOut = null;
++      FSDataOutputStream nextHdfsOut = null;
+       if (nextWriter instanceof SequenceFileLogWriter) {
+         nextHdfsOut =
+           ((SequenceFileLogWriter)nextWriter).getWriterFSDataOutputStream();
+@@ -1172,7 +1185,7 @@ public class HLog implements Syncable {
+    */
+   int getLogReplication() throws IllegalArgumentException, IllegalAccessException, InvocationTargetException {
+     if(this.getNumCurrentReplicas != null && this.hdfs_out != null) {
+-      Object repl = this.getNumCurrentReplicas.invoke(this.hdfs_out, NO_ARGS);
++      Object repl = this.getNumCurrentReplicas.invoke(getOutputStream(), NO_ARGS);
+       if (repl instanceof Integer) {
+         return ((Integer)repl).intValue();
+       }
+-- 
+1.7.0.4
+

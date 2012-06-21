@@ -1,0 +1,462 @@
+From 3bdb5c192ede569acd8dc007715348c7c326e845 Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Thu, 10 Nov 2011 01:31:43 -0800
+Subject: [PATCH 038/101] HBASE-3806 distributed log splitting double escapes task names
+
+Reason: Bug
+Author: Prakash Khemani
+Ref: CDH-3791
+---
+ .../hadoop/hbase/master/AssignmentManager.java     |    1 -
+ .../hadoop/hbase/master/SplitLogManager.java       |   29 +++++++++++-----
+ .../hadoop/hbase/regionserver/SplitLogWorker.java  |   24 +++++++++-----
+ .../apache/hadoop/hbase/zookeeper/ZKSplitLog.java  |    5 ++-
+ .../hadoop/hbase/master/TestSplitLogManager.java   |   32 ++++++++++---------
+ .../hbase/regionserver/TestSplitLogWorker.java     |   34 ++++++++++----------
+ 6 files changed, 72 insertions(+), 53 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+index 089e2b3..d1603c9 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/AssignmentManager.java
+@@ -1172,7 +1172,6 @@ public class AssignmentManager extends ZooKeeperListener {
+    */
+   boolean setOfflineInZooKeeper(final RegionState state) {
+     if (!state.isClosed() && !state.isOffline()) {
+-        new RuntimeException("Unexpected state trying to OFFLINE; " + state);
+       this.master.abort("Unexpected state trying to OFFLINE; " + state,
+         new IllegalStateException());
+       return false;
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+index 38fab03..04c4780 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/SplitLogManager.java
+@@ -231,7 +231,7 @@ public class SplitLogManager extends ZooKeeperListener {
+ 
+   boolean installTask(String taskname, TaskBatch batch) {
+     tot_mgr_log_split_start.incrementAndGet();
+-    String path = ZKSplitLog.getNodeName(watcher, taskname);
++    String path = ZKSplitLog.getEncodedNodeName(watcher, taskname);
+     Task oldtask = createTaskIfAbsent(path, batch);
+     if (oldtask == null) {
+       // publish the task in zk
+@@ -607,11 +607,19 @@ public class SplitLogManager extends ZooKeeperListener {
+           " " + StringUtils.stringifyException(e));
+       return;
+     }
+-    LOG.info("found " + orphans.size() + " orphan tasks");
++    int rescan_nodes = 0;
+     for (String path : orphans) {
+-      LOG.info("found orphan task " + path);
+-      getDataSetWatch(ZKSplitLog.getNodeName(watcher, path), zkretries);
++      String nodepath = ZKUtil.joinZNode(watcher.splitLogZNode, path);
++      if (ZKSplitLog.isRescanNode(watcher, nodepath)) {
++        rescan_nodes++;
++        LOG.debug("found orphan rescan node " + path);
++      } else {
++        LOG.info("found orphan task " + path);
++      }
++      getDataSetWatch(nodepath, zkretries);
+     }
++    LOG.info("found " + (orphans.size() - rescan_nodes) + " orphan tasks and " +
++        rescan_nodes + " rescan nodes");
+   }
+ 
+   /**
+@@ -759,9 +767,9 @@ public class SplitLogManager extends ZooKeeperListener {
+           LOG.debug("found pre-existing znode " + path);
+           tot_mgr_node_already_exists.incrementAndGet();
+         } else {
+-          LOG.warn("create rc =" + KeeperException.Code.get(rc) + " for " +
+-              path);
+           Long retry_count = (Long)ctx;
++          LOG.warn("create rc =" + KeeperException.Code.get(rc) + " for " +
++              path + " retry=" + retry_count);
+           if (retry_count == 0) {
+             tot_mgr_node_create_err.incrementAndGet();
+             createNodeFailure(path);
+@@ -788,8 +796,9 @@ public class SplitLogManager extends ZooKeeperListener {
+         Stat stat) {
+       tot_mgr_get_data_result.incrementAndGet();
+       if (rc != 0) {
+-        LOG.warn("getdata rc = " + KeeperException.Code.get(rc) + " "+ path);
+         Long retry_count = (Long) ctx;
++        LOG.warn("getdata rc = " + KeeperException.Code.get(rc) + " " +
++            path + " retry=" + retry_count);
+         if (retry_count == 0) {
+           tot_mgr_get_data_err.incrementAndGet();
+           getDataSetWatchFailure(path);
+@@ -817,8 +826,9 @@ public class SplitLogManager extends ZooKeeperListener {
+       if (rc != 0) {
+         if (rc != KeeperException.Code.NONODE.intValue()) {
+           tot_mgr_node_delete_err.incrementAndGet();
+-          LOG.warn("delete rc=" + KeeperException.Code.get(rc) + " for " + path);
+           Long retry_count = (Long) ctx;
++          LOG.warn("delete rc=" + KeeperException.Code.get(rc) + " for " +
++              path + " retry=" + retry_count);
+           if (retry_count == 0) {
+             LOG.warn("delete failed " + path);
+             deleteNodeFailure(path);
+@@ -851,8 +861,9 @@ public class SplitLogManager extends ZooKeeperListener {
+     @Override
+     public void processResult(int rc, String path, Object ctx, String name) {
+       if (rc != 0) {
+-        LOG.warn("rc =" + KeeperException.Code.get(rc) + " for "+ path);
+         Long retry_count = (Long)ctx;
++        LOG.warn("rc=" + KeeperException.Code.get(rc) + " for "+ path +
++            " retry=" + retry_count);
+         if (retry_count == 0) {
+           createRescanFailure();
+         } else {
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java b/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java
+index 09984ed..fe807f3 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/SplitLogWorker.java
+@@ -241,7 +241,7 @@ public class SplitLogWorker extends ZooKeeperListener implements Runnable {
+       }
+ 
+       currentVersion = stat.getVersion();
+-      if (ownTask() == false) {
++      if (ownTask(true) == false) {
+         tot_wkr_failed_to_grab_task_lost_race.incrementAndGet();
+         return;
+       }
+@@ -262,7 +262,7 @@ public class SplitLogWorker extends ZooKeeperListener implements Runnable {
+ 
+         @Override
+         public boolean progress() {
+-          if (ownTask() == false) {
++          if (ownTask(false) == false) {
+             LOG.warn("Failed to heartbeat the task" + currentTask);
+             return false;
+           }
+@@ -321,23 +321,29 @@ public class SplitLogWorker extends ZooKeeperListener implements Runnable {
+    * <p>
+    * @return true if task path is successfully locked
+    */
+-  private boolean ownTask() {
++  private boolean ownTask(boolean isFirstTime) {
+     try {
+       Stat stat = this.watcher.getZooKeeper().setData(currentTask,
+           TaskState.TASK_OWNED.get(serverName), currentVersion);
+       if (stat == null) {
++        LOG.warn("zk.setData() returned null for path " + currentTask);
++        tot_wkr_task_heartbeat_failed.incrementAndGet();
+         return (false);
+       }
+       currentVersion = stat.getVersion();
+-      if (LOG.isDebugEnabled()) {
+-        LOG.debug ("hearbeat for path " + currentTask +
+-            " successful, version = " + currentVersion);
+-      }
+       tot_wkr_task_heartbeat.incrementAndGet();
+       return (true);
+     } catch (KeeperException e) {
+-      // either Bad Version or Node has been removed
+-      LOG.warn("failed to assert ownership for " + currentTask, e);
++      if (!isFirstTime) {
++        if (e.code().equals(KeeperException.Code.NONODE)) {
++          LOG.warn("NONODE failed to assert ownership for " + currentTask, e);
++        } else if (e.code().equals(KeeperException.Code.BADVERSION)) {
++          LOG.warn("BADVERSION failed to assert ownership for " +
++              currentTask, e);
++        } else {
++          LOG.warn("failed to assert ownership for " + currentTask, e);
++        }
++      }
+     } catch (InterruptedException e1) {
+       LOG.warn("Interrupted while trying to assert ownership of " +
+           currentTask + " " + StringUtils.stringifyException(e1));
+diff --git a/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKSplitLog.java b/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKSplitLog.java
+index 4488a5f..7dccb63 100644
+--- a/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKSplitLog.java
++++ b/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKSplitLog.java
+@@ -56,7 +56,8 @@ public class ZKSplitLog {
+    * @param zkw zk reference
+    * @param filename log file name (only the basename)
+    */
+-  public static String getNodeName(ZooKeeperWatcher zkw, String filename) {
++  public static String getEncodedNodeName(ZooKeeperWatcher zkw,
++      String filename) {
+       return ZKUtil.joinZNode(zkw.splitLogZNode, encode(filename));
+   }
+ 
+@@ -83,7 +84,7 @@ public class ZKSplitLog {
+   }
+ 
+   public static String getRescanNode(ZooKeeperWatcher zkw) {
+-    return getNodeName(zkw, "RESCAN");
++    return ZKUtil.joinZNode(zkw.splitLogZNode, "RESCAN");
+   }
+ 
+   public static boolean isRescanNode(ZooKeeperWatcher zkw, String path) {
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestSplitLogManager.java b/src/test/java/org/apache/hadoop/hbase/master/TestSplitLogManager.java
+index 9220104..4aab4b9 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestSplitLogManager.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestSplitLogManager.java
+@@ -135,7 +135,8 @@ public class TestSplitLogManager {
+     int num = 0;
+     List<String> nodes = ZKUtil.listChildrenNoWatch(zkw, zkw.splitLogZNode);
+     for (String node : nodes) {
+-      if (ZKSplitLog.isRescanNode(zkw, ZKSplitLog.getNodeName(zkw, node))) {
++      if (ZKSplitLog.isRescanNode(zkw,
++          ZKUtil.joinZNode(zkw.splitLogZNode, node))) {
+         num++;
+       }
+     }
+@@ -145,8 +146,9 @@ public class TestSplitLogManager {
+   private void setRescanNodeDone(int count) throws KeeperException {
+     List<String> nodes = ZKUtil.listChildrenNoWatch(zkw, zkw.splitLogZNode);
+     for (String node : nodes) {
+-      if (ZKSplitLog.isRescanNode(zkw, ZKSplitLog.getNodeName(zkw, node))) {
+-        ZKUtil.setData(zkw, ZKSplitLog.getNodeName(zkw, node),
++      String nodepath = ZKUtil.joinZNode(zkw.splitLogZNode, node);
++      if (ZKSplitLog.isRescanNode(zkw, nodepath)) {
++        ZKUtil.setData(zkw, nodepath,
+             TaskState.TASK_DONE.get("some-worker"));
+         count--;
+       }
+@@ -156,12 +158,12 @@ public class TestSplitLogManager {
+ 
+   private String submitTaskAndWait(TaskBatch batch, String name)
+   throws KeeperException, InterruptedException {
+-    String tasknode = ZKSplitLog.getNodeName(zkw, "foo");
++    String tasknode = ZKSplitLog.getEncodedNodeName(zkw, name);
+     NodeCreationListener listener = new NodeCreationListener(zkw, tasknode);
+     zkw.registerListener(listener);
+     ZKUtil.watchAndCheckExists(zkw, tasknode);
+ 
+-    slm.installTask("foo", batch);
++    slm.installTask(name, batch);
+     assertEquals(1, batch.installed);
+     assertTrue(slm.findOrCreateOrphanTask(tasknode).batch == batch);
+     assertEquals(1L, tot_mgr_node_create_queued.get());
+@@ -184,7 +186,7 @@ public class TestSplitLogManager {
+     slm.finishInitialization();
+     TaskBatch batch = new TaskBatch();
+ 
+-    String tasknode = submitTaskAndWait(batch, "foo");
++    String tasknode = submitTaskAndWait(batch, "foo/1");
+ 
+     byte[] data = ZKUtil.getData(zkw, tasknode);
+     LOG.info("Task node created " + new String(data));
+@@ -195,7 +197,7 @@ public class TestSplitLogManager {
+   public void testOrphanTaskAcquisition() throws Exception {
+     LOG.info("TestOrphanTaskAcquisition");
+ 
+-    String tasknode = ZKSplitLog.getNodeName(zkw, "orphan");
++    String tasknode = ZKSplitLog.getEncodedNodeName(zkw, "orphan/test/slash");
+     zkw.getZooKeeper().create(tasknode,
+         TaskState.TASK_OWNED.get("dummy-worker"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+@@ -227,7 +229,7 @@ public class TestSplitLogManager {
+   public void testUnassignedOrphan() throws Exception {
+     LOG.info("TestUnassignedOrphan - an unassigned task is resubmitted at" +
+         " startup");
+-    String tasknode = ZKSplitLog.getNodeName(zkw, "orphan");
++    String tasknode = ZKSplitLog.getEncodedNodeName(zkw, "orphan/test/slash");
+     //create an unassigned orphan task
+     zkw.getZooKeeper().create(tasknode,
+         TaskState.TASK_UNASSIGNED.get("dummy-worker"), Ids.OPEN_ACL_UNSAFE,
+@@ -268,7 +270,7 @@ public class TestSplitLogManager {
+     slm.finishInitialization();
+     TaskBatch batch = new TaskBatch();
+ 
+-    String tasknode = submitTaskAndWait(batch, "foo");
++    String tasknode = submitTaskAndWait(batch, "foo/1");
+     int version = ZKUtil.checkExists(zkw, tasknode);
+ 
+     ZKUtil.setData(zkw, tasknode, TaskState.TASK_OWNED.get("worker1"));
+@@ -301,7 +303,7 @@ public class TestSplitLogManager {
+     slm.finishInitialization();
+     TaskBatch batch = new TaskBatch();
+ 
+-    String tasknode = submitTaskAndWait(batch, "foo");
++    String tasknode = submitTaskAndWait(batch, "foo/1");
+     int version = ZKUtil.checkExists(zkw, tasknode);
+ 
+     ZKUtil.setData(zkw, tasknode, TaskState.TASK_OWNED.get("worker1"));
+@@ -329,7 +331,7 @@ public class TestSplitLogManager {
+     slm = new SplitLogManager(zkw, conf, stopper, "dummy-master", null);
+     slm.finishInitialization();
+     TaskBatch batch = new TaskBatch();
+-    String tasknode = submitTaskAndWait(batch, "foo");
++    String tasknode = submitTaskAndWait(batch, "foo/1");
+     ZKUtil.setData(zkw, tasknode, TaskState.TASK_DONE.get("worker"));
+     synchronized (batch) {
+       while (batch.installed != batch.done) {
+@@ -349,7 +351,7 @@ public class TestSplitLogManager {
+     slm.finishInitialization();
+     TaskBatch batch = new TaskBatch();
+ 
+-    String tasknode = submitTaskAndWait(batch, "foo");
++    String tasknode = submitTaskAndWait(batch, "foo/1");
+     ZKUtil.setData(zkw, tasknode, TaskState.TASK_ERR.get("worker"));
+     synchronized (batch) {
+       while (batch.installed != batch.error) {
+@@ -368,7 +370,7 @@ public class TestSplitLogManager {
+     slm = new SplitLogManager(zkw, conf, stopper, "dummy-master", null);
+     slm.finishInitialization();
+     TaskBatch batch = new TaskBatch();
+-    String tasknode = submitTaskAndWait(batch, "foo");
++    String tasknode = submitTaskAndWait(batch, "foo/1");
+     ZKUtil.setData(zkw, tasknode, TaskState.TASK_RESIGNED.get("worker"));
+     int version = ZKUtil.checkExists(zkw, tasknode);
+ 
+@@ -388,7 +390,7 @@ public class TestSplitLogManager {
+         " resubmit");
+ 
+     // create an orphan task in OWNED state
+-    String tasknode1 = ZKSplitLog.getNodeName(zkw, "orphan");
++    String tasknode1 = ZKSplitLog.getEncodedNodeName(zkw, "orphan/1");
+     zkw.getZooKeeper().create(tasknode1,
+         TaskState.TASK_OWNED.get("dummy-worker"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+@@ -406,7 +408,7 @@ public class TestSplitLogManager {
+ 
+     // submit another task which will stay in unassigned mode
+     TaskBatch batch = new TaskBatch();
+-    submitTaskAndWait(batch, "foo");
++    submitTaskAndWait(batch, "foo/1");
+ 
+     // keep updating the orphan owned node every to/2 seconds
+     for (int i = 0; i < (3 * to)/100; i++) {
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestSplitLogWorker.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestSplitLogWorker.java
+index 7c8714d..9dd71a3 100644
+--- a/src/test/java/org/apache/hadoop/hbase/regionserver/TestSplitLogWorker.java
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestSplitLogWorker.java
+@@ -135,7 +135,7 @@ public class TestSplitLogWorker {
+   public void testAcquireTaskAtStartup() throws Exception {
+     LOG.info("testAcquireTaskAtStartup");
+ 
+-    zkw.getZooKeeper().create(ZKSplitLog.getNodeName(zkw, "tatas"),
++    zkw.getZooKeeper().create(ZKSplitLog.getEncodedNodeName(zkw, "tatas"),
+         TaskState.TASK_UNASSIGNED.get("mgr"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+ 
+@@ -144,14 +144,14 @@ public class TestSplitLogWorker {
+     slw.start();
+     waitForCounter(tot_wkr_task_acquired, 0, 1, 100);
+     assertTrue(TaskState.TASK_OWNED.equals(ZKUtil.getData(zkw,
+-        ZKSplitLog.getNodeName(zkw, "tatas")), "rs"));
++        ZKSplitLog.getEncodedNodeName(zkw, "tatas")), "rs"));
+   }
+ 
+   @Test
+   public void testRaceForTask() throws Exception {
+     LOG.info("testRaceForTask");
+ 
+-    zkw.getZooKeeper().create(ZKSplitLog.getNodeName(zkw, "trft"),
++    zkw.getZooKeeper().create(ZKSplitLog.getEncodedNodeName(zkw, "trft"),
+         TaskState.TASK_UNASSIGNED.get("manager"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+ 
+@@ -164,9 +164,9 @@ public class TestSplitLogWorker {
+     waitForCounter(tot_wkr_task_acquired, 0, 1, 1000);
+     waitForCounter(tot_wkr_failed_to_grab_task_lost_race, 0, 1, 1000);
+     assertTrue(TaskState.TASK_OWNED.equals(ZKUtil.getData(zkw,
+-        ZKSplitLog.getNodeName(zkw, "trft")), "svr1") ||
++        ZKSplitLog.getEncodedNodeName(zkw, "trft")), "svr1") ||
+         TaskState.TASK_OWNED.equals(ZKUtil.getData(zkw,
+-            ZKSplitLog.getNodeName(zkw, "trft")), "svr2"));
++            ZKSplitLog.getEncodedNodeName(zkw, "trft")), "svr2"));
+     slw1.stop();
+     slw2.stop();
+     slw1.worker.join();
+@@ -184,16 +184,16 @@ public class TestSplitLogWorker {
+     Thread.sleep(100);
+ 
+     // this time create a task node after starting the splitLogWorker
+-    zkw.getZooKeeper().create(ZKSplitLog.getNodeName(zkw, "tpt_task"),
++    zkw.getZooKeeper().create(ZKSplitLog.getEncodedNodeName(zkw, "tpt_task"),
+         TaskState.TASK_UNASSIGNED.get("manager"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+ 
+     waitForCounter(tot_wkr_task_acquired, 0, 1, 1000);
+     assertEquals(1, slw.taskReadySeq);
+     assertTrue(TaskState.TASK_OWNED.equals(ZKUtil.getData(zkw,
+-        ZKSplitLog.getNodeName(zkw, "tpt_task")), "tpt_svr"));
++        ZKSplitLog.getEncodedNodeName(zkw, "tpt_task")), "tpt_svr"));
+ 
+-    ZKUtil.setData(zkw, ZKSplitLog.getNodeName(zkw, "tpt_task"),
++    ZKUtil.setData(zkw, ZKSplitLog.getEncodedNodeName(zkw, "tpt_task"),
+         TaskState.TASK_UNASSIGNED.get("manager"));
+     waitForCounter(tot_wkr_preempt_task, 0, 1, 1000);
+   }
+@@ -207,7 +207,7 @@ public class TestSplitLogWorker {
+     Thread.yield(); // let the worker start
+     Thread.sleep(100);
+ 
+-    zkw.getZooKeeper().create(ZKSplitLog.getNodeName(zkw, "tmt_task"),
++    zkw.getZooKeeper().create(ZKSplitLog.getEncodedNodeName(zkw, "tmt_task"),
+         TaskState.TASK_UNASSIGNED.get("manager"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+ 
+@@ -215,19 +215,19 @@ public class TestSplitLogWorker {
+     // now the worker is busy doing the above task
+ 
+     // create another task
+-    zkw.getZooKeeper().create(ZKSplitLog.getNodeName(zkw, "tmt_task_2"),
++    zkw.getZooKeeper().create(ZKSplitLog.getEncodedNodeName(zkw, "tmt_task_2"),
+         TaskState.TASK_UNASSIGNED.get("manager"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+ 
+     // preempt the first task, have it owned by another worker
+-    ZKUtil.setData(zkw, ZKSplitLog.getNodeName(zkw, "tmt_task"),
++    ZKUtil.setData(zkw, ZKSplitLog.getEncodedNodeName(zkw, "tmt_task"),
+         TaskState.TASK_OWNED.get("another-worker"));
+     waitForCounter(tot_wkr_preempt_task, 0, 1, 1000);
+ 
+     waitForCounter(tot_wkr_task_acquired, 1, 2, 1000);
+     assertEquals(2, slw.taskReadySeq);
+     assertTrue(TaskState.TASK_OWNED.equals(ZKUtil.getData(zkw,
+-        ZKSplitLog.getNodeName(zkw, "tmt_task_2")), "tmt_svr"));
++        ZKSplitLog.getEncodedNodeName(zkw, "tmt_task_2")), "tmt_svr"));
+   }
+ 
+   @Test
+@@ -239,7 +239,7 @@ public class TestSplitLogWorker {
+     Thread.yield(); // let the worker start
+     Thread.sleep(100);
+ 
+-    zkw.getZooKeeper().create(ZKSplitLog.getNodeName(zkw, "task"),
++    zkw.getZooKeeper().create(ZKSplitLog.getEncodedNodeName(zkw, "task"),
+         TaskState.TASK_UNASSIGNED.get("manager"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT);
+ 
+@@ -247,12 +247,12 @@ public class TestSplitLogWorker {
+     // now the worker is busy doing the above task
+ 
+     // preempt the task, have it owned by another worker
+-    ZKUtil.setData(zkw, ZKSplitLog.getNodeName(zkw, "task"),
++    ZKUtil.setData(zkw, ZKSplitLog.getEncodedNodeName(zkw, "task"),
+         TaskState.TASK_UNASSIGNED.get("manager"));
+     waitForCounter(tot_wkr_preempt_task, 0, 1, 1000);
+ 
+     // create a RESCAN node
+-    zkw.getZooKeeper().create(ZKSplitLog.getNodeName(zkw, "RESCAN"),
++    zkw.getZooKeeper().create(ZKSplitLog.getEncodedNodeName(zkw, "RESCAN"),
+         TaskState.TASK_UNASSIGNED.get("manager"), Ids.OPEN_ACL_UNSAFE,
+         CreateMode.PERSISTENT_SEQUENTIAL);
+ 
+@@ -260,7 +260,7 @@ public class TestSplitLogWorker {
+     // RESCAN node might not have been processed if the worker became busy
+     // with the above task. preempt the task again so that now the RESCAN
+     // node is processed
+-    ZKUtil.setData(zkw, ZKSplitLog.getNodeName(zkw, "task"),
++    ZKUtil.setData(zkw, ZKSplitLog.getEncodedNodeName(zkw, "task"),
+         TaskState.TASK_UNASSIGNED.get("manager"));
+     waitForCounter(tot_wkr_preempt_task, 1, 2, 1000);
+     waitForCounter(tot_wkr_task_acquired_rescan, 0, 1, 1000);
+@@ -272,7 +272,7 @@ public class TestSplitLogWorker {
+       num++;
+       if (node.startsWith("RESCAN")) {
+         assertTrue(TaskState.TASK_DONE.equals(ZKUtil.getData(zkw,
+-            ZKSplitLog.getNodeName(zkw, node)), "svr"));
++            ZKSplitLog.getEncodedNodeName(zkw, node)), "svr"));
+       }
+     }
+     assertEquals(2, num);
+-- 
+1.7.0.4
+

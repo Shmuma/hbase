@@ -1,0 +1,41 @@
+From a24e9a856547cbd93c427f96787876a3640aa79c Mon Sep 17 00:00:00 2001
+From: Jimmy Xiang <jxiang@cloudera.com>
+Date: Wed, 4 Jan 2012 09:03:47 -0800
+Subject: [PATCH 068/101] CDH-4045 Disable distributed log splitting by default since this feature is not fully tested yet
+
+Reason: Task
+Author: Jimmy Xiang
+Ref: CDH-4045
+---
+ .../hadoop/hbase/master/MasterFileSystem.java      |    2 +-
+ .../hbase/master/TestDistributedLogSplitting.java  |    1 +
+ 2 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+index b484a72..a7525bd 100644
+--- a/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
++++ b/src/main/java/org/apache/hadoop/hbase/master/MasterFileSystem.java
+@@ -91,7 +91,7 @@ public class MasterFileSystem {
+     conf.set("fs.default.name", fsUri);
+     conf.set("fs.defaultFS", fsUri);
+     this.distributedLogSplitting =
+-      conf.getBoolean("hbase.master.distributed.log.splitting", true);
++      conf.getBoolean("hbase.master.distributed.log.splitting", false);
+     if (this.distributedLogSplitting) {
+       this.splitLogManager = new SplitLogManager(master.getZooKeeper(),
+           master.getConfiguration(), master, master.getServerName());
+diff --git a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+index 7156c34..7111d76 100644
+--- a/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
++++ b/src/test/java/org/apache/hadoop/hbase/master/TestDistributedLogSplitting.java
+@@ -90,6 +90,7 @@ public class TestDistributedLogSplitting {
+     LOG.info("Starting cluster");
+     conf = HBaseConfiguration.create();
+     conf.getLong("hbase.splitlog.max.resubmit", 0);
++    conf.setBoolean("hbase.master.distributed.log.splitting", true);
+     TEST_UTIL = new HBaseTestingUtility(conf);
+     TEST_UTIL.startMiniCluster(NUM_MASTERS, num_rs);
+     cluster = TEST_UTIL.getHBaseCluster();
+-- 
+1.7.0.4
+

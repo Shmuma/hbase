@@ -23,9 +23,11 @@ import static org.junit.Assert.*;
 
 import java.io.IOException;
 import java.io.StringWriter;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -136,10 +138,15 @@ public class TestMasterStatusServlet {
     servers.put("rootserver", new HServerInfo(new HServerAddress("localhost:12345"), HConstants.DEFAULT_REGIONSERVER_INFOPORT, null));
     servers.put("metaserver", new HServerInfo(new HServerAddress("localhost:12345"), HConstants.DEFAULT_REGIONSERVER_INFOPORT, null));
 
+    Set<String> deadServers = new HashSet<String>();
+    deadServers.add("localhost:23569");
+    deadServers.add("hbase.apache.org,9454,1327103687194");
+
     new MasterStatusTmpl()
     .setRootLocation(new HServerAddress("localhost:12345"))
     .setMetaLocation(new HServerAddress("localhost:12345"))
       .setServers(servers)
+      .setDeadServers(deadServers)
       .render(new StringWriter(),
         master, admin);
   }

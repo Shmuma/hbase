@@ -22,6 +22,7 @@ package org.apache.hadoop.hbase.master;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -59,6 +60,7 @@ public class MasterStatusServlet extends HttpServlet {
     HServerAddress rootLocation = getRootLocationOrNull(master);
     HServerAddress metaLocation = master.getCatalogTracker().getMetaLocation();
     Map<String,HServerInfo> servers= master.getServerManager().getOnlineServers();
+    Set<String> deadServers = master.getServerManager().getDeadServers();
 
     int interval = conf.getInt("hbase.regionserver.msginterval", 1000)/1000;
     if (interval == 0) {
@@ -68,10 +70,12 @@ public class MasterStatusServlet extends HttpServlet {
     response.setContentType("text/html");
     new MasterStatusTmpl()
       .setFrags(frags)
-      .setShowAppendWarning(shouldShowAppendWarning(conf))
+      .setShowSyncWarning(shouldShowSyncWarning(conf))
+      .setShowHflushWarning(shouldShowHflushWarning(conf))
       .setRootLocation(rootLocation)
       .setMetaLocation(metaLocation)
       .setServers(servers)
+      .setDeadServers(deadServers)
       .setInterval(interval)
       .render(response.getWriter(),
           master, admin);
@@ -97,11 +101,20 @@ public class MasterStatusServlet extends HttpServlet {
     }
   }
 
-  static boolean shouldShowAppendWarning(Configuration conf) {
+  static boolean shouldShowSyncWarning(Configuration conf) {
     try {
-      return !FSUtils.isAppendSupported(conf) && FSUtils.isHDFS(conf);
+      return !FSUtils.isSyncSupported() && FSUtils.isHDFS(conf);
     } catch (IOException e) {
-      LOG.warn("Unable to determine if append is supported", e);
+      LOG.warn("Unable to determine if sync is supported", e);
+      return false;
+    }
+  }
+
+  static boolean shouldShowHflushWarning(Configuration conf) {
+    try {
+      return !FSUtils.isHflushSupported() && FSUtils.isHDFS(conf);
+    } catch (IOException e) {
+      LOG.warn("Unable to determine if hflush is supported", e);
       return false;
     }
   }

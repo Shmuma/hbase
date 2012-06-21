@@ -21,6 +21,8 @@ package org.apache.hadoop.hbase.master;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -43,6 +45,7 @@ import org.apache.hadoop.hbase.regionserver.wal.HLog;
 import org.apache.hadoop.hbase.regionserver.wal.HLogSplitter;
 import org.apache.hadoop.hbase.regionserver.wal.OrphanHLogAfterSplitException;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 
 /**
@@ -68,6 +71,8 @@ public class MasterFileSystem {
   private final Path rootdir;
   // create the split log lock
   final Lock splitLogLock = new ReentrantLock();
+  final boolean distributedLogSplitting;
+  final SplitLogManager splitLogManager;
 
   public MasterFileSystem(Server master, MasterMetrics metrics)
   throws IOException {
@@ -85,10 +90,18 @@ public class MasterFileSystem {
     String fsUri = this.fs.getUri().toString();
     conf.set("fs.default.name", fsUri);
     conf.set("fs.defaultFS", fsUri);
+    this.distributedLogSplitting =
+      conf.getBoolean("hbase.master.distributed.log.splitting", false);
+    if (this.distributedLogSplitting) {
+      this.splitLogManager = new SplitLogManager(master.getZooKeeper(),
+          master.getConfiguration(), master, master.getServerName());
+      this.splitLogManager.finishInitialization();
+    } else {
+      this.splitLogManager = null;
+    }
     // setup the filesystem variable
     // set up the archived logs path
-    this.oldLogDir = new Path(this.rootdir, HConstants.HREGION_OLDLOGDIR_NAME);
-    createInitialFileSystemLayout();
+    this.oldLogDir = createInitialFileSystemLayout();
   }
 
   /**
@@ -101,14 +114,18 @@ public class MasterFileSystem {
    * </ol>
    * Idempotent.
    */
-  private void createInitialFileSystemLayout() throws IOException {
+  private Path createInitialFileSystemLayout() throws IOException {
     // check if the root directory exists
     checkRootDir(this.rootdir, conf, this.fs);
 
+    Path oldLogDir = new Path(this.rootdir, HConstants.HREGION_OLDLOGDIR_NAME);
+
     // Make sure the region servers can archive their old logs
-    if(!this.fs.exists(this.oldLogDir)) {
-      this.fs.mkdirs(this.oldLogDir);
+    if(!this.fs.exists(oldLogDir)) {
+      this.fs.mkdirs(oldLogDir);
     }
+
+    return oldLogDir;
   }
 
   public FileSystem getFileSystem() {
@@ -156,64 +173,121 @@ public class MasterFileSystem {
    * {@link HServerInfo#getServerName()}
    */
   void splitLogAfterStartup(final Map<String, HServerInfo> onlineServers) {
+    boolean retrySplitting = !conf.getBoolean("hbase.hlog.split.skip.errors",
+        HLog.SPLIT_SKIP_ERRORS_DEFAULT);
     Path logsDirPath = new Path(this.rootdir, HConstants.HREGION_LOGDIR_NAME);
-    try {
-      if (!this.fs.exists(logsDirPath)) {
-        return;
+    do {
+      List<String> serverNames = new ArrayList<String>();
+      try {
+        if (!this.fs.exists(logsDirPath)) return;
+        FileStatus[] logFolders = this.fs.listStatus(logsDirPath);
+
+        if (logFolders == null || logFolders.length == 0) {
+          LOG.debug("No log files to split, proceeding...");
+          return;
+        }
+        for (FileStatus status : logFolders) {
+          String sn = status.getPath().getName();
+          // truncate splitting suffix if present (for ServerName parsing)
+          if (sn.endsWith(HLog.SPLITTING_EXT)) {
+            sn = sn.substring(0, sn.length() - HLog.SPLITTING_EXT.length());
+          }
+          String serverName = sn;
+          if (!onlineServers.keySet().contains(serverName)) {
+            LOG.info("Log folder " + status.getPath() + " doesn't belong "
+                + "to a known region server, splitting");
+            serverNames.add(serverName);
+          } else {
+            LOG.info("Log folder " + status.getPath()
+                + " belongs to an existing region server");
+          }
+        }
+        splitLog(serverNames);
+        retrySplitting = false;
+      } catch (IOException ioe) {
+        LOG.warn("Failed splitting of " + serverNames, ioe);
+        if (!checkFileSystem()) {
+          LOG.warn("Bad Filesystem, exiting");
+          Runtime.getRuntime().halt(1);
+        }
+        try {
+          if (retrySplitting) {
+            Thread.sleep(conf.getInt(
+              "hbase.hlog.split.failure.retry.interval", 30 * 1000));
+          }
+        } catch (InterruptedException e) {
+          LOG.warn("Interrupted, returning w/o splitting at startup");
+          Thread.currentThread().interrupt();
+          retrySplitting = false;
+        }
       }
-    } catch (IOException e) {
-      throw new RuntimeException("Failed exists test on " + logsDirPath, e);
-    }
-    FileStatus[] logFolders;
-    try {
-      logFolders = this.fs.listStatus(logsDirPath);
-    } catch (IOException e) {
-      throw new RuntimeException("Failed listing " + logsDirPath.toString(), e);
-    }
-    if (logFolders == null || logFolders.length == 0) {
-      LOG.debug("No log files to split, proceeding...");
-      return;
-    }
-    for (FileStatus status : logFolders) {
-      String serverName = status.getPath().getName();
-      if (onlineServers.get(serverName) == null) {
-        LOG.info("Log folder " + status.getPath() + " doesn't belong " +
-          "to a known region server, splitting");
-        splitLog(serverName);
-      } else {
-        LOG.info("Log folder " + status.getPath() +
-          " belongs to an existing region server");
-      }
-    }
+    } while (retrySplitting);
   }
 
-  public void splitLog(final String serverName) {
-    this.splitLogLock.lock();
+  public void splitLog(final String serverName) throws IOException {
+    List<String> serverNames = new ArrayList<String>();
+    serverNames.add(serverName);
+    splitLog(serverNames);
+  }
+  
+  public void splitLog(final List<String> serverNames) throws IOException {
     long splitTime = 0, splitLogSize = 0;
-    Path logDir = new Path(this.rootdir, HLog.getHLogDirectoryName(serverName));
-    try {
-      HLogSplitter splitter = HLogSplitter.createLogSplitter(
-        conf, rootdir, logDir, oldLogDir, this.fs);
-      try {
-        // If FS is in safe mode, just wait till out of it.
-        FSUtils.waitOnSafeMode(conf,
-          conf.getInt(HConstants.THREAD_WAKE_FREQUENCY, 1000));  
-        splitter.splitLog();
-      } catch (OrphanHLogAfterSplitException e) {
-        LOG.warn("Retrying splitting because of:", e);
-        // An HLogSplitter instance can only be used once.  Get new instance.
-        splitter = HLogSplitter.createLogSplitter(conf, rootdir, logDir,
-          oldLogDir, this.fs);
-        splitter.splitLog();
+    List<Path> logDirs = new ArrayList<Path>();
+    for(String serverName: serverNames){
+      Path logDir = new Path(this.rootdir,
+        HLog.getHLogDirectoryName(serverName.toString()));
+      Path splitDir = logDir.suffix(HLog.SPLITTING_EXT);
+      // rename the directory so a rogue RS doesn't create more HLogs
+      if (fs.exists(logDir)) {
+        if (!this.fs.rename(logDir, splitDir)) {
+          throw new IOException("Failed fs.rename for log split: " + logDir);
+        }
+        logDir = splitDir;
+        LOG.debug("Renamed region directory: " + splitDir);
+      } else if (!fs.exists(splitDir)) {
+        LOG.info("Log dir for server " + serverName + " does not exist");
+        continue;
       }
-      splitTime = splitter.getTime();
-      splitLogSize = splitter.getSize();
-    } catch (IOException e) {
-      checkFileSystem();
-      LOG.error("Failed splitting " + logDir.toString(), e);
-    } finally {
-      this.splitLogLock.unlock();
+      logDirs.add(splitDir);
     }
+
+    if (logDirs.isEmpty()) {
+      LOG.info("No logs to split");
+      return;
+    }
+      
+    if (distributedLogSplitting) {
+      splitLogManager.handleDeadWorkers(serverNames);
+      splitTime = EnvironmentEdgeManager.currentTimeMillis();
+      splitLogSize = splitLogManager.splitLogDistributed(logDirs);
+      splitTime = EnvironmentEdgeManager.currentTimeMillis() - splitTime;
+    } else {
+      for(Path logDir: logDirs){
+        // splitLogLock ensures that dead region servers' logs are processed
+        // one at a time
+        this.splitLogLock.lock();
+        try {              
+          HLogSplitter splitter = HLogSplitter.createLogSplitter(
+            conf, rootdir, logDir, oldLogDir, this.fs);
+          try {
+            // If FS is in safe mode, just wait till out of it.
+            FSUtils.waitOnSafeMode(conf, conf.getInt(HConstants.THREAD_WAKE_FREQUENCY, 1000));
+            splitter.splitLog();
+          } catch (OrphanHLogAfterSplitException e) {
+            LOG.warn("Retrying splitting because of:", e);
+            //An HLogSplitter instance can only be used once.  Get new instance.
+            splitter = HLogSplitter.createLogSplitter(conf, rootdir, logDir,
+              oldLogDir, this.fs);
+            splitter.splitLog();
+          }
+          splitTime = splitter.getTime();
+          splitLogSize = splitter.getSize();
+        } finally {
+          this.splitLogLock.unlock();
+        }
+      }
+    }
+
     if (this.metrics != null) {
       this.metrics.addSplit(splitTime, splitLogSize);
     }
@@ -235,21 +309,30 @@ public class MasterFileSystem {
     FSUtils.waitOnSafeMode(c, c.getInt(HConstants.THREAD_WAKE_FREQUENCY,
         10 * 1000));
     // Filesystem is good. Go ahead and check for hbase.rootdir.
-    if (!fs.exists(rd)) {
-      fs.mkdirs(rd);
-      // DFS leaves safe mode with 0 DNs when there are 0 blocks.
-      // We used to handle this by checking the current DN count and waiting until
-      // it is nonzero. With security, the check for datanode count doesn't work --
-      // it is a privileged op. So instead we adopt the strategy of the jobtracker
-      // and simply retry file creation during bootstrap indefinitely. As soon as
-      // there is one datanode it will succeed. Permission problems should have
-      // already been caught by mkdirs above.
-      FSUtils.setVersion(fs, rd, c.getInt(HConstants.THREAD_WAKE_FREQUENCY,
-        10 * 1000));
-    } else {
-      // as above
-      FSUtils.checkVersion(fs, rd, true, c.getInt(HConstants.THREAD_WAKE_FREQUENCY,
-        10 * 1000));
+    try {
+      if (!fs.exists(rd)) {
+        fs.mkdirs(rd);
+        // DFS leaves safe mode with 0 DNs when there are 0 blocks.
+        // We used to handle this by checking the current DN count and waiting until
+        // it is nonzero. With security, the check for datanode count doesn't work --
+        // it is a privileged op. So instead we adopt the strategy of the jobtracker
+        // and simply retry file creation during bootstrap indefinitely. As soon as
+        // there is one datanode it will succeed. Permission problems should have
+        // already been caught by mkdirs above.
+        FSUtils.setVersion(fs, rd, c.getInt(HConstants.THREAD_WAKE_FREQUENCY,
+          10 * 1000));
+      } else {
+        if (!fs.isDirectory(rd)) {
+          throw new IllegalArgumentException(rd.toString() + " is not a directory");
+        }
+        // as above
+        FSUtils.checkVersion(fs, rd, true, c.getInt(HConstants.THREAD_WAKE_FREQUENCY,
+          10 * 1000));
+      }
+    } catch (IllegalArgumentException iae) {
+      LOG.fatal("Please fix invalid configuration for "
+        + HConstants.HBASE_DIR + " " + rd.toString(), iae);
+      throw iae;
     }
     // Make sure the root region directory exists!
     if (!FSUtils.rootRegionExists(fs, rd)) {
@@ -288,10 +371,12 @@ public class MasterFileSystem {
   }
 
   /**
+   * Enable in-memory caching for specified region.
+   *
    * @param hri Set all family block caching to <code>b</code>
    * @param b
    */
-  private static void setInfoFamilyCaching(final HRegionInfo hri, final boolean b) {
+  public static void setInfoFamilyCaching(final HRegionInfo hri, final boolean b) {
     for (HColumnDescriptor hcd: hri.getTableDesc().families.values()) {
       if (Bytes.equals(hcd.getName(), HConstants.CATALOG_FAMILY)) {
         hcd.setBlockCacheEnabled(b);
@@ -319,5 +404,11 @@ public class MasterFileSystem {
     fs.delete(Store.getStoreHomedir(
         new Path(rootdir, region.getTableDesc().getNameAsString()),
         region.getEncodedName(), familyName), true);
+  }
+
+  public void stop() {
+    if (splitLogManager != null) {
+      this.splitLogManager.stop();
+    }
   }
 }

@@ -1,0 +1,97 @@
+From 974e6d5414be9b16c7c76bfc8255ce17e5df7f97 Mon Sep 17 00:00:00 2001
+From: Michael Stack <stack@apache.org>
+Date: Sat, 2 Apr 2011 01:37:41 +0000
+Subject: [PATCH 073/101] HBASE-3704 Show per region request count in table.jsp
+
+git-svn-id: https://svn.apache.org/repos/asf/hbase/trunk@1087954 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/main/resources/hbase-webapps/master/table.jsp |   28 +++++++++++++++++++-
+ 1 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/resources/hbase-webapps/master/table.jsp b/src/main/resources/hbase-webapps/master/table.jsp
+index f7edce6..4b6c6d7 100644
+--- a/src/main/resources/hbase-webapps/master/table.jsp
++++ b/src/main/resources/hbase-webapps/master/table.jsp
+@@ -18,7 +18,7 @@
+  */
+ --%>
+ <%@ page contentType="text/html;charset=UTF-8"
+-  import="java.util.Map"
++  import="java.util.HashMap"
+   import="org.apache.hadoop.io.Writable"
+   import="org.apache.hadoop.conf.Configuration"
+   import="org.apache.hadoop.hbase.client.HTable"
+@@ -27,6 +27,8 @@
+   import="org.apache.hadoop.hbase.HRegionInfo"
+   import="org.apache.hadoop.hbase.HServerAddress"
+   import="org.apache.hadoop.hbase.HServerInfo"
++  import="org.apache.hadoop.hbase.HServerLoad"
++  import="org.apache.hadoop.hbase.HServerLoad.RegionLoad"
+   import="org.apache.hadoop.hbase.io.ImmutableBytesWritable"
+   import="org.apache.hadoop.hbase.master.HMaster" 
+   import="org.apache.hadoop.hbase.util.Bytes"
+@@ -38,7 +40,7 @@
+   HBaseAdmin hbadmin = new HBaseAdmin(conf);
+   String tableName = request.getParameter("name");
+   HTable table = new HTable(conf, tableName);
+-  String tableHeader = "<h2>Table Regions</h2><table><tr><th>Name</th><th>Region Server</th><th>Start Key</th><th>End Key</th></tr>";
++  String tableHeader = "<h2>Table Regions</h2><table><tr><th>Name</th><th>Region Server</th><th>Start Key</th><th>End Key</th><th>Requests</th></tr>";
+   HServerAddress rl = master.getCatalogTracker().getRootLocation();
+   boolean showFragmentation = conf.getBoolean("hbase.master.ui.fragmentation.enabled", false);
+   Map<String, Integer> frags = null;
+@@ -155,6 +157,7 @@
+ <%  } %>
+ </table>
+ <%
++  Map<String, Integer> regDistribution = new HashMap<String, Integer>();
+   Map<HRegionInfo, HServerAddress> regions = table.getRegionsInfo();
+   if(regions != null && regions.size() > 0) { %>
+ <%=     tableHeader %>
+@@ -162,6 +165,7 @@
+   for(Map.Entry<HRegionInfo, HServerAddress> hriEntry : regions.entrySet()) {
+     HRegionInfo regionInfo = hriEntry.getKey();
+     HServerAddress addr = hriEntry.getValue();
++    long req = 0;
+ 
+     int infoPort = 0;
+     String urlRegionServer = null;
+@@ -169,9 +173,17 @@
+     if (addr != null) {
+       HServerInfo info = master.getServerManager().getHServerInfo(addr);
+       if (info != null) {
++        HServerLoad sl = info.getLoad();
++        Map<byte[], RegionLoad> map = sl.getRegionsLoad();
++        if (map.containsKey(regionInfo.getRegionName())) {
++          req = map.get(regionInfo.getRegionName()).getRequestsCount();
++        }
+         infoPort = info.getInfoPort();
+         urlRegionServer =
+             "http://" + addr.getHostname().toString() + ":" + infoPort + "/";
++        Integer i = regDistribution.get(urlRegionServer);
++        if (null == i) i = new Integer(0);
++        regDistribution.put(urlRegionServer, i+1);
+       }
+     }
+ %>
+@@ -192,6 +204,18 @@
+   %>
+   <td><%= Bytes.toStringBinary(regionInfo.getStartKey())%></td>
+   <td><%= Bytes.toStringBinary(regionInfo.getEndKey())%></td>
++  <td><%= req%></td>
++</tr>
++<% } %>
++</table>
++<h2>Regions by Region Server</h2>
++<table><tr><th>Region Server</th><th>Region Count</th></tr>
++<%
++  for (Map.Entry<String, Integer> rdEntry : regDistribution.entrySet()) {
++%>
++<tr>
++  <td><%= rdEntry.getKey()%></td>
++  <td><%= rdEntry.getValue()%></td>
+ </tr>
+ <% } %>
+ </table>
+-- 
+1.7.0.4
+

@@ -21,6 +21,8 @@ package org.apache.hadoop.hbase.security;
 
 import static org.junit.Assert.*;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.junit.Test;
@@ -30,6 +32,8 @@ import java.security.PrivilegedAction;
 import java.security.PrivilegedExceptionAction;
 
 public class TestUser {
+  private static Log LOG = LogFactory.getLog(TestUser.class);
+
   @Test
   public void testBasicAttributes() throws Exception {
     Configuration conf = HBaseConfiguration.create();
@@ -78,5 +82,23 @@ public class TestUser {
         return null;
       }
     });
+  }
+
+  /**
+   * Make sure that we're returning a result for the current user.
+   * Previously getCurrent() was returning null if not initialized on
+   * non-secure Hadoop variants.
+   */
+  @Test
+  public void testGetCurrent() throws Exception {
+    User user1 = User.getCurrent();
+    assertNotNull(user1.ugi);
+    LOG.debug("User1 is "+user1.getName());
+
+    for (int i =0 ; i< 100; i++) {
+      User u = User.getCurrent();
+      assertNotNull(u);
+      assertEquals(user1.getName(), u.getName());
+    }
   }
 }

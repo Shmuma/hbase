@@ -103,11 +103,15 @@ public class TestReplication {
     utility1 = new HBaseTestingUtility(conf1);
     utility1.startMiniZKCluster();
     MiniZooKeeperCluster miniZK = utility1.getZkCluster();
+    // Have to reget conf1 in case zk cluster location different
+    // than default
+    conf1 = utility1.getConfiguration();
     zkw1 = new ZooKeeperWatcher(conf1, "cluster1", null);
     admin = new ReplicationAdmin(conf1);
     LOG.info("Setup first Zk");
 
-    conf2 = HBaseConfiguration.create();
+    // Base conf2 on conf1 so it gets the right zk cluster.
+    conf2 = HBaseConfiguration.create(conf1);
     conf2.set(HConstants.ZOOKEEPER_ZNODE_PARENT, "/2");
     conf2.setInt("hbase.client.retries.number", 6);
     conf2.setBoolean(HConstants.REPLICATION_ENABLE_KEY, true);
@@ -563,14 +567,13 @@ public class TestReplication {
       initialCount = res.length;
     }
 
-    Scan scan2 = new Scan();
-
     int lastCount = 0;
 
     for (int i = 0; i < NB_RETRIES; i++) {
       if (i==NB_RETRIES-1) {
         fail("Waited too much time for queueFailover replication");
       }
+      Scan scan2 = new Scan();
       ResultScanner scanner2 = htable2.getScanner(scan2);
       Result[] res2 = scanner2.next(initialCount * 2);
       scanner2.close();
@@ -600,6 +603,7 @@ public class TestReplication {
         }
       }
     };
+    killer.setDaemon(true);
     killer.start();
     return killer;
   }

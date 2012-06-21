@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -59,11 +61,13 @@ import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
-import org.apache.hadoop.hbase.filter.SingleColumnValueExcludeFilter;
+import org.apache.hadoop.hbase.monitoring.MonitoredTask;
+import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.HRegion.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.wal.HLog;
+import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
+import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.EnvironmentEdge;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
 import org.apache.hadoop.hbase.util.IncrementingEnvironmentEdge;
@@ -120,6 +124,118 @@ public class TestHRegion extends HBaseTestCase {
   // individual code pieces in the HRegion. Putting files locally in
   // /tmp/testtable
   //////////////////////////////////////////////////////////////////////////////
+
+
+  public void testSkipRecoveredEditsReplay() throws Exception {
+    String method = "testSkipRecoveredEditsReplay";
+    byte[] tableName = Bytes.toBytes(method);
+    byte[] family = Bytes.toBytes("family");
+    Configuration conf = HBaseConfiguration.create();
+    initHRegion(tableName, method, conf, family);
+    Path regiondir = region.getRegionDir();
+    FileSystem fs = region.getFilesystem();
+    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
+
+    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
+
+    long maxSeqId = 1050;
+    long minSeqId = 1000;
+
+    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
+      fs.create(recoveredEdits);
+      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
+
+      long time = System.nanoTime();
+      WALEdit edit = new WALEdit();
+      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
+          time, KeyValue.Type.Put, Bytes.toBytes(i)));
+      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
+          i, time), edit));
+
+      writer.close();
+    }
+    MonitoredTask status = TaskMonitor.get().createStatus(method);
+    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId-1, null, status);
+    assertEquals(maxSeqId, seqId);
+    Get get = new Get(row);
+    Result result = region.get(get, null);
+    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
+      assertEquals(1, kvs.size());
+      assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
+    }
+  }
+
+  public void testSkipRecoveredEditsReplaySomeIgnored() throws Exception {
+    String method = "testSkipRecoveredEditsReplaySomeIgnored";
+    byte[] tableName = Bytes.toBytes(method);
+    byte[] family = Bytes.toBytes("family");
+    initHRegion(tableName, method, HBaseConfiguration.create(), family);
+    Path regiondir = region.getRegionDir();
+    FileSystem fs = region.getFilesystem();
+    byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
+
+    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
+
+    long maxSeqId = 1050;
+    long minSeqId = 1000;
+
+    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
+      fs.create(recoveredEdits);
+      HLog.Writer writer = HLog.createWriter(fs, recoveredEdits, conf);
+
+      long time = System.nanoTime();
+      WALEdit edit = new WALEdit();
+      edit.add(new KeyValue(row, family, Bytes.toBytes(i),
+          time, KeyValue.Type.Put, Bytes.toBytes(i)));
+      writer.append(new HLog.Entry(new HLogKey(regionName, tableName,
+          i, time), edit));
+
+      writer.close();
+    }
+    long recoverSeqId = 1030;
+    MonitoredTask status = TaskMonitor.get().createStatus(method);
+    long seqId = region.replayRecoveredEditsIfAny(regiondir, recoverSeqId-1, null, status);
+    assertEquals(maxSeqId, seqId);
+    Get get = new Get(row);
+    Result result = region.get(get, null);
+    for (long i = minSeqId; i <= maxSeqId; i += 10) {
+      List<KeyValue> kvs = result.getColumn(family, Bytes.toBytes(i));
+      if (i < recoverSeqId) {
+        assertEquals(0, kvs.size());
+      } else {
+        assertEquals(1, kvs.size());
+        assertEquals(Bytes.toBytes(i), kvs.get(0).getValue());
+      }
+    }
+  }
+
+  public void testSkipRecoveredEditsReplayAllIgnored() throws Exception {
+    String method = "testSkipRecoveredEditsReplayAllIgnored";
+    byte[] tableName = Bytes.toBytes(method);
+    byte[] family = Bytes.toBytes("family");
+    initHRegion(tableName, method, HBaseConfiguration.create(), family);
+    Path regiondir = region.getRegionDir();
+    FileSystem fs = region.getFilesystem();
+
+    Path recoveredEditsDir = HLog.getRegionDirRecoveredEditsDir(regiondir);
+    for (int i = 1000; i < 1050; i += 10) {
+      Path recoveredEdits = new Path(
+          recoveredEditsDir, String.format("%019d", i));
+      FSDataOutputStream dos=  fs.create(recoveredEdits);
+      dos.writeInt(i);
+      dos.close();
+    }
+    long minSeqId = 2000;
+    Path recoveredEdits = new Path(
+        recoveredEditsDir, String.format("%019d", minSeqId-1));
+    FSDataOutputStream dos=  fs.create(recoveredEdits);
+    dos.close();
+    long seqId = region.replayRecoveredEditsIfAny(regiondir, minSeqId, null, null);
+    assertEquals(minSeqId, seqId);
+  }
 
   public void testGetWhileRegionClose() throws IOException {
     Configuration hc = initSplit();
@@ -363,10 +479,11 @@ public class TestHRegion extends HBaseTestCase {
       puts[i].add(cf, qual, val);
     }
 
-    OperationStatusCode[] codes = this.region.put(puts);
+    OperationStatus[] codes = this.region.put(puts);
     assertEquals(10, codes.length);
     for (int i = 0; i < 10; i++) {
-      assertEquals(OperationStatusCode.SUCCESS, codes[i]);
+      assertEquals(OperationStatusCode.SUCCESS, codes[i]
+          .getOperationStatusCode());
     }
     assertEquals(1, HLog.getSyncOps());
 
@@ -376,7 +493,7 @@ public class TestHRegion extends HBaseTestCase {
     assertEquals(10, codes.length);
     for (int i = 0; i < 10; i++) {
       assertEquals((i == 5) ? OperationStatusCode.BAD_FAMILY :
-        OperationStatusCode.SUCCESS, codes[i]);
+        OperationStatusCode.SUCCESS, codes[i].getOperationStatusCode());
     }
     assertEquals(1, HLog.getSyncOps());
 
@@ -385,8 +502,8 @@ public class TestHRegion extends HBaseTestCase {
 
     MultithreadedTestUtil.TestContext ctx =
       new MultithreadedTestUtil.TestContext(HBaseConfiguration.create());
-    final AtomicReference<OperationStatusCode[]> retFromThread =
-      new AtomicReference<OperationStatusCode[]>();
+    final AtomicReference<OperationStatus[]> retFromThread =
+      new AtomicReference<OperationStatus[]>();
     TestThread putter = new TestThread(ctx) {
       @Override
       public void doWork() throws IOException {
@@ -414,7 +531,7 @@ public class TestHRegion extends HBaseTestCase {
     codes = retFromThread.get();
     for (int i = 0; i < 10; i++) {
       assertEquals((i == 5) ? OperationStatusCode.BAD_FAMILY :
-        OperationStatusCode.SUCCESS, codes[i]);
+        OperationStatusCode.SUCCESS, codes[i].getOperationStatusCode());
     }
 
     LOG.info("Nexta, a batch put which uses an already-held lock");
@@ -431,7 +548,7 @@ public class TestHRegion extends HBaseTestCase {
     LOG.info("...performed put");
     for (int i = 0; i < 10; i++) {
       assertEquals((i == 5) ? OperationStatusCode.BAD_FAMILY :
-        OperationStatusCode.SUCCESS, codes[i]);
+        OperationStatusCode.SUCCESS, codes[i].getOperationStatusCode());
     }
     // Make sure we didn't do an extra batch
     assertEquals(1, HLog.getSyncOps());
@@ -2234,141 +2351,6 @@ public class TestHRegion extends HBaseTestCase {
     }
   }
 
-  public void testScanner_JoinedScanners() throws IOException {
-    byte [] tableName = Bytes.toBytes("testTable");
-    byte [] cf_essential = Bytes.toBytes("essential");
-    byte [] cf_joined = Bytes.toBytes("joined");
-    byte [] cf_alpha = Bytes.toBytes("alpha");
-    initHRegion(tableName, getName(), cf_essential, cf_joined, cf_alpha);
-
-    byte [] row1 = Bytes.toBytes("row1");
-    byte [] row2 = Bytes.toBytes("row2");
-    byte [] row3 = Bytes.toBytes("row3");
-
-    byte [] col_normal = Bytes.toBytes("d");
-    byte [] col_alpha = Bytes.toBytes("a");
-
-    byte [] filtered_val = Bytes.toBytes(3);
-
-    Put put = new Put(row1);
-    put.add(cf_essential, col_normal, Bytes.toBytes(1));
-    put.add(cf_joined, col_alpha, Bytes.toBytes(1));
-    region.put(put);
-
-    put = new Put(row2);
-    put.add(cf_essential, col_alpha, Bytes.toBytes(2));
-    put.add(cf_joined, col_normal, Bytes.toBytes(2));
-    put.add(cf_alpha, col_alpha, Bytes.toBytes(2));
-    region.put(put);
-
-    put = new Put(row3);
-    put.add(cf_essential, col_normal, filtered_val);
-    put.add(cf_joined, col_normal, filtered_val);
-    region.put(put);
-
-    // Check two things:
-    // 1. result list contains expected values
-    // 2. result list is sorted properly
-
-    Scan scan = new Scan();
-    Filter filter = new SingleColumnValueExcludeFilter(cf_essential, col_normal,
-                                                       CompareOp.NOT_EQUAL, filtered_val);
-    scan.setFilter(filter);
-    InternalScanner s = region.getScanner(scan);
-
-    List<KeyValue> results = new ArrayList<KeyValue>();
-    assertTrue(s.next(results));
-    assertEquals(results.size(), 1);
-    results.clear();
-
-    assertTrue(s.next(results));
-    assertEquals(results.size(), 3);
-    assertTrue("orderCheck", results.get(0).matchingFamily(cf_alpha));
-    assertTrue("orderCheck", results.get(1).matchingFamily(cf_essential));
-    assertTrue("orderCheck", results.get(2).matchingFamily(cf_joined));
-    results.clear();
-
-    assertFalse(s.next(results));
-    assertEquals(results.size(), 0);
-  }
-
-
-  public void testScanner_JoinedScannersAndLimits() throws IOException {
-    byte [] tableName = Bytes.toBytes("testTable");
-    byte [] cf_first = Bytes.toBytes("first");
-    byte [] cf_second = Bytes.toBytes("second");
-
-    initHRegion(tableName, getName(), cf_first, cf_second);
-
-    byte [] col_a = Bytes.toBytes("a");
-    byte [] col_b = Bytes.toBytes("b");
-
-    Put put;
-
-    for (int i = 0; i < 10; i++) {
-      put = new Put(Bytes.toBytes("r" + Integer.toString(i)));
-      put.add(cf_first, col_a, Bytes.toBytes(i));
-      if (i < 5) {
-        put.add(cf_first, col_b, Bytes.toBytes(i));
-        put.add(cf_second, col_a, Bytes.toBytes(i));
-        put.add(cf_second, col_b, Bytes.toBytes(i));
-      }
-      region.put(put);
-    }
-
-    Scan scan = new Scan();
-    Filter filter = new SingleColumnValueFilter(cf_first, col_a, CompareOp.NOT_EQUAL, Bytes.toBytes("bogus"));
-    scan.setFilter(filter);
-    InternalScanner s = region.getScanner(scan);
-
-    // Our data looks like this:
-    // r0: first:a, first:b, second:a, second:b
-    // r1: first:a, first:b, second:a, second:b
-    // r2: first:a, first:b, second:a, second:b
-    // r3: first:a, first:b, second:a, second:b
-    // r4: first:a, first:b, second:a, second:b
-    // r5: first:a
-    // r6: first:a
-    // r7: first:a
-    // r8: first:a
-    // r9: first:a
-
-    // But due to next's limit set to 3, we should get this:
-    // r0: first:a, first:b, second:a
-    // r0: second:b
-    // r1: first:a, first:b, second:a
-    // r1: second:b
-    // r2: first:a, first:b, second:a
-    // r2: second:b
-    // r3: first:a, first:b, second:a
-    // r3: second:b
-    // r4: first:a, first:b, second:a
-    // r4: second:b
-    // r5: first:a
-    // r6: first:a
-    // r7: first:a
-    // r8: first:a
-    // r9: first:a
-
-    List<KeyValue> results = new ArrayList<KeyValue>();
-    int index = 0;
-    while (true) {
-      boolean more = s.next(results, 3);
-      if ((index >> 1) < 5) {
-        if (index % 2 == 0)
-          assertEquals(results.size(), 3);
-        else
-          assertEquals(results.size(), 1);
-      }
-      else
-        assertEquals(results.size(), 1);
-      results.clear();
-      index++;
-      if (!more) break;
-    }
-  }
-
-
   //////////////////////////////////////////////////////////////////////////////
   // Split test
   //////////////////////////////////////////////////////////////////////////////
@@ -2922,7 +2904,7 @@ public class TestHRegion extends HBaseTestCase {
     HColumnDescriptor hcd = new HColumnDescriptor(fam1, Integer.MAX_VALUE,
         HColumnDescriptor.DEFAULT_COMPRESSION, false, true,
         HColumnDescriptor.DEFAULT_TTL, "rowcol");
-    
+
     HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(htd, null, null, false);
@@ -2944,7 +2926,7 @@ public class TestHRegion extends HBaseTestCase {
       }
       region.flushcache();
     }
-    //before compaction 
+    //before compaction
     Store store = region.getStore(fam1);
     List<StoreFile> storeFiles = store.getStorefiles();
     for (StoreFile storefile : storeFiles) {
@@ -2954,10 +2936,10 @@ public class TestHRegion extends HBaseTestCase {
       assertEquals(num_unique_rows*duplicate_multiplier, reader.getEntries());
       assertEquals(num_unique_rows, reader.getFilterEntries());
     }
-    
-    region.compactStores(true); 
-    
-    //after compaction 
+
+    region.compactStores(true);
+
+    //after compaction
     storeFiles = store.getStorefiles();
     for (StoreFile storefile : storeFiles) {
       StoreFile.Reader reader = storefile.getReader();
@@ -2966,9 +2948,9 @@ public class TestHRegion extends HBaseTestCase {
       assertEquals(num_unique_rows*duplicate_multiplier*num_storefiles,
           reader.getEntries());
       assertEquals(num_unique_rows, reader.getFilterEntries());
-    }  
+    }
   }
-  
+
   public void testAllColumnsWithBloomFilter() throws IOException {
     byte [] TABLE = Bytes.toBytes("testAllColumnsWithBloomFilter");
     byte [] FAMILY = Bytes.toBytes("family");

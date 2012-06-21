@@ -91,6 +91,7 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Writables;
+import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.util.StringUtils;
 
@@ -339,10 +340,6 @@ public class HRegion implements HeapSize { // , Writable{
     MonitoredTask status = TaskMonitor.get().createStatus(
         "Initializing region " + this);
 
-    // A region can be reopened if failed a split; reset flags
-    this.closing.set(false);
-    this.closed.set(false);
-
     // Write HRI to a file in case we need to recover .META.
     status.setStatus("Writing region info on filesystem");
     checkRegioninfoOnFilesystem();
@@ -374,13 +371,18 @@ public class HRegion implements HeapSize { // , Writable{
     FSUtils.deleteDirectory(this.fs, new Path(regiondir, MERGEDIR));
 
     this.writestate.setReadOnly(this.regionInfo.getTableDesc().isReadOnly());
-
+    
+    this.writestate.flushRequested = false;
     this.writestate.compacting = false;
     this.lastFlushTime = EnvironmentEdgeManager.currentTimeMillis();
     // Use maximum of log sequenceid or that which was found in stores
     // (particularly if no recovered edits, seqid will be -1).
     long nextSeqid = maxSeqId + 1;
     LOG.info("Onlined " + this.toString() + "; next sequenceid=" + nextSeqid);
+
+    // A region can be reopened if failed a split; reset flags
+    this.closing.set(false);
+    this.closed.set(false);
 
     status.markComplete("Region opened successfully");
     return nextSeqid;
@@ -814,7 +816,7 @@ public class HRegion implements HeapSize { // , Writable{
           }
           completed = true;
         } catch (InterruptedIOException iioe) {
-          LOG.info("compaction interrupted by user: ", iioe);
+          LOG.info("compaction interrupted: ", iioe);
         } finally {
           long now = EnvironmentEdgeManager.currentTimeMillis();
           LOG.info(((completed) ? "completed" : "aborted")
@@ -1000,7 +1002,8 @@ public class HRegion implements HeapSize { // , Writable{
     final long currentMemStoreSize = this.memstoreSize.get();
     List<StoreFlusher> storeFlushers = new ArrayList<StoreFlusher>(stores.size());
     try {
-      sequenceId = (wal == null)? myseqid: wal.startCacheFlush();
+      sequenceId = (wal == null) ? myseqid : wal
+          .startCacheFlush(this.regionInfo.getEncodedNameAsBytes());
       completeSequenceId = this.getCompleteCacheFlushSequenceId(sequenceId);
 
       for (Store s : stores.values()) {
@@ -1050,7 +1053,9 @@ public class HRegion implements HeapSize { // , Writable{
       // We used to only catch IOEs but its possible that we'd get other
       // exceptions -- e.g. HBASE-659 was about an NPE -- so now we catch
       // all and sundry.
-      if (wal != null) wal.abortCacheFlush();
+      if (wal != null) {
+        wal.abortCacheFlush(this.regionInfo.getEncodedNameAsBytes());
+      }
       DroppedSnapshotException dse = new DroppedSnapshotException("region: " +
           Bytes.toStringBinary(getRegionName()));
       dse.initCause(t);
@@ -1401,13 +1406,14 @@ public class HRegion implements HeapSize { // , Writable{
    */
   private static class BatchOperationInProgress<T> {
     T[] operations;
-    OperationStatusCode[] retCodes;
     int nextIndexToProcess = 0;
+    OperationStatus[] retCodeDetails;
 
     public BatchOperationInProgress(T[] operations) {
       this.operations = operations;
-      retCodes = new OperationStatusCode[operations.length];
-      Arrays.fill(retCodes, OperationStatusCode.NOT_RUN);
+      this.retCodeDetails = new OperationStatus[operations.length];
+      Arrays.fill(this.retCodeDetails, new OperationStatus(
+          OperationStatusCode.NOT_RUN));
     }
 
     public boolean isDone() {
@@ -1419,7 +1425,7 @@ public class HRegion implements HeapSize { // , Writable{
    * Perform a batch put with no pre-specified locks
    * @see HRegion#put(Pair[])
    */
-  public OperationStatusCode[] put(Put[] puts) throws IOException {
+  public OperationStatus[] put(Put[] puts) throws IOException {
     @SuppressWarnings("unchecked")
     Pair<Put, Integer> putsAndLocks[] = new Pair[puts.length];
 
@@ -1431,10 +1437,15 @@ public class HRegion implements HeapSize { // , Writable{
 
   /**
    * Perform a batch of puts.
-   * @param putsAndLocks the list of puts paired with their requested lock IDs.
+   * 
+   * @param putsAndLocks
+   *          the list of puts paired with their requested lock IDs.
+   * @return an array of OperationStatus which internally contains the
+   *         OperationStatusCode and the exceptionMessage if any.
    * @throws IOException
    */
-  public OperationStatusCode[] put(Pair<Put, Integer>[] putsAndLocks) throws IOException {
+  public OperationStatus[] put(
+      Pair<Put, Integer>[] putsAndLocks) throws IOException {
     BatchOperationInProgress<Pair<Put, Integer>> batchOp =
       new BatchOperationInProgress<Pair<Put,Integer>>(putsAndLocks);
 
@@ -1454,10 +1465,11 @@ public class HRegion implements HeapSize { // , Writable{
         requestFlush();
       }
     }
-    return batchOp.retCodes;
+    return batchOp.retCodeDetails;
   }
 
-  private long doMiniBatchPut(BatchOperationInProgress<Pair<Put, Integer>> batchOp) throws IOException {
+  private long doMiniBatchPut(
+      BatchOperationInProgress<Pair<Put, Integer>> batchOp) throws IOException {
     long now = EnvironmentEdgeManager.currentTimeMillis();
     byte[] byteNow = Bytes.toBytes(now);
     boolean locked = false;
@@ -1484,7 +1496,8 @@ public class HRegion implements HeapSize { // , Writable{
           checkFamilies(put.getFamilyMap().keySet());
         } catch (NoSuchColumnFamilyException nscf) {
           LOG.warn("No such column family in batch put", nscf);
-          batchOp.retCodes[lastIndexExclusive] = OperationStatusCode.BAD_FAMILY;
+          batchOp.retCodeDetails[lastIndexExclusive] = new OperationStatus(
+              OperationStatusCode.BAD_FAMILY, nscf.getMessage());
           lastIndexExclusive++;
           continue;
         }
@@ -1528,7 +1541,9 @@ public class HRegion implements HeapSize { // , Writable{
       WALEdit walEdit = new WALEdit();
       for (int i = firstIndex; i < lastIndexExclusive; i++) {
         // Skip puts that were determined to be invalid during preprocessing
-        if (batchOp.retCodes[i] != OperationStatusCode.NOT_RUN) continue;
+        if (batchOp.retCodeDetails[i].getOperationStatusCode() != OperationStatusCode.NOT_RUN) {
+          continue;
+        }
 
         Put p = batchOp.operations[i].getFirst();
         if (!p.getWriteToWAL()) continue;
@@ -1544,11 +1559,14 @@ public class HRegion implements HeapSize { // , Writable{
       // ----------------------------------
       long addedSize = 0;
       for (int i = firstIndex; i < lastIndexExclusive; i++) {
-        if (batchOp.retCodes[i] != OperationStatusCode.NOT_RUN) continue;
+        if (batchOp.retCodeDetails[i].getOperationStatusCode() != OperationStatusCode.NOT_RUN) {
+          continue;
+        }
 
         Put p = batchOp.operations[i].getFirst();
         addedSize += applyFamilyMapToMemstore(p.getFamilyMap());
-        batchOp.retCodes[i] = OperationStatusCode.SUCCESS;
+        batchOp.retCodeDetails[i] = new OperationStatus(
+            OperationStatusCode.SUCCESS);
       }
       success = true;
       return addedSize;
@@ -1561,8 +1579,9 @@ public class HRegion implements HeapSize { // , Writable{
       }
       if (!success) {
         for (int i = firstIndex; i < lastIndexExclusive; i++) {
-          if (batchOp.retCodes[i] == OperationStatusCode.NOT_RUN) {
-            batchOp.retCodes[i] = OperationStatusCode.FAILURE;
+          if (batchOp.retCodeDetails[i].getOperationStatusCode() == OperationStatusCode.NOT_RUN) {
+            batchOp.retCodeDetails[i] = new OperationStatus(
+                OperationStatusCode.FAILURE);
           }
         }
       }
@@ -1886,12 +1905,32 @@ public class HRegion implements HeapSize { // , Writable{
     long seqid = minSeqId;
     NavigableSet<Path> files = HLog.getSplitEditFilesSorted(this.fs, regiondir);
     if (files == null || files.isEmpty()) return seqid;
+    boolean checkSafeToSkip = true;
     for (Path edits: files) {
       if (edits == null || !this.fs.exists(edits)) {
         LOG.warn("Null or non-existent edits file: " + edits);
         continue;
       }
       if (isZeroLengthThenDelete(this.fs, edits)) continue;
+
+      if (checkSafeToSkip) {
+        Path higher = files.higher(edits);
+        long maxSeqId = Long.MAX_VALUE;
+        if (higher != null) {
+          // Edit file name pattern, HLog.EDITFILES_NAME_PATTERN: "-?[0-9]+"
+          String fileName = higher.getName();
+          maxSeqId = Math.abs(Long.parseLong(fileName));
+        }
+        if (maxSeqId <= minSeqId) {
+          String msg = "Maximum possible sequenceid for this log is " + maxSeqId
+              + ", skipped the whole file, path=" + edits;
+          LOG.debug(msg);
+          continue;
+        } else {
+          checkSafeToSkip = false;
+        }
+      }
+
       try {
         seqid = replayRecoveredEdits(edits, seqid, reporter);
       } catch (IOException e) {
@@ -2272,23 +2311,111 @@ public class HRegion implements HeapSize { // , Writable{
     }
     return lid;
   }
-
-  public void bulkLoadHFile(String hfilePath, byte[] familyName)
-  throws IOException {
-    startRegionOperation();
-    try {
-      Store store = getStore(familyName);
-      if (store == null) {
-        throw new DoNotRetryIOException(
-            "No such column family " + Bytes.toStringBinary(familyName));
+  
+  /**
+   * Determines whether multiple column families are present
+   * Precondition: familyPaths is not null
+   *
+   * @param familyPaths List of Pair<byte[] column family, String hfilePath>
+   */
+  private static boolean hasMultipleColumnFamilies(
+      List<Pair<byte[], String>> familyPaths) {
+    boolean multipleFamilies = false;
+    byte[] family = null;
+    for (Pair<byte[], String> pair : familyPaths) {
+      byte[] fam = pair.getFirst();
+      if (family == null) {
+        family = fam;
+      } else if (!Bytes.equals(family, fam)) {
+        multipleFamilies = true;
+        break;
       }
-      store.bulkLoadHFile(hfilePath);
-    } finally {
-      closeRegionOperation();
     }
-
+    return multipleFamilies;
   }
 
+  /**
+   * Attempts to atomically load a group of hfiles.  This is critical for loading
+   * rows with multiple column families atomically.
+   *
+   * @param familyPaths List of Pair<byte[] column family, String hfilePath>
+   * @return true if successful, false if failed recoverably
+   * @throws IOException if failed unrecoverably.
+   */
+  public boolean bulkLoadHFiles(List<Pair<byte[], String>> familyPaths)
+  throws IOException {
+    // we need writeLock for multi-family bulk load
+    startBulkRegionOperation(hasMultipleColumnFamilies(familyPaths));
+    try {
+      // There possibly was a split that happend between when the split keys
+      // were gathered and before the HReiogn's write lock was taken.  We need
+      // to validate the HFile region before attempting to bulk load all of them
+      List<IOException> ioes = new ArrayList<IOException>();
+      List<Pair<byte[], String>> failures = new ArrayList<Pair<byte[], String>>();
+      for (Pair<byte[], String> p : familyPaths) {
+        byte[] familyName = p.getFirst();
+        String path = p.getSecond();
+
+        Store store = getStore(familyName);
+        if (store == null) {
+          IOException ioe = new DoNotRetryIOException(
+              "No such column family " + Bytes.toStringBinary(familyName));
+          ioes.add(ioe);
+          failures.add(p);
+        } else {
+          try {
+            store.assertBulkLoadHFileOk(new Path(path));
+          } catch (WrongRegionException wre) {
+            // recoverable (file doesn't fit in region)
+            failures.add(p);
+          } catch (IOException ioe) {
+            // unrecoverable (hdfs problem)
+            ioes.add(ioe);
+          }
+        }
+      }
+
+      // validation failed, bail out before doing anything permanent.
+      if (failures.size() != 0) {
+        StringBuilder list = new StringBuilder();
+        for (Pair<byte[], String> p : failures) {
+          list.append("\n").append(Bytes.toString(p.getFirst())).append(" : ")
+            .append(p.getSecond());
+        }
+        // problem when validating
+        LOG.warn("There was a recoverable bulk load failure likely due to a" +
+            " split.  These (family, HFile) pairs were not loaded: " + list);
+        return false;
+      }
+
+      // validation failed because of some sort of IO problem.
+      if (ioes.size() != 0) {
+        LOG.error("There were IO errors when checking if bulk load is ok.  " +
+            "throwing exception!");
+        throw MultipleIOException.createIOException(ioes);
+      }
+
+      for (Pair<byte[], String> p : familyPaths) {
+        byte[] familyName = p.getFirst();
+        String path = p.getSecond();
+        Store store = getStore(familyName);
+        try {
+          store.bulkLoadHFile(path);
+        } catch (IOException ioe) {
+          // a failure here causes an atomicity violation that we currently 
+          // cannot recover from since it is likely a failed hdfs operation.
+
+          // TODO Need a better story for reverting partial failures due to HDFS.
+          LOG.error("There was a partial failure due to IO when attempting to" +
+              " load " + Bytes.toString(p.getFirst()) + " : "+ p.getSecond());
+          throw ioe;
+        }
+      }
+      return true;
+    } finally {
+      closeBulkRegionOperation();
+    }
+  }
 
   @Override
   public boolean equals(Object o) {
@@ -2321,9 +2448,6 @@ public class HRegion implements HeapSize { // , Writable{
   class RegionScanner implements InternalScanner {
     // Package local for testability
     KeyValueHeap storeHeap = null;
-    KeyValueHeap joinedHeap = null;
-    // state flag which used when joined heap data gather interrupted due scan limits
-    private boolean joinedHeapHasData = false;
     private final byte [] stopRow;
     private Filter filter;
     private List<KeyValue> results = new ArrayList<KeyValue>();
@@ -2350,11 +2474,7 @@ public class HRegion implements HeapSize { // , Writable{
 
       this.readPt = ReadWriteConsistencyControl.resetThreadReadPoint(rwcc);
 
-      // Here we separate all scanners into two lists - first is scanners,
-      // providing data required by the filter to operate (scanners list) and
-      // all others (joinedScanners list).
       List<KeyValueScanner> scanners = new ArrayList<KeyValueScanner>();
-      List<KeyValueScanner> joinedScanners = new ArrayList<KeyValueScanner>();
       if (additionalScanners != null) {
         scanners.addAll(additionalScanners);
       }
@@ -2362,18 +2482,9 @@ public class HRegion implements HeapSize { // , Writable{
       for (Map.Entry<byte[], NavigableSet<byte[]>> entry :
           scan.getFamilyMap().entrySet()) {
         Store store = stores.get(entry.getKey());
-        KeyValueScanner scanner = store.getScanner(scan, entry.getValue());
-        if (this.filter == null || this.filter.isFamilyEssential(entry.getKey())) {
-          scanners.add(scanner);
-        }
-        else {
-          joinedScanners.add(scanner);
-        }
+        scanners.add(store.getScanner(scan, entry.getValue()));
       }
       this.storeHeap = new KeyValueHeap(scanners, comparator);
-      if (!joinedScanners.isEmpty()) {
-        this.joinedHeap = new KeyValueHeap(joinedScanners, comparator);
-      }
     }
 
     RegionScanner(Scan scan) throws IOException {
@@ -2431,28 +2542,6 @@ public class HRegion implements HeapSize { // , Writable{
       return this.filter != null && this.filter.filterAllRemaining();
     }
 
-    /*
-     * Fetches records with this row into result list, until next row or limit (if not -1).
-     * Returns true if limit reached, false ovewise.
-     */
-    private boolean populateResult(KeyValueHeap heap, int limit, byte[] currentRow) throws IOException {
-      KeyValue nextKV = heap.peek();
-
-      if (!Bytes.equals(currentRow, nextKV.getRow())) {
-        return false;
-      }
-
-      do {
-        heap.next(results, limit - results.size());
-        if (limit > 0 && results.size() == limit) {
-          return true;
-        }
-        nextKV = heap.peek();
-      } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
-
-      return false;
-    }
-
     private boolean nextInternal(int limit) throws IOException {
       while (true) {
         byte [] currentRow = peekRow();
@@ -2467,22 +2556,18 @@ public class HRegion implements HeapSize { // , Writable{
           return false;
         } else if (filterRowKey(currentRow)) {
           nextRow(currentRow);
-        } else if (joinedHeapHasData) {
-          joinedHeapHasData = populateResult(this.joinedHeap, limit, currentRow);
-          return true;
         } else {
-          if (populateResult(this.storeHeap, limit, currentRow)) {
-            if (this.filter != null && filter.hasFilterRow()) throw new IncompatibleFilterException(
-                "Filter with filterRow(List<KeyValue>) incompatible with scan with limit!");
-            return true; // we are expecting more yes, but also limited to how many we can return.
-          }
-
-          byte [] nextRow = peekRow();
+          byte [] nextRow;
+          do {
+            this.storeHeap.next(results, limit - results.size());
+            if (limit > 0 && results.size() == limit) {
+              if (this.filter != null && filter.hasFilterRow()) throw new IncompatibleFilterException(
+                  "Filter with filterRow(List<KeyValue>) incompatible with scan with limit!");
+              return true; // we are expecting more yes, but also limited to how many we can return.
+            }
+          } while (Bytes.equals(currentRow, nextRow = peekRow()));
 
           final boolean stopRow = isStopRow(nextRow);
-
-          // save that the row was empty before filters applied to it.
-          final boolean isEmptyRow = results.isEmpty();
 
           // now that we have an entire row, lets process with a filters:
 
@@ -2491,7 +2576,7 @@ public class HRegion implements HeapSize { // , Writable{
             filter.filterRow(results);
           }
 
-          if (isEmptyRow || filterRow()) {
+          if (results.isEmpty() || filterRow()) {
             // this seems like a redundant step - we already consumed the row
             // there're no left overs.
             // the reasons for calling this method are:
@@ -2503,39 +2588,6 @@ public class HRegion implements HeapSize { // , Writable{
             // we should continue on.
 
             if (!stopRow) continue;
-          }
-          else {
-            // Here we need to fetch additional, non-essential data into row. This
-            // values are not needed for filter to work, so we postpone their
-            // fetch to (possible) reduce amount of data loads from disk.
-            KeyValue nextKV;
-            if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
-              boolean correct_row = true;
-              // do seek only when it's needed
-              if (!Bytes.equals(currentRow, nextKV.getRow())) {
-                correct_row = this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow)) &&
-                  Bytes.equals(currentRow, this.joinedHeap.peek().getRow());
-              }
-              if (correct_row) {
-                this.joinedHeapHasData = populateResult(this.joinedHeap, limit, currentRow);
-                // As the data obtained from two independed heaps, we need to
-                // ensure that result list is sorted, because Result rely blindly
-                // on that.
-                Collections.sort(results, comparator);
-
-                // Result list population was interrupted by limits, we need to restart it on next() invocation.
-                if (this.joinedHeapHasData) {
-                  return true;
-                }
-              }
-            }
-
-            // Double check to prevent empty rows to appear in result. It could be
-            // the case when SingleValueExcludeFilter used.
-            if (results.isEmpty()) {
-              nextRow(currentRow);
-              if (!stopRow) continue;
-            }
           }
           return !stopRow;
         }
@@ -2553,19 +2605,14 @@ public class HRegion implements HeapSize { // , Writable{
 
     protected void nextRow(byte [] currentRow) throws IOException {
       while (Bytes.equals(currentRow, peekRow())) {
-        if (this.joinedHeapHasData) {
-          this.joinedHeap.next(MOCKED_LIST);
-        }
-        else {
-          this.storeHeap.next(MOCKED_LIST);
-        }
+        this.storeHeap.next(MOCKED_LIST);
       }
       results.clear();
       resetFilters();
     }
 
     private byte[] peekRow() {
-      KeyValue kv = this.joinedHeapHasData ? this.joinedHeap.peek() : this.storeHeap.peek();
+      KeyValue kv = this.storeHeap.peek();
       return kv == null ? null : kv.getRow();
     }
 
@@ -2581,10 +2628,6 @@ public class HRegion implements HeapSize { // , Writable{
       if (storeHeap != null) {
         storeHeap.close();
         storeHeap = null;
-      }
-      if (joinedHeap != null) {
-        joinedHeap.close();
-        joinedHeap = null;
       }
       this.filterClosed = true;
     }
@@ -3557,6 +3600,38 @@ public class HRegion implements HeapSize { // , Writable{
    */
   private void closeRegionOperation(){
     lock.readLock().unlock();
+  }
+
+  /**
+   * This method needs to be called before any public call that reads or
+   * modifies stores in bulk. It has to be called just before a try.
+   * #closeBulkRegionOperation needs to be called in the try's finally block
+   * Acquires a writelock and checks if the region is closing or closed.
+   * @throws NotServingRegionException when the region is closing or closed
+   */
+  private void startBulkRegionOperation(boolean writeLockNeeded)
+  throws NotServingRegionException {
+    if (this.closing.get()) {
+      throw new NotServingRegionException(regionInfo.getRegionNameAsString() +
+          " is closing");
+    }
+    if (writeLockNeeded) lock.writeLock().lock();
+    else lock.readLock().lock();
+    if (this.closed.get()) {
+      if (writeLockNeeded) lock.writeLock().unlock();
+      else lock.readLock().unlock();
+      throw new NotServingRegionException(regionInfo.getRegionNameAsString() +
+          " is closed");
+    }
+  }
+
+  /**
+   * Closes the lock. This needs to be called in the finally block corresponding
+   * to the try block of #startRegionOperation
+   */
+  private void closeBulkRegionOperation(){
+    if (lock.writeLock().isHeldByCurrentThread()) lock.writeLock().unlock();
+    else lock.readLock().unlock();
   }
 
   /**

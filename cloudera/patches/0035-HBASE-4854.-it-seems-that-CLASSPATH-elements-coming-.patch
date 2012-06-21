@@ -1,0 +1,28 @@
+From 26ecf1d907eaffb62db02f74a28015dcdfc4e7cd Mon Sep 17 00:00:00 2001
+From: Roman Shaposhnik <rvs@cloudera.com>
+Date: Wed, 23 Nov 2011 11:05:17 -0800
+Subject: [PATCH 035/101] HBASE-4854. it seems that CLASSPATH elements coming from Hadoop change HBase behaviour
+
+Reason: Bug
+Author: Roman Shaposhnik
+Ref: CDH-3811
+---
+ bin/hbase |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/bin/hbase b/bin/hbase
+index 04e0fcb..04d9f3f 100755
+--- a/bin/hbase
++++ b/bin/hbase
+@@ -204,7 +204,7 @@ if [ ! -z $HADOOP_HOME ]; then
+   for i in "${HADOOP_HOME}/lib/"*.jar; do
+     HADOOPCPPATH="${HADOOPCPPATH}:$i"
+   done
+-  CLASSPATH=$(append_path "${HADOOPCPPATH}" "${CLASSPATH}")
++  CLASSPATH=$(append_path "${CLASSPATH}" "${HADOOPCPPATH}")
+   
+   if [ -d "${HADOOP_HOME}/lib/native" ]; then
+     JAVA_PLATFORM=`CLASSPATH=${HADOOPCPPATH} ${JAVA} org.apache.hadoop.util.PlatformName | sed -e "s/ /_/g"`
+-- 
+1.7.0.4
+

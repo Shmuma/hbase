@@ -189,6 +189,8 @@ class SplitTransaction {
     return rid;
   }
 
+  private static IOException closedByOtherException = new IOException(
+      "Failed to close region: already closed by another thread");
   /**
    * Run the transaction.
    * @param server Hosting server instance.  Can be null when testing (won't try
@@ -218,17 +220,29 @@ class SplitTransaction {
     createSplitDir(this.parent.getFilesystem(), this.splitdir);
     this.journal.add(JournalEntry.CREATE_SPLIT_DIR);
 
-    List<StoreFile> hstoreFilesToSplit = this.parent.close(false);
-    if (hstoreFilesToSplit == null) {
-      // The region was closed by a concurrent thread.  We can't continue
-      // with the split, instead we must just abandon the split.  If we
+    List<StoreFile> hstoreFilesToSplit = null;
+    Exception exceptionToThrow = null;
+    try{
+      hstoreFilesToSplit = this.parent.close(false);
+    } catch (Exception e) {
+      exceptionToThrow = e;
+    }
+    if (exceptionToThrow == null && hstoreFilesToSplit == null) {
+      // The region was closed by a concurrent thread. We can't continue
+      // with the split, instead we must just abandon the split. If we
       // reopen or split this could cause problems because the region has
       // probably already been moved to a different server, or is in the
       // process of moving to a different server.
-      throw new IOException("Failed to close region: already closed by " +
-        "another thread");
+      exceptionToThrow = closedByOtherException;
     }
-    this.journal.add(JournalEntry.CLOSED_PARENT_REGION);
+    if (exceptionToThrow != closedByOtherException) {
+      this.journal.add(JournalEntry.CLOSED_PARENT_REGION);
+    }
+    if (exceptionToThrow != null) {
+      if (exceptionToThrow instanceof IOException)
+        throw (IOException) exceptionToThrow;
+      throw new IOException(exceptionToThrow);
+    }
 
     if (!testing) {
       services.removeFromOnlineRegions(this.parent.getRegionInfo().getEncodedName());
@@ -254,19 +268,29 @@ class SplitTransaction {
     this.journal.add(JournalEntry.STARTED_REGION_B_CREATION);
     HRegion b = createDaughterRegion(this.hri_b, this.parent.flushRequester);
 
+    // This is the point of no return.  Adding subsequent edits to .META. as we
+    // do below when we do the daughter opens adding each to .META. can fail in
+    // various interesting ways the most interesting of which is a timeout
+    // BUT the edits all go through (See HBASE-3872).  IF we reach the PONR
+    // then subsequent failures need to crash out this regionserver; the
+    // server shutdown processing should be able to fix-up the incomplete split.
+    // The offlined parent will have the daughters as extra columns.  If
+    // we leave the daughter regions in place and do not remove them when we
+    // crash out, then they will have their references to the parent in place
+    // still and the server shutdown fixup of .META. will point to these
+    // regions.
+    // We should add PONR JournalEntry before offlineParentInMeta,so even if
+    // OfflineParentInMeta timeout,this will cause regionserver exit,and then
+    // master ServerShutdownHandler will fix daughter & avoid data loss. See (
+    // HBASE-4562).
+    this.journal.add(JournalEntry.PONR);
+
     // Edit parent in meta.  Offlines parent region and adds splita and splitb.
     if (!testing) {
       MetaEditor.offlineParentInMeta(server.getCatalogTracker(),
         this.parent.getRegionInfo(), a.getRegionInfo(), b.getRegionInfo());
     }
 
-    // This is the point of no return.  Adding subsequent edits to .META. as we
-    // do below when we do the daugther opens adding each to .META. can fail in
-    // various interesting ways the most interesting of which is a timeout
-    // BUT the edits all go through (See HBASE-3872).  IF we reach the POWR
-    // then subsequent failures need to crash out this regionserver; the
-    // server shutdown processing should be able to fix-up the incomplete split.
-    this.journal.add(JournalEntry.PONR);
     // Open daughters in parallel.
     DaughterOpener aOpener = new DaughterOpener(server, services, a);
     DaughterOpener bOpener = new DaughterOpener(server, services, b);
@@ -397,7 +421,14 @@ class SplitTransaction {
    */
   private static void createSplitDir(final FileSystem fs, final Path splitdir)
   throws IOException {
-    if (fs.exists(splitdir)) throw new IOException("Splitdir already exits? " + splitdir);
+    if (fs.exists(splitdir)) {
+      LOG.info("The " + splitdir
+          + " directory exists.  Hence deleting it to recreate it");
+      if (!fs.delete(splitdir, true)) {
+        throw new IOException("Failed deletion of " + splitdir
+            + " before creating them again.");
+      }
+    }
     if (!fs.mkdirs(splitdir)) throw new IOException("Failed create of " + splitdir);
   }
 
@@ -457,6 +488,10 @@ class SplitTransaction {
           this.fileSplitTimeout, TimeUnit.MILLISECONDS);
       if (stillRunning) {
         threadPool.shutdownNow();
+        // wait for the thread to shutdown completely.
+        while (!threadPool.isTerminated()) {
+          Thread.sleep(50);
+        }
         throw new IOException("Took too long to split the" +
             " files and create the references, aborting split");
       }
@@ -607,7 +642,9 @@ class SplitTransaction {
 
       case PONR:
         // We got to the point-of-no-return so we need to just abort. Return
-        // immediately.
+        // immediately.  Do not clean up created daughter regions.  They need
+        // to be in place so we don't delete the parent region mistakenly.
+        // See HBASE-3872.
         return false;
 
       default:
