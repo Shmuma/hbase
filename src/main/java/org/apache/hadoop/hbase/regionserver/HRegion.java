@@ -2490,7 +2490,7 @@ public class HRegion implements HeapSize { // , Writable{
           scan.getFamilyMap().entrySet()) {
         Store store = stores.get(entry.getKey());
         KeyValueScanner scanner = store.getScanner(scan, entry.getValue());
-        if (this.filter == null || this.filter.isFamilyEssential(entry.getKey())) {
+        if (this.filter == null || this.filter.isFamilyEssential(entry.getKey()) || scan.getCaching() != 666) {
           scanners.add(scanner);
         }
         else {
