@@ -2458,6 +2458,8 @@ public class HRegion implements HeapSize { // , Writable{
     private int isScan;
     private boolean filterClosed = false;
     private long readPt;
+    private boolean debug = false;
+    private StringBuffer log = new StringBuffer();
 
     public HRegionInfo getRegionName() {
       return regionInfo;
@@ -2495,8 +2497,10 @@ public class HRegion implements HeapSize { // , Writable{
         }
         else {
           joinedScanners.add(scanner);
+          debug = true;
         }
       }
+      LOG.info("Debug mode = " + Boolean.toString(debug) + ", caching = " + Integer.toString(scan.getCaching()));
       this.storeHeap = new KeyValueHeap(scanners, comparator);
       if (!joinedScanners.isEmpty()) {
         this.joinedHeap = new KeyValueHeap(joinedScanners, comparator);
@@ -2516,6 +2520,12 @@ public class HRegion implements HeapSize { // , Writable{
       }
     }
 
+    private void doLog(String msg) {
+      if (debug && log != null && msg != null) {
+        log.append(msg + "\n");
+      }
+    }
+
     @Override
     public synchronized boolean next(List<KeyValue> outResults, int limit)
         throws IOException {
@@ -2531,8 +2541,20 @@ public class HRegion implements HeapSize { // , Writable{
         ReadWriteConsistencyControl.setThreadReadPoint(this.readPt);
 
         results.clear();
+//        LOG.info("Scan next() called, debug = " + Boolean.toString(debug));
+        // reset log
+        log = new StringBuffer();
+        doLog("next called, limit = " + Integer.toString(limit));
         boolean returnResult = nextInternal(limit);
-
+        doLog("next call returned " + Boolean.toString(returnResult) + " and filled " + Integer.toString(results.size()) + " vals\n");
+        if (debug) {
+          if (results.size() > 0) {
+            KeyValue log_kv = new KeyValue(results.get(0).getRow(), Bytes.toBytes("debug"), Bytes.toBytes("log"), Bytes.toBytes(log.toString()));
+//            LOG.info("Append log KV: " + log_kv.toString());
+            results.add(log_kv);
+            Collections.sort(results, comparator);
+          }
+        }
         outResults.addAll(results);
         resetFilters();
         if (isFilterDone()) {
@@ -2564,17 +2586,28 @@ public class HRegion implements HeapSize { // , Writable{
      */
     private boolean populateResult(KeyValueHeap heap, int limit, byte[] currentRow) throws IOException {
       KeyValue nextKV = heap.peek();
-
+      doLog("populateResult: " + ((heap == heap) ? "mainHeap" : "joinedHeap") + ", tip: " +
+              (nextKV == null ? "null" : nextKV.toString()));
       if (!Bytes.equals(currentRow, nextKV.getRow())) {
+        doLog("next row reached");
         return false;
       }
 
       do {
+        int old_len = results.size();
         heap.next(results, limit - results.size());
+        if (debug) {
+          if (old_len < results.size()) {
+            for (int i = old_len; i < results.size(); i++) {
+              doLog("got " + Integer.toString(i) + ": " + results.get(i));
+            }
+          }
+        }
         if (limit > 0 && results.size() == limit) {
           return true;
         }
         nextKV = heap.peek();
+        doLog("tip: " + (nextKV == null ? "null" : nextKV.toString()));
       } while (nextKV != null && Bytes.equals(currentRow, nextKV.getRow()));
 
       return false;
@@ -2640,7 +2673,7 @@ public class HRegion implements HeapSize { // , Writable{
               boolean correct_row = true;
               // do seek only when it's needed
               if (!Bytes.equals(currentRow, nextKV.getRow())) {
-                correct_row = this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow)) &&
+                correct_row = this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow)) &&
                   Bytes.equals(currentRow, this.joinedHeap.peek().getRow());
               }
               if (correct_row) {
