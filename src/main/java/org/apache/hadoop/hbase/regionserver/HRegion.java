@@ -2576,10 +2576,12 @@ public class HRegion implements HeapSize { // , Writable{
           if (results.size() > 0) {
             KeyValue log_kv = new KeyValue(results.get(0).getRow(), Bytes.toBytes("debug"),
                     Bytes.toBytes("log"), Bytes.toBytes(res_log));
-            KeyValue prev_log_kv = new KeyValue(results.get(0).getRow(), Bytes.toBytes("debug"),
-                    Bytes.toBytes("prev_log"), Bytes.toBytes(prev_log));
+            if (prev_log != null) {
+              KeyValue prev_log_kv = new KeyValue(results.get(0).getRow(), Bytes.toBytes("debug"),
+                      Bytes.toBytes("prev_log"), Bytes.toBytes(prev_log));
+              results.add(prev_log_kv);
+            }
             results.add(log_kv);
-            results.add(prev_log_kv);
             Collections.sort(results, comparator);
           }
           prev_log = res_log;
@@ -2712,7 +2714,7 @@ public class HRegion implements HeapSize { // , Writable{
             if (this.joinedHeap != null) {
               nextKV = this.joinedHeap.peek();
               boolean correct_row = true;
-              doLog("joinedHeap tip: " + (nextKV == null) ? "null" : nextKV.toString());
+              doLog("joinedHeap tip: " + ((nextKV == null) ? "null" : nextKV.toString()));
               if (nextKV == null || !Bytes.equals(currentRow, nextKV.getRow())) {
                 doLog("seek to " + KeyValue.createFirstOnRow(currentRow).toString());
                 correct_row = this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow));
@@ -2723,7 +2725,7 @@ public class HRegion implements HeapSize { // , Writable{
                     doLog("Seek ok, tip: " + nextKV.toString());
                   }
                   else {
-                    doLog("Seek returned true, but tip is: " + (nextKV == null) ? "null" : nextKV.toString());
+                    doLog("Seek returned true, but tip is: " + ((nextKV == null) ? "null" : nextKV.toString()));
                   }
                 }
                 else {
