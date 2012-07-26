@@ -92,7 +92,7 @@ public class MemStore implements HeapSize {
   
   MemStoreLAB allocator;
 
-
+  public StringBuffer log = null;
 
   /**
    * Default constructor. Used for tests.
@@ -673,6 +673,12 @@ public class MemStore implements HeapSize {
       super();
     }
 
+    private void doLog(String msg) {
+      if (log != null && msg != null) {
+        log.append(msg + "\n");
+      }
+    }
+
     protected KeyValue getNext(Iterator<KeyValue> it) {
       long readPoint = ReadWriteConsistencyControl.getThreadReadPoint();
 
@@ -749,11 +755,27 @@ public class MemStore implements HeapSize {
        time. We expect that the new values will be skipped by the test on
        readpoint performed in the next() function.
        */
- 
+      doLog("memstore: reseek to " + key.toString());
+      if (!kvTail.isEmpty()) {
+        doLog("kvTail = " + kvTail.first().toString());
+      }
       kvTail = kvTail.tailSet(key);
+      if (!kvTail.isEmpty()) {
+        doLog("kvTail' = " + kvTail.first().toString());
+      }
+      if (!snapshotTail.isEmpty()) {
+        doLog("snapTail = " + snapshotTail.first().toString());
+      }
       snapshotTail = snapshotTail.tailSet(key);
+      if (!snapshotTail.isEmpty()) {
+        doLog("snapTail' = " + snapshotTail.first().toString());
+      }
 
-      return seekInSubLists(key);
+      boolean res = seekInSubLists(key);
+      if (res && theNext != null) {
+        doLog("theNext = " + theNext.toString());
+      }
+      return res;
     }
 
 

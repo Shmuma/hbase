@@ -2459,7 +2459,8 @@ public class HRegion implements HeapSize { // , Writable{
     private boolean filterClosed = false;
     private long readPt;
     private boolean debug = false;
-    private StringBuffer log = new StringBuffer();
+    private StringBuffer log = null;
+    private String prev_log = null;
 
     public HRegionInfo getRegionName() {
       return regionInfo;
@@ -2543,17 +2544,43 @@ public class HRegion implements HeapSize { // , Writable{
         results.clear();
 //        LOG.info("Scan next() called, debug = " + Boolean.toString(debug));
         // reset log
-        log = new StringBuffer();
+        if (debug) {
+          log = new StringBuffer();
+          // turn on logging on memstores
+          for (Store store : stores.values()) {
+            MemStore ms = store.getMemStore();
+            if (ms != null)
+              ms.log = new StringBuffer();
+          }
+        }
         doLog("next called, limit = " + Integer.toString(limit));
         boolean returnResult = nextInternal(limit);
         doLog("next call returned " + Boolean.toString(returnResult) + " and filled " + Integer.toString(results.size()) + " vals\n");
         if (debug) {
+          String res_log = "Empty";
+
+          if (log != null) {
+            res_log = log.toString();
+          }
+          for (Store store : stores.values()) {
+            MemStore ms = store.getMemStore();
+            if (ms != null) {
+              res_log += "Store: " + store.toString() + "\n";
+              res_log += ms.log.toString() + "\n";
+              ms.log = null;
+            }
+          }
+
           if (results.size() > 0) {
-            KeyValue log_kv = new KeyValue(results.get(0).getRow(), Bytes.toBytes("debug"), Bytes.toBytes("log"), Bytes.toBytes(log.toString()));
-//            LOG.info("Append log KV: " + log_kv.toString());
+            KeyValue log_kv = new KeyValue(results.get(0).getRow(), Bytes.toBytes("debug"),
+                    Bytes.toBytes("log"), Bytes.toBytes(res_log));
+            KeyValue prev_log_kv = new KeyValue(results.get(0).getRow(), Bytes.toBytes("debug"),
+                    Bytes.toBytes("prev_log"), Bytes.toBytes(prev_log));
             results.add(log_kv);
+            results.add(prev_log_kv);
             Collections.sort(results, comparator);
           }
+          prev_log = res_log;
         }
         outResults.addAll(results);
         resetFilters();
@@ -2586,7 +2613,7 @@ public class HRegion implements HeapSize { // , Writable{
      */
     private boolean populateResult(KeyValueHeap heap, int limit, byte[] currentRow) throws IOException {
       KeyValue nextKV = heap.peek();
-      doLog("populateResult: " + ((heap == heap) ? "mainHeap" : "joinedHeap") + ", tip: " +
+      doLog("populateResult: " + ((heap == this.joinedHeap) ? "joinedHeap" : "mainHeap") + ", tip: " +
               (nextKV == null ? "null" : nextKV.toString()));
       if (!Bytes.equals(currentRow, nextKV.getRow())) {
         doLog("next row reached");
@@ -2649,9 +2676,20 @@ public class HRegion implements HeapSize { // , Writable{
           // first filter with the filterRow(List)
           if (filter != null && filter.hasFilterRow()) {
             filter.filterRow(results);
+            doLog("filterRaw called");
+          }
+          boolean rowFiltered = false;
+
+          if (!isEmptyRow)
+            rowFiltered = filterRow();
+          if (!isEmptyRow) {
+            doLog("Results had data and we get flags: isEmptyRow = " + Boolean.toString(isEmptyRow) +
+                    "stopRow = " + Boolean.toString(stopRow) +
+                    "rowFiltered = " + Boolean.toString(rowFiltered));
+            doLog("Current result size is = " + Integer.toString(results.size()));
           }
 
-          if (isEmptyRow || filterRow()) {
+          if (isEmptyRow || rowFiltered) {
             // this seems like a redundant step - we already consumed the row
             // there're no left overs.
             // the reasons for calling this method are:
@@ -2668,13 +2706,18 @@ public class HRegion implements HeapSize { // , Writable{
             // Here we need to fetch additional, non-essential data into row. This
             // values are not needed for filter to work, so we postpone their
             // fetch to (possible) reduce amount of data loads from disk.
-            KeyValue nextKV;
+            KeyValue nextKV = null;
             if (this.joinedHeap != null && (nextKV = this.joinedHeap.peek()) != null) {
               boolean correct_row = true;
               // do seek only when it's needed
+              doLog("joinedHeap tip: " + nextKV.toString());
               if (!Bytes.equals(currentRow, nextKV.getRow())) {
+                doLog("seek to " + KeyValue.createFirstOnRow(currentRow).toString());
                 correct_row = this.joinedHeap.reseek(KeyValue.createFirstOnRow(currentRow)) &&
                   Bytes.equals(currentRow, this.joinedHeap.peek().getRow());
+                if (!Bytes.equals(currentRow, this.joinedHeap.peek().getRow())) {
+                  doLog("Seek failed, current tip: " + this.joinedHeap.peek().toString());
+                }
               }
               if (correct_row) {
                 this.joinedHeapHasData = populateResult(this.joinedHeap, limit, currentRow);
@@ -2688,6 +2731,9 @@ public class HRegion implements HeapSize { // , Writable{
                   return true;
                 }
               }
+            }
+            else {
+              doLog("joinedHeap is null or closed");
             }
 
             // Double check to prevent empty rows to appear in result. It could be
