@@ -133,6 +133,12 @@ public class Store implements HeapSize {
   // Comparing KeyValues
   final KeyValue.KVComparator comparator;
 
+
+  MemStore getMemStore()
+  {
+    return memstore;
+  }
+
   /**
    * Constructor
    * @param basedir qualified path under which the region directory lives;
