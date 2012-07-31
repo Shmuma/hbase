@@ -209,13 +209,8 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
   }
 
   public synchronized boolean seek(KeyValue key) throws IOException {
-    if (this.heap == null) {
-
-      List<KeyValueScanner> scanners = getScanners();
-
-      heap = new KeyValueHeap(scanners, store.comparator);
-    }
-
+    // reset matcher state, in case that underlying store changed
+    checkReseek();
     return this.heap.seek(key);
   }
 
@@ -389,8 +384,8 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
 
   @Override
   public synchronized boolean reseek(KeyValue kv) throws IOException {
-    //Heap cannot be null, because this is only called from next() which
-    //guarantees that heap will never be null before this call.
+    // reset matcher state, in case that underlying store changed
+    checkReseek();
     return this.heap.reseek(kv);
   }
 
