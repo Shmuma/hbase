@@ -44,6 +44,28 @@ class StoreFileScanner implements KeyValueScanner {
   private final HFileScanner hfs;
   private KeyValue cur = null;
 
+  private StringBuffer log = null;
+
+  public StringBuffer getLog () {
+    return log;
+  }
+
+  public void setLog (StringBuffer log) {
+    this.log = log;
+  }
+
+  private void doLog(String msg) {
+    if (log != null && msg != null) {
+      log.append("sfs: " + msg + "\n");
+    }
+  }
+
+  private static void doLog(String msg, StringBuffer log) {
+    if (log != null && msg != null) {
+      log.append("sfs: " + msg + "\n");
+    }
+  }
+
   /**
    * Implements a {@link KeyValueScanner} on top of the specified {@link HFileScanner}
    * @param hfs HFile scanner
@@ -93,7 +115,11 @@ class StoreFileScanner implements KeyValueScanner {
 
   public boolean seek(KeyValue key) throws IOException {
     try {
-      if(!seekAtOrAfter(hfs, key)) {
+      doLog("seek to " + key.toString());
+      doLog("cur = " + ((cur == null) ? "null" : cur.toString()));
+      doLog("hfs = " + hfs.getReader().getName());
+      if(!seekAtOrAfter(hfs, key, log)) {
+        doLog("seekAtArAfter failed");
         close();
         return false;
       }
@@ -131,9 +157,10 @@ class StoreFileScanner implements KeyValueScanner {
    * @return
    * @throws IOException
    */
-  public static boolean seekAtOrAfter(HFileScanner s, KeyValue k)
+  public static boolean seekAtOrAfter(HFileScanner s, KeyValue k, StringBuffer log)
   throws IOException {
     int result = s.seekTo(k.getBuffer(), k.getKeyOffset(), k.getKeyLength());
+    doLog("HFS.seekTo returned " + Integer.toString(result), log);
     if(result < 0) {
       // Passed KV is smaller than first KV in file, work from start of file
       return s.seekTo();

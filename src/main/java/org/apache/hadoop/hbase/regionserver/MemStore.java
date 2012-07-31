@@ -92,8 +92,6 @@ public class MemStore implements HeapSize {
   
   MemStoreLAB allocator;
 
-  public StringBuffer log = null;
-
   /**
    * Default constructor. Used for tests.
    */
@@ -648,6 +646,22 @@ public class MemStore implements HeapSize {
     // the pre-calculated KeyValue to be returned by peek() or next()
     private KeyValue theNext;
 
+    private StringBuffer log = null;
+
+    public StringBuffer getLog () {
+      return log;
+    }
+
+    public void setLog (StringBuffer log) {
+      this.log = log;
+    }
+
+    private void doLog(String msg) {
+      if (log != null && msg != null) {
+        log.append("ms: " + msg + "\n");
+      }
+    }
+
     /*
     Some notes...
 
@@ -671,12 +685,6 @@ public class MemStore implements HeapSize {
 
     MemStoreScanner() {
       super();
-    }
-
-    private void doLog(String msg) {
-      if (log != null && msg != null) {
-        log.append(msg + "\n");
-      }
     }
 
     protected KeyValue getNext(Iterator<KeyValue> it) {
@@ -755,7 +763,7 @@ public class MemStore implements HeapSize {
        time. We expect that the new values will be skipped by the test on
        readpoint performed in the next() function.
        */
-      doLog("memstore: reseek to " + key.toString());
+      doLog("reseek to " + key.toString());
       if (!kvTail.isEmpty()) {
         doLog("kvTail = " + kvTail.first().toString());
       }

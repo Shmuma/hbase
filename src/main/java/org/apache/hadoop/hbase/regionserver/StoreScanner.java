@@ -50,6 +50,23 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
   // if heap == null and lastTop != null, you need to reseek given the key below
   private KeyValue lastTop = null;
 
+  private StringBuffer log = null;
+
+  public StringBuffer getLog () {
+    return log;
+  }
+
+  public void setLog (StringBuffer log) {
+    this.log = log;
+    heap.setLog(log);
+  }
+
+  private void doLog(String msg) {
+    if (log != null && msg != null) {
+      log.append("ss: " + msg + "\n");
+    }
+  }
+
   /**
    * Opens a scanner across memstore, snapshot, and all StoreFiles.
    *
@@ -209,13 +226,17 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
   }
 
   public synchronized boolean seek(KeyValue key) throws IOException {
-    if (this.heap == null) {
-
+/*    if (this.heap == null) {
+      doLog("this.heap is null!");
+      doLog("this.lastTop = " + this.lastTop.toString());
       List<KeyValueScanner> scanners = getScanners();
 
       heap = new KeyValueHeap(scanners, store.comparator);
     }
-
+    doLog("seek to " + key.toString());
+*/
+    checkReseek();
+    this.heap.setLog(log);
     return this.heap.seek(key);
   }
 

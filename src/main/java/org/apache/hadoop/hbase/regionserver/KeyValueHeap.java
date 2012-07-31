@@ -44,6 +44,24 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
   private PriorityQueue<KeyValueScanner> heap = null;
   private KeyValueScanner current = null;
   private KVScannerComparator comparator;
+  private StringBuffer log = null;
+
+  public StringBuffer getLog () {
+    return log;
+  }
+
+  public void setLog (StringBuffer log) {
+    this.log = log;
+    for (KeyValueScanner kvs : heap) {
+      kvs.setLog(log);
+    }
+  }
+
+  private void doLog(String msg) {
+    if (log != null && msg != null) {
+      log.append("kvh: " + msg + "\n");
+    }
+  }
 
   /**
    * Constructor.  This KeyValueHeap will handle closing of passed in
@@ -211,6 +229,7 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
    * @throws IOException
    */
   public boolean seek(KeyValue seekKey) throws IOException {
+    doLog("seek of " + this.toString());
     if (this.current == null) {
       return false;
     }
@@ -219,15 +238,21 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
 
     KeyValueScanner scanner;
     while((scanner = this.heap.poll()) != null) {
+      doLog("seek loop, top scanner " + scanner.toString());
       KeyValue topKey = scanner.peek();
+      doLog("it's top key " + topKey.toString());
       if(comparator.getComparator().compare(seekKey, topKey) <= 0) { // Correct?
         // Top KeyValue is at-or-after Seek KeyValue
         this.current = scanner;
         return true;
       }
+      doLog("do child->seek to " + seekKey.toString());
+      scanner.setLog(log);
       if(!scanner.seek(seekKey)) {
+        doLog("seek failed, close " + scanner.toString());
         scanner.close();
       } else {
+        doLog("seek succeeded, add back " + scanner.toString());
         this.heap.add(scanner);
       }
     }

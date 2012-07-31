@@ -27,6 +27,10 @@ import org.apache.hadoop.hbase.KeyValue;
  * Scanner that returns the next KeyValue.
  */
 public interface KeyValueScanner {
+
+  public void setLog (StringBuffer log);
+  public StringBuffer getLog ();
+
   /**
    * Look at the next KeyValue in this scanner, but do not iterate scanner.
    * @return the next KeyValue

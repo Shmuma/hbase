@@ -2548,12 +2548,6 @@ public class HRegion implements HeapSize { // , Writable{
         // reset log
         if (debug) {
           log = new StringBuffer();
-          // turn on logging on memstores
-          for (Store store : stores.values()) {
-            MemStore ms = store.getMemStore();
-            if (ms != null)
-              ms.log = new StringBuffer();
-          }
         }
         doLog("next called, limit = " + Integer.toString(limit));
         boolean returnResult = nextInternal(limit);
@@ -2563,14 +2557,6 @@ public class HRegion implements HeapSize { // , Writable{
 
           if (log != null) {
             res_log = log.toString();
-          }
-          for (Store store : stores.values()) {
-            MemStore ms = store.getMemStore();
-            if (ms != null) {
-              res_log += "Store: " + store.toString() + "\n";
-              res_log += ms.log.toString() + "\n";
-              ms.log = null;
-            }
           }
 
           if (results.size() > 0) {
@@ -2584,6 +2570,7 @@ public class HRegion implements HeapSize { // , Writable{
             results.add(log_kv);
             Collections.sort(results, comparator);
           }
+          // previous logs save
           prev_log = res_log;
         }
         outResults.addAll(results);
@@ -2712,12 +2699,16 @@ public class HRegion implements HeapSize { // , Writable{
             // fetch to (possible) reduce amount of data loads from disk.
             KeyValue nextKV;
             if (this.joinedHeap != null) {
+              KeyValue prev_tip;
               nextKV = this.joinedHeap.peek();
+              prev_tip = nextKV;
               boolean correct_row = true;
               doLog("joinedHeap tip: " + ((nextKV == null) ? "null" : nextKV.toString()));
               if (nextKV == null || !Bytes.equals(currentRow, nextKV.getRow())) {
                 doLog("seek to " + KeyValue.createFirstOnRow(currentRow).toString());
+                this.joinedHeap.setLog(log);
                 correct_row = this.joinedHeap.seek(KeyValue.createFirstOnRow(currentRow));
+                this.joinedHeap.setLog(null);
                 if (correct_row) {
                   nextKV = this.joinedHeap.peek();
                   correct_row = nextKV != null && Bytes.equals(currentRow, nextKV.getRow());
@@ -2729,7 +2720,25 @@ public class HRegion implements HeapSize { // , Writable{
                   }
                 }
                 else {
-                  doLog("Seek returned false");
+                  doLog("Seek returned false, trying to reset heap to " + ((prev_tip == null) ? "null" : prev_tip.toString()));
+                  boolean res = this.joinedHeap.seek(prev_tip);
+                  if (res) {
+                    KeyValue tip = this.joinedHeap.peek();
+                    doLog("Reset seek returned true, tip = " + ((tip == null) ? "null" : tip.toString()));
+                    doLog("Trying to find our row...");
+                    List<KeyValue> arr = new ArrayList<KeyValue>();
+                    do {
+                      arr.clear();
+                      this.joinedHeap.next(arr, -1);
+                      tip = this.joinedHeap.peek();
+                      doLog("Next fetched " + Integer.toString(arr.size()) + " kvs, tip = " + ((tip == null) ? "null" : tip.toString()));
+                    }
+                    while (tip != null && Bytes.compareTo(currentRow, tip.getRow()) > 0);
+                    correct_row = tip != null;
+                  }
+                  else {
+                    doLog("Reset seek returned false");
+                  }
                 }
               }
               if (correct_row) {
