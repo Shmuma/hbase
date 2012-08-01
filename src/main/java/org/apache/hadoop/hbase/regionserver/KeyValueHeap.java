@@ -247,7 +247,8 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
         return true;
       }
       doLog("do child->seek to " + seekKey.toString());
-      scanner.setLog(log);
+      if (scanner != null)
+        scanner.setLog(log);
       if(!scanner.seek(seekKey)) {
         doLog("seek failed, close " + scanner.toString());
         scanner.close();

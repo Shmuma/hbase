@@ -624,7 +624,9 @@ public class Store implements HeapSize {
    * @throws IOException
    */
   private void notifyChangedReadersObservers() throws IOException {
+    LOG.info("notify started");
     for (ChangedReadersObserver o: this.changedReaderObservers) {
+      LOG.info("reader = " + o.toString());
       o.updateReaders();
     }
   }
@@ -633,6 +635,7 @@ public class Store implements HeapSize {
    * @param o Observer who wants to know about changes in set of Readers
    */
   void addChangedReaderObserver(ChangedReadersObserver o) {
+    LOG.info("add reader = " + o.toString());
     this.changedReaderObservers.add(o);
   }
 
@@ -641,6 +644,7 @@ public class Store implements HeapSize {
    */
   void deleteChangedReaderObserver(ChangedReadersObserver o) {
     // We don't check if observer present; it may not be (legitimately)
+    LOG.info("del reader = " + o.toString());
     this.changedReaderObservers.remove(o);
   }
 

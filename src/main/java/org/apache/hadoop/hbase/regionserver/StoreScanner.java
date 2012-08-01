@@ -51,6 +51,7 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
   private KeyValue lastTop = null;
 
   private StringBuffer log = null;
+  private StringBuffer reset_log = new StringBuffer();
 
   public StringBuffer getLog () {
     return log;
@@ -58,12 +59,19 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
 
   public void setLog (StringBuffer log) {
     this.log = log;
-    heap.setLog(log);
+    if (heap != null)
+      heap.setLog(log);
   }
 
   private void doLog(String msg) {
     if (log != null && msg != null) {
       log.append("ss: " + msg + "\n");
+    }
+  }
+
+  private void doLogReset(String msg) {
+    if (msg != null) {
+      reset_log.append("reset: " + msg + "\n");
     }
   }
 
@@ -96,7 +104,7 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
 
     // Combine all seeked scanners with a heap
     heap = new KeyValueHeap(scanners, store.comparator);
-
+    LOG.warn("new store scanner for " + store.toString());
     this.store.addChangedReaderObserver(this);
   }
 
@@ -122,7 +130,7 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
     for(KeyValueScanner scanner : scanners) {
       scanner.seek(matcher.getStartKey());
     }
-
+    LOG.warn("new major compact store scanner for " + store.toString());
     // Combine all seeked scanners with a heap
     heap = new KeyValueHeap(scanners, store.comparator);
   }
@@ -144,6 +152,7 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
       scanner.seek(matcher.getStartKey());
     }
     heap = new KeyValueHeap(scanners, comparator);
+    LOG.warn("new testing store scanner for " + store.toString());
   }
 
   /*
@@ -236,6 +245,11 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
     doLog("seek to " + key.toString());
 */
     checkReseek();
+    doLog("seek to " + key.toString());
+    doLog("reset log for " + store.toString());
+    if (log != null)   {
+      log.append(reset_log);
+    }
     this.heap.setLog(log);
     return this.heap.seek(key);
   }
@@ -349,7 +363,10 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
 
   // Implementation of ChangedReadersObserver
   public synchronized void updateReaders() throws IOException {
+    LOG.warn("store scanner notified: " + store.toString());
     if (this.closing) return;
+
+    doLogReset("updateReaders called");
 
     // All public synchronized API calls will call 'checkReseek' which will cause
     // the scanner stack to reseek if this.heap==null && this.lastTop != null.
@@ -360,7 +377,7 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
 
     // this could be null.
     this.lastTop = this.peek();
-
+    doLogReset("lastTop = " + lastTop.toString());
     //DebugPrint.println("SS updateReaders, topKey = " + lastTop);
 
     // close scanners to old obsolete Store files
@@ -372,6 +389,7 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
 
   private void checkReseek() throws IOException {
     if (this.heap == null && this.lastTop != null) {
+      doLogReset("checkReseek conditions met, reset stack");
       resetScannerStack(this.lastTop);
       this.lastTop = null; // gone!
     }
@@ -410,8 +428,7 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
 
   @Override
   public synchronized boolean reseek(KeyValue kv) throws IOException {
-    //Heap cannot be null, because this is only called from next() which
-    //guarantees that heap will never be null before this call.
+    checkReseek();
     return this.heap.reseek(kv);
   }
 
