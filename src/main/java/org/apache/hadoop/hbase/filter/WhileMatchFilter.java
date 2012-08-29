@@ -99,4 +99,8 @@ public class WhileMatchFilter extends FilterBase {
       throw new RuntimeException("Failed deserialize.", e);
     }
   }
+
+  public boolean isFamilyEssential(byte[] name) {
+    return filter.isFamilyEssential(name);
+  }
 }

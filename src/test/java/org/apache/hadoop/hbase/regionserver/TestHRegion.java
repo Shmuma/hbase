@@ -61,6 +61,7 @@ import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
+import org.apache.hadoop.hbase.filter.SingleColumnValueExcludeFilter;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.HRegion.RegionScanner;
@@ -2350,6 +2351,141 @@ public class TestHRegion extends HBaseTestCase {
       assertEquals(expected.get(i), actual.get(i));
     }
   }
+
+  public void testScanner_JoinedScanners() throws IOException {
+    byte [] tableName = Bytes.toBytes("testTable");
+    byte [] cf_essential = Bytes.toBytes("essential");
+    byte [] cf_joined = Bytes.toBytes("joined");
+    byte [] cf_alpha = Bytes.toBytes("alpha");
+    initHRegion(tableName, getName(), cf_essential, cf_joined, cf_alpha);
+
+    byte [] row1 = Bytes.toBytes("row1");
+    byte [] row2 = Bytes.toBytes("row2");
+    byte [] row3 = Bytes.toBytes("row3");
+
+    byte [] col_normal = Bytes.toBytes("d");
+    byte [] col_alpha = Bytes.toBytes("a");
+
+    byte [] filtered_val = Bytes.toBytes(3);
+
+    Put put = new Put(row1);
+    put.add(cf_essential, col_normal, Bytes.toBytes(1));
+    put.add(cf_joined, col_alpha, Bytes.toBytes(1));
+    region.put(put);
+
+    put = new Put(row2);
+    put.add(cf_essential, col_alpha, Bytes.toBytes(2));
+    put.add(cf_joined, col_normal, Bytes.toBytes(2));
+    put.add(cf_alpha, col_alpha, Bytes.toBytes(2));
+    region.put(put);
+
+    put = new Put(row3);
+    put.add(cf_essential, col_normal, filtered_val);
+    put.add(cf_joined, col_normal, filtered_val);
+    region.put(put);
+
+    // Check two things:
+    // 1. result list contains expected values
+    // 2. result list is sorted properly
+
+    Scan scan = new Scan();
+    Filter filter = new SingleColumnValueExcludeFilter(cf_essential, col_normal,
+                                                       CompareOp.NOT_EQUAL, filtered_val);
+    scan.setFilter(filter);
+    InternalScanner s = region.getScanner(scan);
+
+    List<KeyValue> results = new ArrayList<KeyValue>();
+    assertTrue(s.next(results));
+    assertEquals(results.size(), 1);
+    results.clear();
+
+    assertTrue(s.next(results));
+    assertEquals(results.size(), 3);
+    assertTrue("orderCheck", results.get(0).matchingFamily(cf_alpha));
+    assertTrue("orderCheck", results.get(1).matchingFamily(cf_essential));
+    assertTrue("orderCheck", results.get(2).matchingFamily(cf_joined));
+    results.clear();
+
+    assertFalse(s.next(results));
+    assertEquals(results.size(), 0);
+  }
+
+
+  public void testScanner_JoinedScannersAndLimits() throws IOException {
+    byte [] tableName = Bytes.toBytes("testTable");
+    byte [] cf_first = Bytes.toBytes("first");
+    byte [] cf_second = Bytes.toBytes("second");
+
+    initHRegion(tableName, getName(), cf_first, cf_second);
+
+    byte [] col_a = Bytes.toBytes("a");
+    byte [] col_b = Bytes.toBytes("b");
+
+    Put put;
+
+    for (int i = 0; i < 10; i++) {
+      put = new Put(Bytes.toBytes("r" + Integer.toString(i)));
+      put.add(cf_first, col_a, Bytes.toBytes(i));
+      if (i < 5) {
+        put.add(cf_first, col_b, Bytes.toBytes(i));
+        put.add(cf_second, col_a, Bytes.toBytes(i));
+        put.add(cf_second, col_b, Bytes.toBytes(i));
+      }
+      region.put(put);
+    }
+
+    Scan scan = new Scan();
+    Filter filter = new SingleColumnValueFilter(cf_first, col_a, CompareOp.NOT_EQUAL, Bytes.toBytes("bogus"));
+    scan.setFilter(filter);
+    InternalScanner s = region.getScanner(scan);
+
+    // Our data looks like this:
+    // r0: first:a, first:b, second:a, second:b
+    // r1: first:a, first:b, second:a, second:b
+    // r2: first:a, first:b, second:a, second:b
+    // r3: first:a, first:b, second:a, second:b
+    // r4: first:a, first:b, second:a, second:b
+    // r5: first:a
+    // r6: first:a
+    // r7: first:a
+    // r8: first:a
+    // r9: first:a
+
+    // But due to next's limit set to 3, we should get this:
+    // r0: first:a, first:b, second:a
+    // r0: second:b
+    // r1: first:a, first:b, second:a
+    // r1: second:b
+    // r2: first:a, first:b, second:a
+    // r2: second:b
+    // r3: first:a, first:b, second:a
+    // r3: second:b
+    // r4: first:a, first:b, second:a
+    // r4: second:b
+    // r5: first:a
+    // r6: first:a
+    // r7: first:a
+    // r8: first:a
+    // r9: first:a
+
+    List<KeyValue> results = new ArrayList<KeyValue>();
+    int index = 0;
+    while (true) {
+      boolean more = s.next(results, 3);
+      if ((index >> 1) < 5) {
+        if (index % 2 == 0)
+          assertEquals(results.size(), 3);
+        else
+          assertEquals(results.size(), 1);
+      }
+      else
+        assertEquals(results.size(), 1);
+      results.clear();
+      index++;
+      if (!more) break;
+    }
+  }
+
 
   //////////////////////////////////////////////////////////////////////////////
   // Split test
