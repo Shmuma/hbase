@@ -2345,7 +2345,9 @@ public class HRegion implements HeapSize { // , Writable{
   public boolean bulkLoadHFiles(List<Pair<byte[], String>> familyPaths)
   throws IOException {
     // we need writeLock for multi-family bulk load
-    startBulkRegionOperation(hasMultipleColumnFamilies(familyPaths));
+    // startBulkRegionOperation(hasMultipleColumnFamilies(familyPaths));
+    // Durty Hack: writeLock lead to bulk loads hang on compact in progress
+    startBulkRegionOperation(false);
     try {
       // There possibly was a split that happend between when the split keys
       // were gathered and before the HReiogn's write lock was taken.  We need
