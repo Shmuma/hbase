@@ -276,9 +276,14 @@ public class SingleColumnValueFilter extends FilterBase {
 
   /**
    * The only thing this filter need to check row is given column family. So,
-   * it's the only essential column in whole scan.
+   * it's the only essential column in whole scan. If filterIfMissing==false,
+   * all families are essential, because of a possibility to skip valid rows
+   * without data in filtered CF.
    */
   public boolean isFamilyEssential(byte[] name) {
-    return Bytes.equals(name, this.columnFamily);
+    if (!this.filterIfMissing)
+      return true;
+    else
+      return Bytes.equals(name, this.columnFamily);
   }
 }
