@@ -576,18 +576,22 @@ public class HTable implements HTableInterface, Closeable {
   }
 
   public Result get(final Get get) throws IOException {
-    return connection.getRegionServerWithRetries(
+    Result res = connection.getRegionServerWithRetries(
         new ServerCallable<Result>(connection, tableName, get.getRow()) {
           public Result call() throws IOException {
             return server.get(location.getRegionInfo().getRegionName(), get);
           }
         }
     );
+    ClientMetrics.trackGets(1, res.size(), res.getWritableSize());
+    return res;
   }
 
    public Result[] get(List<Get> gets) throws IOException {
      try {
        Object [] r1 = batch((List)gets);
+       int kvs = 0;
+       long bytes = 0;
 
        // translate.
        Result [] results = new Result[r1.length];
@@ -595,7 +599,10 @@ public class HTable implements HTableInterface, Closeable {
        for (Object o : r1) {
          // batch ensures if there is a failure we get an exception instead
          results[i++] = (Result) o;
+         kvs += ((Result) o).size();
+         bytes += ((Result) o).getWritableSize();
        }
+       ClientMetrics.trackGets(r1.length, kvs, bytes);
 
        return results;
      } catch (InterruptedException e) {
@@ -647,6 +654,7 @@ public class HTable implements HTableInterface, Closeable {
   @Override
   public void delete(final Delete delete)
   throws IOException {
+    ClientMetrics.trackDeletes(1);
     connection.getRegionServerWithRetries(
         new ServerCallable<Boolean>(connection, tableName, delete.getRow()) {
           public Boolean call() throws IOException {
@@ -670,6 +678,7 @@ public class HTable implements HTableInterface, Closeable {
   @Override
   public void delete(final List<Delete> deletes)
   throws IOException {
+    ClientMetrics.trackDeletes(deletes.size());
     Object[] results = new Object[deletes.size()];
     try {
       connection.processBatch((List) deletes, tableName, pool, results);
@@ -700,6 +709,8 @@ public class HTable implements HTableInterface, Closeable {
 
   private void doPut(final List<Put> puts) throws IOException {
     int n = 0;
+    int kvs = 0;
+    long bytes = 0;
     for (Put put : puts) {
       validatePut(put);
       writeBuffer.add(put);
@@ -710,10 +721,13 @@ public class HTable implements HTableInterface, Closeable {
       if (n % DOPUT_WB_CHECK == 0 && currentWriteBufferSize > writeBufferSize) {
         flushCommits();
       }
+      bytes += put.byteSize();
+      kvs += put.size();
     }
     if (autoFlush || currentWriteBufferSize > writeBufferSize) {
       flushCommits();
     }
+    ClientMetrics.trackPuts (puts.size(), kvs, bytes);
   }
 
   @Override

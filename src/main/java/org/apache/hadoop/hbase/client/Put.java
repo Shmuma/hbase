@@ -392,6 +392,19 @@ public class Put implements HeapSize, Writable, Row, Comparable<Row> {
   }
 
   /**
+   * @return the total bytes of KeyValues that will be added with this put
+   */
+  public long byteSize() {
+    long size = 0;
+    for(List<KeyValue> kvList : this.familyMap.values()) {
+      for(KeyValue kv : kvList) {
+        size += kv.getLength();
+      }
+    }
+    return size;
+  }
+
+  /**
    * @return true if edits should be applied to WAL, false if not
    */
   public boolean getWriteToWAL() {

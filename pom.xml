@@ -279,6 +279,7 @@
         <directory>src/main/resources/</directory>
         <includes>
           <include>hbase-default.xml</include>
+          <include>**/*.properties</include>
         </includes>
       </resource>
       <resource>
