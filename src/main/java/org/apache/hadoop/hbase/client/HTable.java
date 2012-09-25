@@ -576,6 +576,7 @@ public class HTable implements HTableInterface, Closeable {
   }
 
   public Result get(final Get get) throws IOException {
+    long startTime = System.currentTimeMillis();
     Result res = connection.getRegionServerWithRetries(
         new ServerCallable<Result>(connection, tableName, get.getRow()) {
           public Result call() throws IOException {
@@ -583,11 +584,17 @@ public class HTable implements HTableInterface, Closeable {
           }
         }
     );
-    ClientMetrics.trackGets(1, res.size(), res.getWritableSize());
+    if (res != null && res.getBytes() != null) {
+      ClientMetrics.trackGets(1, res.size(), res.getBytes().getLength(), System.currentTimeMillis() - startTime);
+    }
+    else {
+      ClientMetrics.trackGets(1, 0, 0, System.currentTimeMillis() - startTime);
+    }
     return res;
   }
 
    public Result[] get(List<Get> gets) throws IOException {
+     long startTime = System.currentTimeMillis();
      try {
        Object [] r1 = batch((List)gets);
        int kvs = 0;
@@ -600,9 +607,11 @@ public class HTable implements HTableInterface, Closeable {
          // batch ensures if there is a failure we get an exception instead
          results[i++] = (Result) o;
          kvs += ((Result) o).size();
-         bytes += ((Result) o).getWritableSize();
+         if (o != null && ((Result) o).getBytes() != null) {
+           bytes += ((Result) o).getBytes().getLength();
+         }
        }
-       ClientMetrics.trackGets(r1.length, kvs, bytes);
+       ClientMetrics.trackGets(r1.length, kvs, bytes, System.currentTimeMillis() - startTime);
 
        return results;
      } catch (InterruptedException e) {
@@ -654,7 +663,7 @@ public class HTable implements HTableInterface, Closeable {
   @Override
   public void delete(final Delete delete)
   throws IOException {
-    ClientMetrics.trackDeletes(1);
+    long startTime = System.currentTimeMillis();
     connection.getRegionServerWithRetries(
         new ServerCallable<Boolean>(connection, tableName, delete.getRow()) {
           public Boolean call() throws IOException {
@@ -663,6 +672,7 @@ public class HTable implements HTableInterface, Closeable {
           }
         }
     );
+    ClientMetrics.trackDeletes(1, System.currentTimeMillis() - startTime);
   }
 
   /**
@@ -678,7 +688,8 @@ public class HTable implements HTableInterface, Closeable {
   @Override
   public void delete(final List<Delete> deletes)
   throws IOException {
-    ClientMetrics.trackDeletes(deletes.size());
+    long startTime = System.currentTimeMillis();
+    int count = deletes.size();
     Object[] results = new Object[deletes.size()];
     try {
       connection.processBatch((List) deletes, tableName, pool, results);
@@ -695,6 +706,7 @@ public class HTable implements HTableInterface, Closeable {
         }
       }
     }
+    ClientMetrics.trackDeletes(count, System.currentTimeMillis() - startTime);
   }
 
   @Override
@@ -710,7 +722,7 @@ public class HTable implements HTableInterface, Closeable {
   private void doPut(final List<Put> puts) throws IOException {
     int n = 0;
     int kvs = 0;
-    long bytes = 0;
+    long bytes = 0, startTime = System.currentTimeMillis();
     for (Put put : puts) {
       validatePut(put);
       writeBuffer.add(put);
@@ -727,7 +739,9 @@ public class HTable implements HTableInterface, Closeable {
     if (autoFlush || currentWriteBufferSize > writeBufferSize) {
       flushCommits();
     }
-    ClientMetrics.trackPuts (puts.size(), kvs, bytes);
+    if (puts != null) {
+      ClientMetrics.trackPuts (puts.size(), kvs, bytes, System.currentTimeMillis() - startTime);
+    }
   }
 
   @Override
@@ -1189,6 +1203,7 @@ public class HTable implements HTableInterface, Closeable {
         boolean skipFirst = false;
         do {
           try {
+            long startMS = System.currentTimeMillis();
             if (skipFirst) {
               // Skip only the first row (which was the last row of the last
               // already-processed batch).
@@ -1201,6 +1216,7 @@ public class HTable implements HTableInterface, Closeable {
             // returns an empty array if scanning is to go on and we've just
             // exhausted current region.
             values = getConnection().getRegionServerWithRetries(callable);
+            ClientMetrics.trackScanNext(System.currentTimeMillis() - startMS);
           } catch (DoNotRetryIOException e) {
             if (e instanceof UnknownScannerException) {
               long timeout = lastNext + scannerTimeout;

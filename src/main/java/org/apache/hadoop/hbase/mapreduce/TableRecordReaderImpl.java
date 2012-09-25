@@ -24,10 +24,7 @@ import java.io.IOException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
-import org.apache.hadoop.hbase.client.HTable;
-import org.apache.hadoop.hbase.client.Result;
-import org.apache.hadoop.hbase.client.ResultScanner;
-import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.*;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.util.StringUtils;
 
@@ -150,6 +147,7 @@ public class TableRecordReaderImpl {
       value = scanner.next();
     }
     if (value != null && value.size() > 0) {
+      ClientMetrics.trackScanRow(value.size(), value.getBytes().getLength());
       key.set(value.getRow());
       lastSuccessfulRow = key.get();
       return true;
