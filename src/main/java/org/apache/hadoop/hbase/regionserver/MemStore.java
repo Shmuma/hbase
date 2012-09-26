@@ -820,6 +820,16 @@ public class MemStore implements HeapSize {
     public long getSequenceID() {
       return Long.MAX_VALUE;
     }
+
+    @Override
+    public ScannerStatistics stats ()
+    {
+      return null;
+    }
+
+    @Override
+    public void resetStats ()
+    {}
   }
 
   public final static long FIXED_OVERHEAD = ClassSize.align(

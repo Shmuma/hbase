@@ -53,6 +53,7 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.io.HbaseMapWritable;
 import org.apache.hadoop.hbase.io.HeapSize;
+import org.apache.hadoop.hbase.regionserver.ScannerStatistics;
 import org.apache.hadoop.hbase.regionserver.TimeRangeTracker;
 import org.apache.hadoop.hbase.util.BloomFilter;
 import org.apache.hadoop.hbase.util.ByteBloomFilter;
@@ -734,6 +735,8 @@ public class HFile {
     // file Path plus metadata key/value pairs.
     protected String name;
 
+    private ScannerStatistics stats = new ScannerStatistics();
+
     /**
      * Opens a HFile.  You must load the file info before you can
      * use it by calling {@link #loadFileInfo()}.
@@ -803,8 +806,10 @@ public class HFile {
     private byte[] readAllIndex(final FSDataInputStream in, final long indexOffset,
         final int indexSize) throws IOException {
       byte[] allIndex = new byte[indexSize];
+      long now = System.currentTimeMillis();
       in.seek(indexOffset);
       IOUtils.readFully(in, allIndex, 0, allIndex.length);
+      stats.trackDiskBytes(allIndex.length, System.currentTimeMillis() - now);
       return allIndex;
     }
 
@@ -819,9 +824,12 @@ public class HFile {
       this.trailer = readTrailer();
 
       // Read in the fileinfo and get what we need from it.
+      long now = System.currentTimeMillis();
       this.istream.seek(this.trailer.fileinfoOffset);
       FileInfo fi = new FileInfo();
       fi.readFields(this.istream);
+      stats.trackDiskBytes(this.istream.getPos() - this.trailer.fileinfoOffset,
+              System.currentTimeMillis() - now);
       this.lastkey = fi.get(FileInfo.LASTKEY);
       this.avgKeyLen = Bytes.toInt(fi.get(FileInfo.AVG_KEY_LEN));
       this.avgValueLen = Bytes.toInt(fi.get(FileInfo.AVG_VALUE_LEN));
@@ -1036,6 +1044,7 @@ public class HFile {
         ByteBuffer buf = decompress(blockIndex.blockOffsets[block],
           longToInt(onDiskBlockSize), this.blockIndex.blockDataSizes[block],
           pread);
+        stats.trackDiskBytes(onDiskBlockSize, System.currentTimeMillis() - now);
 
         byte [] magic = new byte[DATABLOCKMAGIC.length];
         buf.get(magic, 0, magic.length);
@@ -1472,6 +1481,16 @@ public class HFile {
 
     public String getTrailerInfo() {
       return trailer.toString();
+    }
+
+    public ScannerStatistics stats ()
+    {
+      return stats;
+    }
+
+    public void resetStats ()
+    {
+      stats.reset();
     }
   }
 

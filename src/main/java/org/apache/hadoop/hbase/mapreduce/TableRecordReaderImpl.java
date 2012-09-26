@@ -147,7 +147,7 @@ public class TableRecordReaderImpl {
       value = scanner.next();
     }
     if (value != null && value.size() > 0) {
-      ClientMetrics.trackScanRow(value.size(), value.getBytes().getLength());
+      ClientMetrics.trackScanRow(value.size(), ClientMetrics.resultSize(value));
       key.set(value.getRow());
       lastSuccessfulRow = key.get();
       return true;

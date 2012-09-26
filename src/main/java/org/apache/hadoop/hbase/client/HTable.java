@@ -584,8 +584,9 @@ public class HTable implements HTableInterface, Closeable {
           }
         }
     );
-    if (res != null && res.getBytes() != null) {
-      ClientMetrics.trackGets(1, res.size(), res.getBytes().getLength(), System.currentTimeMillis() - startTime);
+
+    if (res != null) {
+      ClientMetrics.trackGets(1, res.size(), ClientMetrics.resultSize(res), System.currentTimeMillis() - startTime);
     }
     else {
       ClientMetrics.trackGets(1, 0, 0, System.currentTimeMillis() - startTime);
@@ -605,11 +606,10 @@ public class HTable implements HTableInterface, Closeable {
        int i=0;
        for (Object o : r1) {
          // batch ensures if there is a failure we get an exception instead
-         results[i++] = (Result) o;
-         kvs += ((Result) o).size();
-         if (o != null && ((Result) o).getBytes() != null) {
-           bytes += ((Result) o).getBytes().getLength();
-         }
+         Result res = (Result) o;
+         results[i++] = res;
+         kvs += res.size();
+         bytes += ClientMetrics.resultSize(res);
        }
        ClientMetrics.trackGets(r1.length, kvs, bytes, System.currentTimeMillis() - startTime);
 
@@ -1265,7 +1265,7 @@ public class HTable implements HTableInterface, Closeable {
       }
 
       if (cache.size() > 0) {
-        return cache.poll();
+        return ClientMetrics.filterResult(cache.poll());
       }
       return null;
     }

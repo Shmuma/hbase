@@ -108,4 +108,14 @@ public class KeyValueScanFixture implements KeyValueScanner {
   public long getSequenceID() {
     return 0;
   }
+
+  @Override
+  public ScannerStatistics stats ()
+  {
+    return null;
+  }
+
+  @Override
+  public void resetStats ()
+  {}
 }

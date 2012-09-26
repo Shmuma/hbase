@@ -1169,10 +1169,15 @@ public class HRegion implements HeapSize { // , Writable{
    */
   public InternalScanner getScanner(Scan scan)
   throws IOException {
-   return getScanner(scan, null);
+   return getScanner(scan, null, false);
   }
 
-  protected InternalScanner getScanner(Scan scan, List<KeyValueScanner> additionalScanners) throws IOException {
+  public InternalScanner getScannerWithStats(Scan scan)
+  throws IOException {
+    return getScanner(scan, null, true);
+  }
+
+  protected InternalScanner getScanner(Scan scan, List<KeyValueScanner> additionalScanners, boolean stats) throws IOException {
     startRegionOperation();
     try {
       // Verify families are all valid
@@ -1185,15 +1190,17 @@ public class HRegion implements HeapSize { // , Writable{
           scan.addFamily(family);
         }
       }
-      return instantiateInternalScanner(scan, additionalScanners);
+      return instantiateInternalScanner(scan, additionalScanners, stats);
 
     } finally {
       closeRegionOperation();
     }
   }
 
-  protected InternalScanner instantiateInternalScanner(Scan scan, List<KeyValueScanner> additionalScanners) throws IOException {
-    return new RegionScanner(scan, additionalScanners);
+  protected InternalScanner instantiateInternalScanner(Scan scan, List<KeyValueScanner> additionalScanners, boolean stats) throws IOException {
+    RegionScanner scanner = new RegionScanner(scan, additionalScanners);
+    scanner.setAppendStats(stats);
+    return scanner;
   }
 
   /*
@@ -2460,10 +2467,16 @@ public class HRegion implements HeapSize { // , Writable{
     private int isScan;
     private boolean filterClosed = false;
     private long readPt;
+    private boolean appendStats = false;
 
     public HRegionInfo getRegionName() {
       return regionInfo;
     }
+
+    public void setAppendStats (boolean val) {
+      this.appendStats = val;
+    }
+
     RegionScanner(Scan scan, List<KeyValueScanner> additionalScanners) throws IOException {
       //DebugPrint.println("HRegionScanner.<init>");
       this.filter = scan.getFilter();
@@ -2533,9 +2546,38 @@ public class HRegion implements HeapSize { // , Writable{
         ReadWriteConsistencyControl.setThreadReadPoint(this.readPt);
 
         results.clear();
+
+        // prepare scanner stats
+        if (this.appendStats) {
+          if (storeHeap != null)
+            storeHeap.resetStats();
+          if (joinedHeap != null)
+            joinedHeap.resetStats();
+        }
+
         boolean returnResult = nextInternal(limit);
 
         outResults.addAll(results);
+
+        // join stats from both scanners
+        if (this.appendStats) {
+          ScannerStatistics stats = new ScannerStatistics();
+
+          if (storeHeap != null)
+            stats.join(storeHeap.stats());
+          if (joinedHeap != null)
+            stats.join(joinedHeap.stats());
+
+          // append stats data into results and sort it
+          if (!outResults.isEmpty()) {
+            List<KeyValue> statKVs = stats.makeKeyValues (outResults.get(0).getRow());
+            if (statKVs != null && statKVs.size() > 0) {
+              outResults.addAll(statKVs);
+              Collections.sort(outResults, comparator);
+            }
+          }
+        }
+
         resetFilters();
         if (isFilterDone()) {
           return false;

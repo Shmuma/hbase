@@ -44,6 +44,7 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
   private PriorityQueue<KeyValueScanner> heap = null;
   private KeyValueScanner current = null;
   private KVScannerComparator comparator;
+  private ScannerStatistics doneStats = new ScannerStatistics();
 
   /**
    * Constructor.  This KeyValueHeap will handle closing of passed in
@@ -61,6 +62,7 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
         if (scanner.peek() != null) {
           this.heap.add(scanner);
         } else {
+          doneStats.join(scanner.stats());
           scanner.close();
         }
       }
@@ -82,6 +84,7 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
     KeyValue kvReturn = this.current.next();
     KeyValue kvNext = this.current.peek();
     if (kvNext == null) {
+      doneStats.join(this.current.stats());
       this.current.close();
       this.current = this.heap.poll();
     } else {
@@ -121,6 +124,7 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
      * the heap. This is also required for certain optimizations.
      */
     if (pee == null || !mayContainsMoreRows) {
+      doneStats.join(this.current.stats());
       this.current.close();
     } else {
       this.heap.add(this.current);
@@ -189,11 +193,13 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
 
   public void close() {
     if (this.current != null) {
+      doneStats.join(this.current.stats());
       this.current.close();
     }
     if (this.heap != null) {
       KeyValueScanner scanner;
       while ((scanner = this.heap.poll()) != null) {
+        doneStats.join(scanner.stats());
         scanner.close();
       }
     }
@@ -226,6 +232,7 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
         return true;
       }
       if(!scanner.seek(seekKey)) {
+        doneStats.join(scanner.stats());
         scanner.close();
       } else {
         this.heap.add(scanner);
@@ -253,6 +260,7 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
         return true;
       }
       if (!scanner.reseek(seekKey)) {
+        doneStats.join(scanner.stats());
         scanner.close();
       } else {
         this.heap.add(scanner);
@@ -272,5 +280,41 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
   @Override
   public long getSequenceID() {
     return 0;
+  }
+
+  @Override
+  public ScannerStatistics stats()
+  {
+    ScannerStatistics res = new ScannerStatistics();
+
+    res.join(doneStats);
+    if (current != null) {
+      res.join(current.stats());
+    }
+    if (this.heap != null) {
+      for (KeyValueScanner kvs : this.heap) {
+        if (kvs != null) {
+          ScannerStatistics s = kvs.stats();
+          res.join(s);
+        }
+      }
+    }
+
+    return res;
+  }
+
+  @Override
+  public void resetStats() {
+    doneStats.reset();
+    if (current != null) {
+      current.resetStats();
+    }
+    if (this.heap != null) {
+      for (KeyValueScanner kvs : this.heap) {
+        if (kvs != null) {
+          kvs.resetStats();
+        }
+      }
+    }
   }
 }

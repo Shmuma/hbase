@@ -168,4 +168,18 @@ class StoreFileScanner implements KeyValueScanner {
   public long getSequenceID() {
     return reader.getSequenceID();
   }
+
+  @Override
+  public ScannerStatistics stats ()
+  {
+    return (reader != null) ? reader.stats() : null;
+  }
+
+  @Override
+  public void resetStats ()
+  {
+    if (reader != null) {
+      reader.resetStats();
+    }
+  }
 }

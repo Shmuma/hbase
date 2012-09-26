@@ -393,4 +393,18 @@ class StoreScanner implements KeyValueScanner, InternalScanner, ChangedReadersOb
   public long getSequenceID() {
     return 0;
   }
+
+  @Override
+  public ScannerStatistics stats ()
+  {
+    return heap != null ? heap.stats() : null;
+  }
+
+  @Override
+  public void resetStats ()
+  {
+    if (heap != null) {
+      heap.resetStats();
+    }
+  }
 }

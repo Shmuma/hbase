@@ -1084,6 +1084,18 @@ public class StoreFile {
     public void setSequenceID(long sequenceID) {
       this.sequenceID = sequenceID;
     }
+
+    public ScannerStatistics stats ()
+    {
+      return reader != null ? reader.stats() : null;
+    }
+
+    public void resetStats ()
+    {
+      if (reader != null) {
+        reader.resetStats();
+      }
+    }
   }
 
   /**

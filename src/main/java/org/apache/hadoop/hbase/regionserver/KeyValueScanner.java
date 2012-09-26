@@ -68,4 +68,14 @@ public interface KeyValueScanner {
    * Close the KeyValue scanner.
    */
   public void close();
+
+  /**
+   * Get statistics data.
+   */
+  public ScannerStatistics stats ();
+
+  /**
+   * Reset statistics data.
+   */
+  public void resetStats ();
 }
