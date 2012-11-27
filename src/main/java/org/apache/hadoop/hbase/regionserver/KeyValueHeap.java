@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.util.Comparator;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.ConcurrentModificationException;
 
 /**
  * Implements a heap merge across any number of KeyValueScanners.
@@ -287,18 +288,22 @@ public class KeyValueHeap implements KeyValueScanner, InternalScanner {
   {
     ScannerStatistics res = new ScannerStatistics();
 
-    res.join(doneStats);
-    if (current != null) {
-      res.join(current.stats());
-    }
-    if (this.heap != null) {
-      for (KeyValueScanner kvs : this.heap) {
-        if (kvs != null) {
-          ScannerStatistics s = kvs.stats();
-          res.join(s);
+    try {
+      res.join(doneStats);
+      if (current != null) {
+        res.join(current.stats());
+      }
+      if (this.heap != null) {
+        for (KeyValueScanner kvs : this.heap) {
+          if (kvs != null) {
+            ScannerStatistics s = kvs.stats();
+            res.join(s);
+          }
         }
       }
     }
+    catch (ConcurrentModificationException e)
+    {}
 
     return res;
   }
