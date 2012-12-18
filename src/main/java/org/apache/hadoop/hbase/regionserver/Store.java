@@ -157,7 +157,7 @@ public class Store implements HeapSize {
     this.region = region;
     this.family = family;
     this.conf = conf;
-    this.blockcache = family.isBlockCacheEnabled();
+    this.blockcache = conf.getBoolean("store.cache.onlyMeta", false) ? region.getTableDesc().isMetaTable() : family.isBlockCacheEnabled();
     this.blocksize = family.getBlocksize();
     this.compression = family.getCompression();
     // avoid overriding compression setting for major compactions if the user
