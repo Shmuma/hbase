@@ -252,6 +252,8 @@ public class TestHFile extends HBaseTestCase {
     //assertTrue(Compression.Algorithm.LZO.ordinal() == 0);
     assertTrue(Compression.Algorithm.GZ.ordinal() == 1);
     assertTrue(Compression.Algorithm.NONE.ordinal() == 2);
+    assertTrue(Compression.Algorithm.SNAPPY.ordinal() == 3);
+    assertTrue(Compression.Algorithm.LZ4.ordinal() == 4);
   }
 
 
