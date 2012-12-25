@@ -433,6 +433,7 @@ public class HColumnDescriptor implements WritableComparable<HColumnDescriptor> 
       case LZO: compressionType = "LZO"; break;
       case GZ: compressionType = "GZ"; break;
       case SNAPPY: compressionType = "SNAPPY"; break;
+      case LZ4: compressionType = "LZ4"; break;
       default: compressionType = "NONE"; break;
     }
     setValue(COMPRESSION, compressionType);
@@ -458,6 +459,7 @@ public class HColumnDescriptor implements WritableComparable<HColumnDescriptor> 
       case LZO: compressionType = "LZO"; break;
       case GZ: compressionType = "GZ"; break;
       case SNAPPY: compressionType = "SNAPPY"; break;
+      case LZ4: compressionType = "LZ4"; break;
       default: compressionType = "NONE"; break;
     }
     setValue(COMPRESSION_COMPACT, compressionType);
