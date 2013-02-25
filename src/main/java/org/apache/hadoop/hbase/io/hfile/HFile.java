@@ -803,16 +803,6 @@ public class HFile {
       return this.inMemory;
     }
 
-    private byte[] readAllIndex(final FSDataInputStream in, final long indexOffset,
-        final int indexSize) throws IOException {
-      byte[] allIndex = new byte[indexSize];
-      long now = System.currentTimeMillis();
-      in.seek(indexOffset);
-      IOUtils.readFully(in, allIndex, 0, allIndex.length);
-      stats.trackDiskBytes(allIndex.length, System.currentTimeMillis() - now);
-      return allIndex;
-    }
-
     /**
      * Read in the index and file info.
      * @return A map of fileinfo data.
@@ -836,11 +826,10 @@ public class HFile {
       String clazzName = Bytes.toString(fi.get(FileInfo.COMPARATOR));
       this.comparator = getComparator(clazzName);
 
-      int allIndexSize = (int)(this.fileSize - this.trailer.dataIndexOffset - FixedFileTrailer.trailerSize());
-      byte[] dataAndMetaIndex = readAllIndex(this.istream, this.trailer.dataIndexOffset, allIndexSize);
-
-      ByteArrayInputStream bis = new ByteArrayInputStream(dataAndMetaIndex);
-      DataInputStream dis = new DataInputStream(bis);
+      this.istream.seek(this.trailer.dataIndexOffset);
+      // don't use more than 1GB of memory
+      int indexBufferSize = (int)Math.min(this.fileSize - this.trailer.dataIndexOffset - FixedFileTrailer.trailerSize(), Integer.MAX_VALUE >> 1);
+      DataInputStream dis = new DataInputStream(new BufferedInputStream(this.istream, indexBufferSize));
 
       // Read in the data index.
       this.blockIndex =
@@ -852,10 +841,6 @@ public class HFile {
             this.trailer.metaIndexCount);
       }
       this.fileInfoLoaded = true;
-
-      if (null != dis) {
-        dis.close();
-      }
 
       return fi;
     }
